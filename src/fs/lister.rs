@@ -164,8 +164,10 @@ mod tests {
         root
     }
 
-    fn sample_dir() -> PathBuf {
-        let dir = fixture("listing");
+    /// Each test passes its own name: tests run in parallel and must not
+    /// rewrite files another test is reading.
+    fn sample_dir(name: &str) -> PathBuf {
+        let dir = fixture(name);
         for d in ["beta_dir", "Alpha_dir", ".hidden_dir"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -181,7 +183,7 @@ mod tests {
 
     #[test]
     fn lists_folders_first_then_case_insensitive_names() {
-        let entries = read_entries(&sample_dir()).unwrap();
+        let entries = read_entries(&sample_dir("sorted")).unwrap();
         assert_eq!(
             names(&entries),
             [".hidden_dir", "Alpha_dir", "beta_dir", ".hidden.txt", "Apple.txt", "zeta.txt"]
@@ -190,7 +192,7 @@ mod tests {
 
     #[test]
     fn entries_carry_size_date_and_hidden_flag() {
-        let entries = read_entries(&sample_dir()).unwrap();
+        let entries = read_entries(&sample_dir("metadata")).unwrap();
         let zeta = entries.iter().find(|e| e.name == "zeta.txt").unwrap();
         assert_eq!(zeta.size, Some(5));
         assert!(zeta.modified.is_some());
@@ -203,13 +205,13 @@ mod tests {
 
     #[test]
     fn missing_path_is_not_found() {
-        let p = fixture("listing").join("does-not-exist");
+        let p = fixture("missing").join("does-not-exist");
         assert_eq!(read_entries(&p).unwrap_err(), ListError::NotFound(p));
     }
 
     #[test]
     fn file_path_is_not_a_directory() {
-        let p = sample_dir().join("zeta.txt");
+        let p = sample_dir("not-a-dir").join("zeta.txt");
         assert_eq!(read_entries(&p).unwrap_err(), ListError::NotADirectory(p));
     }
 
@@ -236,7 +238,7 @@ mod tests {
 
     #[test]
     fn background_request_delivers_latest_result_only() {
-        let dir = sample_dir();
+        let dir = sample_dir("background");
         let mut lister = Lister::new(false);
         let (done_tx, done_rx) = mpsc::channel();
         let t1 = done_tx.clone();

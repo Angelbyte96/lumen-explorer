@@ -6,7 +6,7 @@ pub mod lister;
 use std::path::{Path, PathBuf};
 
 pub use entry::Entry;
-pub use lister::{ListError, Lister, Listing};
+pub use lister::{Lister, Listing};
 
 /// Home directory from the environment (`HOME` on Unix, `USERPROFILE` on Windows).
 pub fn home_dir() -> Option<PathBuf> {
