@@ -81,10 +81,14 @@ pub fn show(
                 row.col(|ui| {
                     let icon = if entry.is_dir { "🗀" } else { "🗋" };
                     if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
-                        ui.label(icon);
-                        if let Some(submit) = rename_field(ui, edit) {
-                            event = Some(ListEvent::RenameEnded(submit));
-                        }
+                        // Cells stack top-down: keep the icon and the field on one line,
+                        // or the field lands below the row and gets clipped out of view.
+                        ui.horizontal(|ui| {
+                            ui.label(icon);
+                            if let Some(submit) = rename_field(ui, edit) {
+                                event = Some(ListEvent::RenameEnded(submit));
+                            }
+                        });
                         return;
                     }
                     let text = egui::RichText::new(format!("{icon} {}", entry.name));
@@ -177,5 +181,41 @@ mod tests {
         assert_eq!(stem_chars(".bashrc", false), 7);
         assert_eq!(stem_chars("Makefile", false), 8);
         assert_eq!(stem_chars("v1.2", true), 4, "folders have no extension");
+    }
+
+    fn entry(name: &str) -> Entry {
+        Entry {
+            name: name.into(),
+            path: PathBuf::from("/x").join(name),
+            is_dir: false,
+            size: Some(1),
+            modified: None,
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn rename_field_sits_inside_its_row() {
+        let ctx = egui::Context::default();
+        let entries = [entry("angel.jpg.jpg"), entry("other.txt")];
+        let mut edit = RenameEdit::new(entries[0].path.clone(), &entries[0].name, false);
+        let mut row_height = 0.0;
+        for _ in 0..2 {
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+                show(ui, &entries, &[0, 1], Some(0), None, Sort::default(), Some(&mut edit));
+            })
+            .drop_without_applying_deltas();
+        }
+        let field = ctx.read_response(rename_id()).expect("field drawn").rect;
+        // Header, then the first row: the field must be on that row, not below it
+        // (where the cell clips it away and typing seems to show nothing).
+        let spacing = ctx.global_style().spacing.item_spacing.y;
+        let first_row_bottom = 2.0 * row_height + spacing;
+        assert!(
+            field.center().y < first_row_bottom,
+            "field centre {} should be above {first_row_bottom}",
+            field.center().y
+        );
     }
 }
