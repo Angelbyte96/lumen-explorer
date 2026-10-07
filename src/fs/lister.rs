@@ -94,7 +94,7 @@ pub struct Lister {
     tx: Sender<Listing>,
     rx: Receiver<Listing>,
     latest_id: u64,
-    /// Print each listing time to stderr (enabled with `RUMBO_LOG=1`).
+    /// Print each listing time to stderr (enabled with `LUMEN_LOG=1`).
     log: bool,
 }
 
@@ -118,12 +118,12 @@ impl Lister {
             if log {
                 match &result {
                     Ok(e) => eprintln!(
-                        "[rumbo] listed {} entries in {:.3} ms: {}",
+                        "[lumen] listed {} entries in {:.3} ms: {}",
                         e.len(),
                         elapsed.as_secs_f64() * 1000.0,
                         path.display()
                     ),
-                    Err(err) => eprintln!("[rumbo] listing failed: {err}"),
+                    Err(err) => eprintln!("[lumen] listing failed: {err}"),
                 }
             }
             // The receiver only disappears when the app is closing; nothing to do then.

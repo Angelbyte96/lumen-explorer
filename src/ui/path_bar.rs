@@ -18,7 +18,7 @@ impl PathBar {
 
     /// Draws the bar. Returns the typed text when the user presses Enter.
     pub fn show(&mut self, ui: &mut egui::Ui, current: &Path) -> Option<String> {
-        let id = egui::Id::new("rumbo_path_bar");
+        let id = egui::Id::new("lumen_path_bar");
         let has_focus = ui.memory(|m| m.has_focus(id));
         if !has_focus && !self.focus_requested {
             // Not being edited: always mirror the folder actually shown.

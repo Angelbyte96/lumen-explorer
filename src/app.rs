@@ -102,7 +102,7 @@ impl View {
     }
 }
 
-pub struct RumboApp {
+pub struct LumenApp {
     view: View,
     lister: Lister,
     path_bar: PathBar,
@@ -121,7 +121,7 @@ fn apply_style(ctx: &egui::Context) {
     });
 }
 
-impl RumboApp {
+impl LumenApp {
     pub fn new(ctx: &egui::Context, start: PathBuf, log: bool) -> Self {
         apply_style(ctx);
         let mut app = Self {
@@ -171,7 +171,7 @@ impl RumboApp {
     }
 }
 
-impl eframe::App for RumboApp {
+impl eframe::App for LumenApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 

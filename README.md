@@ -1,4 +1,4 @@
-# Rumbo
+# Lumen
 
 A fast, lightweight, keyboard-first file explorer written in Rust with eframe/egui.
 
@@ -7,8 +7,8 @@ A fast, lightweight, keyboard-first file explorer written in Rust with eframe/eg
 ```sh
 cargo run                      # debug build, opens the current directory
 cargo run -- /usr/bin          # open a specific folder
-cargo build --release          # optimized, size-focused binary at target/release/rumbo
-RUMBO_LOG=1 cargo run          # print how long each folder listing takes
+cargo build --release          # optimized, size-focused binary at target/release/lumen
+LUMEN_LOG=1 cargo run          # print how long each folder listing takes
 cargo test                     # unit tests (fixtures live in ~/pruebas-explorador)
 ```
 
