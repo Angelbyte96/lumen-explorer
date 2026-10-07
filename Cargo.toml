@@ -2,19 +2,19 @@
 name = "rumbo"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.95"
 description = "A fast, lightweight, keyboard-first file explorer"
 license = "MIT"
 
 [dependencies]
 # glow (OpenGL) backend instead of the default wgpu: much smaller binary.
-eframe = { version = "0.35", default-features = false, features = [
+eframe = { version = "0.36", default-features = false, features = [
     "default_fonts",
     "glow",
     "wayland",
     "x11",
 ] }
-egui_extras = { version = "0.35", default-features = false }
+egui_extras = { version = "0.36", default-features = false }
 open = "5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
