@@ -296,6 +296,8 @@ pub struct LumenApp {
     history: History,
     dialog: Option<Dialog>,
     rename: Option<RenameEdit>,
+    /// Folder just created: rename it once a listing shows it selected.
+    rename_after_load: Option<PathBuf>,
     /// Error to show once the pending reload lands (a reload clears errors).
     error_after_load: Option<String>,
 }
@@ -322,6 +324,7 @@ impl LumenApp {
             history: History::default(),
             dialog: None,
             rename: None,
+            rename_after_load: None,
             error_after_load: None,
         };
         app.navigate(ctx, start, None);
@@ -395,6 +398,17 @@ impl LumenApp {
         self.rename = Some(RenameEdit::new(entry.path.clone(), &entry.name, entry.is_dir));
     }
 
+    fn new_folder(&mut self, ctx: &egui::Context) {
+        match fs::ops::create_folder(&self.view.current) {
+            Ok(path) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+                self.rename_after_load = Some(path);
+                self.reload(ctx, name);
+            }
+            Err(err) => self.view.error = Some(err),
+        }
+    }
+
     /// Applies a finished in-place edit. Invalid names keep the field open.
     fn finish_rename(&mut self, ctx: &egui::Context, mut edit: RenameEdit, replace: bool) {
         match fs::ops::rename(&edit.path, &edit.text, replace) {
@@ -444,6 +458,7 @@ impl LumenApp {
             Action::Forward => self.go_history(ctx, NavKind::Forward),
             Action::Trash => self.ask_trash(),
             Action::Rename => self.start_rename(),
+            Action::NewFolder => self.new_folder(ctx),
         }
     }
 }
@@ -467,6 +482,12 @@ impl eframe::App for LumenApp {
                 && !self.view.entries.iter().any(|e| e.path == edit.path)
             {
                 self.rename = None;
+            }
+            // A faster navigation may have superseded the reload: check the entry.
+            if let Some(created) = self.rename_after_load.take()
+                && self.view.selected_entry().is_some_and(|e| e.path == created)
+            {
+                self.start_rename();
             }
         }
 

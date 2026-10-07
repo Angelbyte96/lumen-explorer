@@ -64,6 +64,27 @@ pub fn rename(from: &Path, new_name: &str, replace: bool) -> Result<Renamed, Str
     Ok(Renamed::To(to))
 }
 
+/// Name given to a folder created with Ctrl+Shift+N before the user renames it.
+pub const NEW_FOLDER: &str = "New Folder";
+
+/// Creates "New Folder" inside `parent`, or "New Folder 2", "New Folder 3"...
+/// when the name is taken. Returns the created folder.
+pub fn create_folder(parent: &Path) -> Result<PathBuf, String> {
+    for n in 1.. {
+        let name = if n == 1 { NEW_FOLDER.to_owned() } else { format!("{NEW_FOLDER} {n}") };
+        let path = parent.join(name);
+        // `create_dir` fails on a taken name, so there is no check-then-create race.
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(format!("Cannot create a folder in {}: {e}", parent.display()));
+            }
+        }
+    }
+    unreachable!("the name counter is unbounded")
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -191,5 +212,25 @@ pub(crate) mod tests {
         let err = rename(&dir.join("ghost.txt"), "x.txt", false).unwrap_err();
         assert!(err.contains("ghost.txt"), "error names the item: {err}");
         assert!(!dir.join("x.txt").exists());
+    }
+
+    #[test]
+    fn new_folder_gets_a_free_numbered_name() {
+        let dir = fresh_fixture("new-folder");
+        assert_eq!(create_folder(&dir).unwrap(), dir.join("New Folder"));
+        assert_eq!(create_folder(&dir).unwrap(), dir.join("New Folder 2"));
+        // A file also takes the name.
+        std::fs::write(dir.join("New Folder 3"), "").unwrap();
+        assert_eq!(create_folder(&dir).unwrap(), dir.join("New Folder 4"));
+        assert!(dir.join("New Folder").is_dir() && dir.join("New Folder 4").is_dir());
+        assert!(dir.join("New Folder 3").is_file(), "existing file untouched");
+    }
+
+    #[test]
+    fn new_folder_in_a_missing_parent_is_an_error() {
+        let dir = fresh_fixture("new-folder-missing");
+        let err = create_folder(&dir.join("gone")).unwrap_err();
+        assert!(err.contains("gone"), "error names the folder: {err}");
+        assert!(!dir.join("gone").exists());
     }
 }

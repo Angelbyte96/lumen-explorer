@@ -22,6 +22,8 @@ pub enum Action {
     Trash,
     /// Edit the selected entry's name in place.
     Rename,
+    /// Create a folder here and start renaming it (Ctrl+Shift+N).
+    NewFolder,
 }
 
 /// Answer to an open confirmation dialog.
@@ -60,6 +62,9 @@ pub fn read_actions(ctx: &Context) -> Vec<Action> {
         }
         if typing {
             return actions;
+        }
+        if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::N) {
+            actions.push(Action::NewFolder);
         }
         if i.consume_key(Modifiers::COMMAND, Key::H) {
             actions.push(Action::ToggleHidden);
@@ -169,6 +174,16 @@ mod tests {
     #[test]
     fn f2_renames() {
         assert_eq!(actions_for(vec![key(Key::F2, Modifiers::NONE)]), [Action::Rename]);
+    }
+
+    #[test]
+    fn ctrl_shift_n_creates_a_folder_and_types_nothing() {
+        let events = vec![
+            Event::ModifiersChanged(Modifiers::COMMAND | Modifiers::SHIFT),
+            key(Key::N, Modifiers::COMMAND | Modifiers::SHIFT),
+            Event::Text("N".into()),
+        ];
+        assert_eq!(actions_for(events), [Action::NewFolder]);
     }
 
     fn confirm_for(events: Vec<Event>) -> Option<Confirm> {
