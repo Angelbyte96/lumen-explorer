@@ -46,7 +46,7 @@ fn same_entry(_: &Path, _: &Path) -> bool {
     false
 }
 
-fn exists(path: &Path) -> bool {
+pub(crate) fn exists(path: &Path) -> bool {
     // Does not follow symlinks: a broken link still occupies the name.
     std::fs::symlink_metadata(path).is_ok()
 }
