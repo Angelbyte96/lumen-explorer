@@ -20,8 +20,9 @@ const PAGE: isize = 20;
 
 /// Reads this frame's shortcuts. List navigation keys are ignored while a text
 /// field (the path bar) has keyboard focus, so typing never moves the selection.
+/// Only text fields count: a row focused with Tab must not swallow the arrows.
 pub fn read_actions(ctx: &Context) -> Vec<Action> {
-    let typing = ctx.egui_wants_keyboard_input();
+    let typing = ctx.text_edit_focused();
     ctx.input_mut(|i| {
         let mut actions = Vec::new();
         if i.consume_key(Modifiers::COMMAND, Key::L) {
@@ -43,10 +44,13 @@ pub fn read_actions(ctx: &Context) -> Vec<Action> {
             (Key::Enter, Action::Activate),
             (Key::Backspace, Action::GoParent),
         ];
-        for (key, action) in plain {
-            // Loop so key repeat (holding an arrow) moves once per repeat event.
-            while i.consume_key(Modifiers::NONE, key) {
-                actions.push(action);
+        // egui ignores extra Shift/Alt when matching, so Shift+Arrow would act
+        // like a plain arrow. Require no modifiers; those combos are reserved.
+        if i.modifiers.is_none() {
+            for (key, action) in plain {
+                // Counts key-repeat events too (holding an arrow).
+                let presses = i.count_and_consume_key(Modifiers::NONE, key);
+                actions.extend(std::iter::repeat_n(action, presses));
             }
         }
         actions

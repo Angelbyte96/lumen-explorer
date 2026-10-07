@@ -49,6 +49,7 @@ impl View {
         let keep = self.selected_entry().map(|e| e.name.clone());
         self.show_hidden = !self.show_hidden;
         self.rebuild_rows(keep.as_deref());
+        self.scroll_to_selected = true;
     }
 
     pub fn move_selection(&mut self, action: Action) {
@@ -282,6 +283,14 @@ mod tests {
         v.toggle_hidden();
         assert_eq!(row_names(&v), ["src", "a.txt", "b.txt"]);
         assert_eq!(v.selected_entry().unwrap().name, "a.txt");
+    }
+
+    #[test]
+    fn toggle_hidden_requests_scroll_to_kept_selection() {
+        let mut v = loaded_view();
+        v.scroll_to_selected = false;
+        v.toggle_hidden();
+        assert!(v.scroll_to_selected);
     }
 
     #[test]

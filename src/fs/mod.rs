@@ -31,11 +31,30 @@ pub fn resolve_input_path(input: &str, current: &Path, home: Option<&Path>) -> P
         }
         _ => PathBuf::from(input),
     };
-    if expanded.is_absolute() {
+    let absolute = if expanded.is_absolute() {
         expanded
     } else {
         current.join(expanded)
+    };
+    normalize(&absolute)
+}
+
+/// Lexically drops `.` and resolves `..` (like Dolphin, without following symlinks),
+/// so the shown path is clean and Backspace always goes one level up.
+fn normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            // `pop` on the root is a no-op, so `/..` stays `/`.
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
     }
+    out
 }
 
 #[cfg(test)]
@@ -67,6 +86,19 @@ mod tests {
         assert_eq!(resolve_input_path("bin", cur, None), Path::new("/usr/bin"));
         assert_eq!(resolve_input_path("/etc", cur, None), Path::new("/etc"));
         assert_eq!(resolve_input_path("  /etc  ", cur, None), Path::new("/etc"));
+    }
+
+    #[test]
+    fn dot_dot_is_normalized() {
+        assert_eq!(resolve_input_path("..", Path::new("/usr/bin"), None), Path::new("/usr"));
+        assert_eq!(
+            resolve_input_path("../lib", Path::new("/usr/bin"), None),
+            Path::new("/usr/lib")
+        );
+        assert_eq!(resolve_input_path("/usr/./bin/", Path::new("/"), None), Path::new("/usr/bin"));
+        assert_eq!(resolve_input_path("/..", Path::new("/"), None), Path::new("/"));
+        let home = Path::new("/home/u");
+        assert_eq!(resolve_input_path("~/..", Path::new("/tmp"), Some(home)), Path::new("/home"));
     }
 
     #[test]
