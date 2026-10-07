@@ -26,6 +26,26 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     }
 }
 
+/// On case-insensitive filesystems (vfat/exFAT USB drives) "a.txt" -> "A.txt"
+/// finds the source itself at the target; trashing it would remove what we rename.
+fn is_case_change_of_same_entry(from: &Path, to: &Path, old: &str, new: &str) -> bool {
+    old.to_lowercase() == new.to_lowercase() && same_entry(from, to)
+}
+
+#[cfg(unix)]
+fn same_entry(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_entry(_: &Path, _: &Path) -> bool {
+    false
+}
+
 fn exists(path: &Path) -> bool {
     // Does not follow symlinks: a broken link still occupies the name.
     std::fs::symlink_metadata(path).is_ok()
@@ -49,11 +69,13 @@ pub fn rename(from: &Path, new_name: &str, replace: bool) -> Result<Renamed, Str
     if !exists(from) {
         return Err(format!("No longer exists: {}", from.display()));
     }
-    if from.file_name().is_some_and(|old| old == new_name) {
+    // The list shows names lossily, so a non-UTF-8 name submitted as shown is unchanged.
+    let old = from.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    if old == new_name {
         return Ok(Renamed::Unchanged);
     }
     let to = from.with_file_name(new_name);
-    if exists(&to) {
+    if exists(&to) && !is_case_change_of_same_entry(from, &to, &old, new_name) {
         if !replace {
             return Ok(Renamed::TargetExists);
         }
@@ -232,5 +254,56 @@ pub(crate) mod tests {
         let err = create_folder(&dir.join("gone")).unwrap_err();
         assert!(err.contains("gone"), "error names the folder: {err}");
         assert!(!dir.join("gone").exists());
+    }
+
+    #[test]
+    fn trashing_a_symlink_keeps_its_target() {
+        let dir = fresh_fixture("trash-symlink");
+        std::fs::write(dir.join("real.txt"), "R").unwrap();
+        std::os::unix::fs::symlink(dir.join("real.txt"), dir.join("link")).unwrap();
+        trash(&dir.join("link")).unwrap();
+        assert!(std::fs::symlink_metadata(dir.join("link")).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("real.txt")).unwrap(), "R");
+        purge_trashed_from(&dir);
+    }
+
+    #[test]
+    fn replacing_a_folder_trashes_it_whole() {
+        let dir = fresh_fixture("rename-replace-dir");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/s"), "S").unwrap();
+        std::fs::create_dir_all(dir.join("dst")).unwrap();
+        std::fs::write(dir.join("dst/k"), "K").unwrap();
+        assert_eq!(rename(&dir.join("src"), "dst", false), Ok(Renamed::TargetExists));
+        rename(&dir.join("src"), "dst", true).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("dst/s")).unwrap(), "S");
+        assert!(!dir.join("dst/k").exists());
+        assert_eq!(trashed_names_from(&dir), ["dst"]);
+        purge_trashed_from(&dir);
+    }
+
+    #[test]
+    fn keeping_a_non_utf8_name_as_shown_is_a_no_op() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = fresh_fixture("rename-latin1");
+        let raw = dir.join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+        std::fs::write(&raw, "C").unwrap();
+        // The list shows the lossy name; F2 + Enter submits exactly that.
+        let shown = raw.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(rename(&raw, &shown, false), Ok(Renamed::Unchanged));
+        assert_eq!(std::fs::read_to_string(&raw).unwrap(), "C");
+        assert!(!dir.join(&shown).exists());
+    }
+
+    #[test]
+    fn a_hard_link_is_a_different_entry_and_is_replaced_via_trash() {
+        let dir = fresh_fixture("rename-hardlink");
+        std::fs::write(dir.join("a.txt"), "A").unwrap();
+        std::fs::hard_link(dir.join("a.txt"), dir.join("b.txt")).unwrap();
+        assert_eq!(rename(&dir.join("a.txt"), "b.txt", false), Ok(Renamed::TargetExists));
+        assert_eq!(rename(&dir.join("a.txt"), "b.txt", true), Ok(Renamed::To(dir.join("b.txt"))));
+        assert!(!dir.join("a.txt").exists(), "rename(2) between hard links would keep both");
+        assert_eq!(trashed_names_from(&dir), ["b.txt"]);
+        purge_trashed_from(&dir);
     }
 }

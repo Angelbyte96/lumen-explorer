@@ -419,9 +419,12 @@ impl LumenApp {
             Ok(Renamed::Unchanged) => {}
             Ok(Renamed::TargetExists) => self.dialog = Some(Dialog::Replace(edit)),
             Err(err) => {
-                self.view.error = Some(err);
+                // A replace may have trashed the target before failing: reload.
+                let keep = self.view.selected_entry().map(|e| e.name.clone());
+                self.error_after_load = Some(err);
                 edit.focus = true;
                 self.rename = Some(edit);
+                self.reload(ctx, keep);
             }
         }
     }
@@ -436,12 +439,13 @@ impl LumenApp {
             return;
         }
         match dialog {
-            Dialog::Trash { path, select, .. } => {
-                if let Err(err) = fs::ops::trash(&path) {
+            Dialog::Trash { path, name, select } => match fs::ops::trash(&path) {
+                Ok(()) => self.reload(ctx, select),
+                Err(err) => {
                     self.error_after_load = Some(err);
+                    self.reload(ctx, Some(name));
                 }
-                self.reload(ctx, select);
-            }
+            },
             Dialog::Replace(edit) => self.finish_rename(ctx, edit, true),
         }
     }
