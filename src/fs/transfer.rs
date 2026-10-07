@@ -240,14 +240,13 @@ impl<F: FnMut(&Progress)> Copier<'_, F> {
             self.file_done();
         } else if kind.is_dir() {
             std::fs::create_dir(to).map_err(fail)?;
-            // Sorted so a cancelled copy leaves a predictable prefix behind.
-            let mut names: Vec<_> =
-                std::fs::read_dir(from).map_err(fail)?.flatten().map(|i| i.file_name()).collect();
-            names.sort();
-            for name in names {
-                if self.copy(&from.join(&name), &to.join(&name))? == Outcome::Cancelled {
-                    return Ok(Outcome::Cancelled);
-                }
+            let outcome = self.copy_children(from, to);
+            if !matches!(outcome, Ok(Outcome::Done)) {
+                // A folder this copy created and left empty is not "already copied".
+                // `remove_dir` refuses a folder with anything inside, so finished
+                // files are never touched.
+                let _ = std::fs::remove_dir(to);
+                return outcome;
             }
             // Last, so a read-only folder still receives its contents.
             std::fs::set_permissions(to, meta.permissions()).map_err(fail)?;
@@ -259,6 +258,20 @@ impl<F: FnMut(&Progress)> Copier<'_, F> {
                 "Cannot copy {}: not a regular file, folder or link",
                 from.display()
             ));
+        }
+        Ok(Outcome::Done)
+    }
+
+    fn copy_children(&mut self, from: &Path, to: &Path) -> Result<Outcome, String> {
+        let fail = |e: std::io::Error| format!("Cannot copy {}: {e}", from.display());
+        // Sorted so a cancelled copy leaves a predictable prefix behind.
+        let mut names: Vec<_> =
+            std::fs::read_dir(from).map_err(fail)?.flatten().map(|i| i.file_name()).collect();
+        names.sort();
+        for name in names {
+            if self.copy(&from.join(&name), &to.join(&name))? == Outcome::Cancelled {
+                return Ok(Outcome::Cancelled);
+            }
         }
         Ok(Outcome::Done)
     }
@@ -555,6 +568,42 @@ mod tests {
         assert_eq!(read(&dir.join("dst/a_small")), "done");
         assert!(!dir.join("dst/b_big").exists(), "partial file removed");
         assert_eq!(std::fs::metadata(src.join("b_big")).unwrap().len(), 4 << 20);
+    }
+
+    #[test]
+    fn cancelling_a_folder_copy_leaves_no_empty_folders_behind() {
+        let dir = fresh_fixture("xfer-cancel-empty");
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub/big"), vec![1u8; 4 << 20]).unwrap();
+        let cancel = never();
+        let done = run(&src, &dir.join("dst"), Mode::Copy, false, &cancel, |p| {
+            if p.bytes_done > 1 << 20 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+        assert_eq!(done, Ok(Outcome::Cancelled));
+        assert!(!dir.join("dst").exists(), "nothing was finished, so nothing stays");
+    }
+
+    #[test]
+    fn cancelling_keeps_folders_that_hold_finished_files() {
+        let dir = fresh_fixture("xfer-cancel-keep");
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("a_sub")).unwrap();
+        std::fs::write(src.join("a_sub/done.txt"), "D").unwrap();
+        std::fs::create_dir_all(src.join("b_empty")).unwrap();
+        std::fs::write(src.join("c_big"), vec![1u8; 4 << 20]).unwrap();
+        let cancel = never();
+        let done = run(&src, &dir.join("dst"), Mode::Copy, false, &cancel, |p| {
+            if p.bytes_done > 1 << 20 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+        assert_eq!(done, Ok(Outcome::Cancelled));
+        assert_eq!(read(&dir.join("dst/a_sub/done.txt")), "D");
+        assert!(dir.join("dst/b_empty").is_dir(), "an empty source folder was finished too");
+        assert!(!dir.join("dst/c_big").exists());
     }
 
     #[test]

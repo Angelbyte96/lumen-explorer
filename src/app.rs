@@ -546,7 +546,10 @@ impl LumenApp {
         };
         match transfer::plan(&path, &self.view.current, mode) {
             Ok(Plan::Ready(target)) => self.start_job(ctx, path, target, mode, false),
-            Ok(Plan::Nothing) => {}
+            Ok(Plan::Nothing) => {
+                let name = file_name(&path).unwrap_or_default();
+                self.notice = Some(format!("“{name}” is already in this folder"));
+            }
             Ok(Plan::TargetExists(target)) => {
                 self.dialog = Some(Dialog::Paste { source: path, target, mode });
             }
@@ -814,6 +817,20 @@ mod tests {
     use crate::fs::lister::ListError;
     use std::path::Path;
     use std::time::Instant;
+
+    #[test]
+    fn cut_and_paste_into_the_same_folder_says_why_nothing_happened() {
+        let dir = crate::fs::ops::tests::fresh_fixture("app-paste-same");
+        std::fs::write(dir.join("a.txt"), "A").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = LumenApp::new(&ctx, dir.clone(), false);
+        app.clipboard = Some(Clip { path: dir.join("a.txt"), mode: Mode::Move });
+        app.paste(&ctx);
+        assert_eq!(app.notice.as_deref(), Some("“a.txt” is already in this folder"));
+        assert!(app.job.is_none());
+        assert!(app.clipboard.is_some(), "still cut, ready to paste elsewhere");
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "A");
+    }
 
     #[test]
     fn scroll_animation_is_subtle_in_both_themes() {
