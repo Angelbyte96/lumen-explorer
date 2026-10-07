@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use crate::fs::{self, Entry, Lister, Listing};
-use crate::input::{self, Action};
+use crate::input::{self, Action, Confirm};
 use crate::ui::{self, file_list::ListEvent, path_bar::PathBar, status_bar::Status};
 
 /// How the table should bring the selection into view on the next frame.
@@ -142,6 +142,14 @@ impl View {
             .map(|&idx| &self.entries[idx])
     }
 
+    /// Entry to select once the selected one is gone: the row below, or the
+    /// row above when it was the last one.
+    pub fn name_after_removal(&self) -> Option<String> {
+        let sel = self.selected?;
+        let row = if sel + 1 < self.rows.len() { sel + 1 } else { sel.checked_sub(1)? };
+        Some(self.entries[self.rows[row]].name.clone())
+    }
+
     pub fn hidden_count(&self) -> usize {
         self.entries.iter().filter(|e| e.hidden).count()
     }
@@ -248,6 +256,25 @@ fn came_from(current: &Path, target: &Path) -> Option<String> {
         .map(|n| n.to_string_lossy().into_owned())
 }
 
+/// A destructive operation waiting for the user's Enter or Escape.
+enum Dialog {
+    Trash { path: PathBuf, name: String, select: Option<String> },
+}
+
+impl Dialog {
+    fn message(&self) -> String {
+        match self {
+            Self::Trash { name, .. } => format!("Move “{name}” to the trash?"),
+        }
+    }
+
+    fn yes_label(&self) -> &'static str {
+        match self {
+            Self::Trash { .. } => "Move to Trash",
+        }
+    }
+}
+
 pub struct LumenApp {
     view: View,
     lister: Lister,
@@ -259,6 +286,9 @@ pub struct LumenApp {
     /// How the pending listing was started.
     pending_nav: NavKind,
     history: History,
+    dialog: Option<Dialog>,
+    /// Error to show once the pending reload lands (a reload clears errors).
+    error_after_load: Option<String>,
 }
 
 /// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
@@ -281,6 +311,8 @@ impl LumenApp {
             select_after_load: None,
             pending_nav: NavKind::New,
             history: History::default(),
+            dialog: None,
+            error_after_load: None,
         };
         app.navigate(ctx, start, None);
         app
@@ -334,6 +366,35 @@ impl LumenApp {
         }
     }
 
+    /// Lists the current folder again after an operation changed it.
+    fn reload(&mut self, ctx: &egui::Context, select: Option<String>) {
+        self.navigate(ctx, self.view.current.clone(), select);
+    }
+
+    fn ask_trash(&mut self) {
+        let Some(entry) = self.view.selected_entry() else { return };
+        self.dialog = Some(Dialog::Trash {
+            path: entry.path.clone(),
+            name: entry.name.clone(),
+            select: self.view.name_after_removal(),
+        });
+    }
+
+    fn answer_dialog(&mut self, ctx: &egui::Context, answer: Confirm) {
+        let Some(dialog) = self.dialog.take() else { return };
+        if answer == Confirm::No {
+            return;
+        }
+        match dialog {
+            Dialog::Trash { path, select, .. } => {
+                if let Err(err) = fs::ops::trash(&path) {
+                    self.error_after_load = Some(err);
+                }
+                self.reload(ctx, select);
+            }
+        }
+    }
+
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::FocusPathBar => self.path_bar.request_focus(),
@@ -344,6 +405,7 @@ impl LumenApp {
             Action::TypeChar(c) => self.view.type_char(c, Instant::now()),
             Action::Back => self.go_history(ctx, NavKind::Back),
             Action::Forward => self.go_history(ctx, NavKind::Forward),
+            Action::Trash => self.ask_trash(),
         }
     }
 }
@@ -359,10 +421,20 @@ impl eframe::App for LumenApp {
             let to = listing.result.is_ok().then(|| listing.path.clone());
             self.view.apply_listing(listing, select.as_deref());
             self.history.settle(self.pending_nav, &from, to.as_deref());
+            if let Some(err) = self.error_after_load.take() {
+                self.view.error = Some(err);
+            }
         }
 
-        for action in input::read_actions(&ctx) {
-            self.handle_action(&ctx, action);
+        // An open dialog takes the keyboard; the list must not react underneath.
+        if self.dialog.is_some() {
+            if let Some(answer) = input::read_confirm(&ctx) {
+                self.answer_dialog(&ctx, answer);
+            }
+        } else {
+            for action in input::read_actions(&ctx) {
+                self.handle_action(&ctx, action);
+            }
         }
 
         egui::Panel::top("path_bar").show(ui, |ui| {
@@ -409,6 +481,12 @@ impl eframe::App for LumenApp {
                 None => {}
             }
         });
+
+        if let Some(dialog) = &self.dialog
+            && let Some(answer) = ui::confirm::show(&ctx, &dialog.message(), dialog.yes_label())
+        {
+            self.answer_dialog(&ctx, answer);
+        }
     }
 }
 
@@ -771,6 +849,25 @@ mod tests {
         assert_eq!(came_from(Path::new("/usr/bin"), Path::new("/usr")).as_deref(), Some("bin"));
         assert_eq!(came_from(Path::new("/usr/bin"), Path::new("/home")), None);
         assert_eq!(came_from(Path::new("/usr"), Path::new("/usr/bin")), None);
+    }
+
+    #[test]
+    fn after_removal_the_row_below_is_selected() {
+        let mut v = loaded_view(); // src, a.txt, b.txt
+        v.selected = Some(1);
+        assert_eq!(v.name_after_removal().as_deref(), Some("b.txt"));
+        v.selected = Some(0);
+        assert_eq!(v.name_after_removal().as_deref(), Some("a.txt"));
+    }
+
+    #[test]
+    fn after_removing_the_last_row_the_row_above_is_selected() {
+        let mut v = loaded_view();
+        v.selected = Some(2);
+        assert_eq!(v.name_after_removal().as_deref(), Some("a.txt"));
+        let mut single = View::default();
+        single.apply_listing(ok_listing("/one", vec![entry("only", false)]), None);
+        assert_eq!(single.name_after_removal(), None);
     }
 
     #[test]

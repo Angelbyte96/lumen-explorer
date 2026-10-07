@@ -18,6 +18,29 @@ pub enum Action {
     Forward,
     /// A typed character for type-to-search.
     TypeChar(char),
+    /// Move the selected entry to the trash (asks first).
+    Trash,
+}
+
+/// Answer to an open confirmation dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confirm {
+    Yes,
+    No,
+}
+
+/// While a dialog is open only Enter and Escape matter; everything else is
+/// left alone so the list underneath does not react.
+pub fn read_confirm(ctx: &Context) -> Option<Confirm> {
+    ctx.input_mut(|i| {
+        if i.consume_key(Modifiers::NONE, Key::Enter) {
+            Some(Confirm::Yes)
+        } else if i.consume_key(Modifiers::NONE, Key::Escape) {
+            Some(Confirm::No)
+        } else {
+            None
+        }
+    })
 }
 
 /// Rows jumped by PageUp/PageDown.
@@ -54,6 +77,7 @@ pub fn read_actions(ctx: &Context) -> Vec<Action> {
             (Key::End, Action::Last),
             (Key::Enter, Action::Activate),
             (Key::Backspace, Action::GoParent),
+            (Key::Delete, Action::Trash),
         ];
         // egui ignores extra Shift/Alt when matching, so Shift+Arrow would act
         // like a plain arrow. Require no modifiers; those combos are reserved.
@@ -128,6 +152,32 @@ mod tests {
             key(Key::ArrowRight, Modifiers::NONE),
         ]);
         assert_eq!(actions, []);
+    }
+
+    #[test]
+    fn delete_asks_to_trash_but_not_with_modifiers() {
+        assert_eq!(actions_for(vec![key(Key::Delete, Modifiers::NONE)]), [Action::Trash]);
+        // Real input reports held modifiers both ways; Shift+Delete is reserved.
+        let shift_delete =
+            vec![Event::ModifiersChanged(Modifiers::SHIFT), key(Key::Delete, Modifiers::SHIFT)];
+        assert_eq!(actions_for(shift_delete), []);
+    }
+
+    fn confirm_for(events: Vec<Event>) -> Option<Confirm> {
+        let ctx = Context::default();
+        let mut answer = None;
+        ctx.run_ui(RawInput { events, ..RawInput::default() }, |ui| {
+            answer = read_confirm(ui.ctx());
+        })
+        .drop_without_applying_deltas();
+        answer
+    }
+
+    #[test]
+    fn enter_confirms_and_escape_cancels() {
+        assert_eq!(confirm_for(vec![key(Key::Enter, Modifiers::NONE)]), Some(Confirm::Yes));
+        assert_eq!(confirm_for(vec![key(Key::Escape, Modifiers::NONE)]), Some(Confirm::No));
+        assert_eq!(confirm_for(vec![key(Key::ArrowDown, Modifiers::NONE)]), None);
     }
 
     #[test]

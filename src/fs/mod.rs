@@ -2,6 +2,7 @@
 
 pub mod entry;
 pub mod lister;
+pub mod ops;
 
 use std::path::{Path, PathBuf};
 
