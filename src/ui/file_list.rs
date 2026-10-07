@@ -3,13 +3,14 @@
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
-use crate::app::Scroll;
+use crate::app::{Scroll, Sort, SortColumn};
 use crate::format::{format_size, format_time};
 use crate::fs::Entry;
 
 pub enum ListEvent {
     Select(usize),
     Activate(usize),
+    Sort(SortColumn),
 }
 
 /// `rows` holds indices into `entries` in display order; `selected` indexes `rows`.
@@ -19,6 +20,7 @@ pub fn show(
     rows: &[usize],
     selected: Option<usize>,
     scroll: Option<Scroll>,
+    sort: Sort,
 ) -> Option<ListEvent> {
     let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
     let mut event = None;
@@ -39,15 +41,17 @@ pub fn show(
 
     table
         .header(row_height, |mut header| {
-            header.col(|ui| {
-                ui.strong("Name");
-            });
-            header.col(|ui| {
-                ui.strong("Size");
-            });
-            header.col(|ui| {
-                ui.strong("Modified");
-            });
+            for (label, column) in [
+                ("Name", SortColumn::Name),
+                ("Size", SortColumn::Size),
+                ("Modified", SortColumn::Modified),
+            ] {
+                header.col(|ui| {
+                    if sort_header(ui, label, column, sort) {
+                        event = Some(ListEvent::Sort(column));
+                    }
+                });
+            }
         })
         .body(|body| {
             body.rows(row_height, rows.len(), |mut row| {
@@ -77,4 +81,15 @@ pub fn show(
             });
         });
     event
+}
+
+/// A header label that sorts on click; the active column shows its direction.
+fn sort_header(ui: &mut egui::Ui, label: &str, column: SortColumn, sort: Sort) -> bool {
+    let arrow = match (sort.column == column, sort.descending) {
+        (false, _) => "",
+        (true, false) => " ⬆",
+        (true, true) => " ⬇",
+    };
+    let text = egui::RichText::new(format!("{label}{arrow}")).strong();
+    ui.add(egui::Button::new(text).frame(false)).clicked()
 }

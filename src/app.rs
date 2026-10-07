@@ -1,5 +1,6 @@
 //! Application state and the per-frame UI loop.
 
+use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -19,6 +20,31 @@ pub enum Scroll {
     Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortColumn {
+    #[default]
+    Name,
+    Size,
+    Modified,
+}
+
+/// Column order of the list. Folders always stay above files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Sort {
+    pub column: SortColumn,
+    pub descending: bool,
+}
+
+impl Sort {
+    /// A header click: the same column flips direction, another starts ascending.
+    fn clicked(self, column: SortColumn) -> Self {
+        Self {
+            column,
+            descending: column == self.column && !self.descending,
+        }
+    }
+}
+
 /// What is on screen. Pure data, no egui or threads, so it is unit-testable.
 #[derive(Default)]
 pub struct View {
@@ -30,6 +56,8 @@ pub struct View {
     /// Index into `rows`.
     pub selected: Option<usize>,
     pub show_hidden: bool,
+    /// Kept across folders, like the hidden-files toggle.
+    pub sort: Sort,
     pub last_elapsed: Option<Duration>,
     pub error: Option<String>,
     /// Set when the selection changed via keyboard, so the table scrolls to it.
@@ -58,6 +86,13 @@ impl View {
     pub fn toggle_hidden(&mut self) {
         let keep = self.selected_entry().map(|e| e.name.clone());
         self.show_hidden = !self.show_hidden;
+        self.rebuild_rows(keep.as_deref());
+        self.scroll = Some(Scroll::Instant);
+    }
+
+    pub fn sort_by(&mut self, column: SortColumn) {
+        let keep = self.selected_entry().map(|e| e.name.clone());
+        self.sort = self.sort.clicked(column);
         self.rebuild_rows(keep.as_deref());
         self.scroll = Some(Scroll::Instant);
     }
@@ -92,6 +127,8 @@ impl View {
         self.rows = (0..self.entries.len())
             .filter(|&i| show_hidden || !self.entries[i].hidden)
             .collect();
+        let (entries, sort) = (&self.entries, self.sort);
+        self.rows.sort_by(|&a, &b| compare(entries, sort, a, b));
         self.selected = keep_name
             .and_then(|name| self.row_of_name(name))
             .or((!self.rows.is_empty()).then_some(0));
@@ -100,6 +137,24 @@ impl View {
     fn row_of_name(&self, name: &str) -> Option<usize> {
         self.rows.iter().position(|&i| self.entries[i].name == name)
     }
+}
+
+/// Orders two indices into `entries`. The lister already delivers entries
+/// folders-first and by case-insensitive name, so the index itself is the name
+/// order: it sorts the Name column and breaks ties without allocating.
+fn compare(entries: &[Entry], sort: Sort, a: usize, b: usize) -> Ordering {
+    let (ea, eb) = (&entries[a], &entries[b]);
+    let by_column = match sort.column {
+        SortColumn::Name => a.cmp(&b),
+        // `None` (folders, unreadable metadata) sorts before any value.
+        SortColumn::Size => ea.size.cmp(&eb.size),
+        SortColumn::Modified => ea.modified.cmp(&eb.modified),
+    };
+    let by_column = if sort.descending { by_column.reverse() } else { by_column };
+    eb.is_dir
+        .cmp(&ea.is_dir)
+        .then(by_column)
+        .then(a.cmp(&b))
 }
 
 pub struct LumenApp {
@@ -217,6 +272,7 @@ impl eframe::App for LumenApp {
                 &self.view.rows,
                 self.view.selected,
                 scroll,
+                self.view.sort,
             );
             match event {
                 Some(ListEvent::Select(i)) => self.view.selected = Some(i),
@@ -224,6 +280,7 @@ impl eframe::App for LumenApp {
                     self.view.selected = Some(i);
                     self.activate_selected(&ctx);
                 }
+                Some(ListEvent::Sort(column)) => self.view.sort_by(column),
                 None => {}
             }
         });
@@ -357,6 +414,102 @@ mod tests {
         v.move_selection(Action::Last);
         assert_eq!(v.selected, Some(2));
         assert_eq!(v.scroll, Some(Scroll::Smooth));
+    }
+
+    fn file(name: &str, size: Option<u64>, secs: Option<u64>) -> Entry {
+        Entry {
+            size,
+            modified: secs.map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s)),
+            ..entry(name, false)
+        }
+    }
+
+    /// Entries arrive sorted like the lister does: folders first, then by name.
+    fn sortable_view() -> View {
+        let mut v = View::default();
+        let mut dir_b = entry("b_dir", true);
+        dir_b.modified = Some(std::time::UNIX_EPOCH + Duration::from_secs(5));
+        let entries = vec![
+            entry("a_dir", true),
+            dir_b,
+            file("a.txt", Some(30), Some(1)),
+            file("b.txt", Some(10), Some(3)),
+            file("c.txt", None, None),
+            file("d.txt", Some(10), Some(2)),
+        ];
+        v.apply_listing(ok_listing("/s", entries), None);
+        v
+    }
+
+    #[test]
+    fn default_sort_is_name_ascending() {
+        let v = sortable_view();
+        assert_eq!(v.sort, Sort { column: SortColumn::Name, descending: false });
+        assert_eq!(row_names(&v), ["a_dir", "b_dir", "a.txt", "b.txt", "c.txt", "d.txt"]);
+    }
+
+    #[test]
+    fn clicking_name_again_reverses_but_folders_stay_on_top() {
+        let mut v = sortable_view();
+        v.sort_by(SortColumn::Name);
+        assert_eq!(v.sort, Sort { column: SortColumn::Name, descending: true });
+        assert_eq!(row_names(&v), ["b_dir", "a_dir", "d.txt", "c.txt", "b.txt", "a.txt"]);
+        v.sort_by(SortColumn::Name);
+        assert_eq!(row_names(&v), ["a_dir", "b_dir", "a.txt", "b.txt", "c.txt", "d.txt"]);
+    }
+
+    #[test]
+    fn size_sorts_ascending_then_descending_ties_by_name() {
+        let mut v = sortable_view();
+        v.sort_by(SortColumn::Size);
+        assert_eq!(v.sort, Sort { column: SortColumn::Size, descending: false });
+        // Unknown size first; equal sizes (b, d) keep name order.
+        assert_eq!(row_names(&v), ["a_dir", "b_dir", "c.txt", "b.txt", "d.txt", "a.txt"]);
+        v.sort_by(SortColumn::Size);
+        assert_eq!(row_names(&v), ["a_dir", "b_dir", "a.txt", "b.txt", "d.txt", "c.txt"]);
+    }
+
+    #[test]
+    fn modified_sorts_folders_among_themselves() {
+        let mut v = sortable_view();
+        v.sort_by(SortColumn::Modified);
+        assert_eq!(row_names(&v), ["a_dir", "b_dir", "c.txt", "a.txt", "d.txt", "b.txt"]);
+        v.sort_by(SortColumn::Modified);
+        assert_eq!(row_names(&v), ["b_dir", "a_dir", "b.txt", "d.txt", "a.txt", "c.txt"]);
+    }
+
+    #[test]
+    fn switching_column_starts_ascending() {
+        let mut v = sortable_view();
+        v.sort_by(SortColumn::Size);
+        v.sort_by(SortColumn::Size);
+        v.sort_by(SortColumn::Modified);
+        assert_eq!(v.sort, Sort { column: SortColumn::Modified, descending: false });
+    }
+
+    #[test]
+    fn sorting_keeps_selection_on_same_entry_and_scrolls_to_it() {
+        let mut v = sortable_view();
+        v.selected = Some(2); // a.txt
+        v.scroll = None;
+        v.sort_by(SortColumn::Size);
+        assert_eq!(v.selected_entry().unwrap().name, "a.txt");
+        assert_eq!(v.selected, Some(5));
+        assert_eq!(v.scroll, Some(Scroll::Instant));
+    }
+
+    #[test]
+    fn sort_survives_new_listing_and_hidden_toggle() {
+        let mut v = sortable_view();
+        v.sort_by(SortColumn::Size);
+        v.sort_by(SortColumn::Size);
+        v.apply_listing(
+            ok_listing("/t", vec![file("x", Some(1), None), file("y", Some(2), None)]),
+            None,
+        );
+        assert_eq!(row_names(&v), ["y", "x"]);
+        v.toggle_hidden();
+        assert_eq!(row_names(&v), ["y", "x"]);
     }
 
     #[test]
