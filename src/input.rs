@@ -13,6 +13,9 @@ pub enum Action {
     GoParent,
     FocusPathBar,
     ToggleHidden,
+    /// Previous / next folder in the history (Alt+Left / Alt+Right).
+    Back,
+    Forward,
     /// A typed character for type-to-search.
     TypeChar(char),
 }
@@ -35,6 +38,12 @@ pub fn read_actions(ctx: &Context) -> Vec<Action> {
         }
         if i.consume_key(Modifiers::COMMAND, Key::H) {
             actions.push(Action::ToggleHidden);
+        }
+        if i.consume_key(Modifiers::ALT, Key::ArrowLeft) {
+            actions.push(Action::Back);
+        }
+        if i.consume_key(Modifiers::ALT, Key::ArrowRight) {
+            actions.push(Action::Forward);
         }
         let plain = [
             (Key::ArrowDown, Action::Move(1)),
@@ -105,6 +114,20 @@ mod tests {
             ]);
             assert_eq!(actions, [], "modifiers: {held:?}");
         }
+    }
+
+    #[test]
+    fn alt_arrows_walk_history_and_plain_left_right_do_nothing() {
+        let actions = actions_for(vec![
+            key(Key::ArrowLeft, Modifiers::ALT),
+            key(Key::ArrowRight, Modifiers::ALT),
+        ]);
+        assert_eq!(actions, [Action::Back, Action::Forward]);
+        let actions = actions_for(vec![
+            key(Key::ArrowLeft, Modifiers::NONE),
+            key(Key::ArrowRight, Modifiers::NONE),
+        ]);
+        assert_eq!(actions, []);
     }
 
     #[test]

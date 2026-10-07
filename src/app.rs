@@ -1,7 +1,7 @@
 //! Application state and the per-frame UI loop.
 
 use std::cmp::Ordering;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -181,6 +181,73 @@ fn compare(entries: &[Entry], sort: Sort, a: usize, b: usize) -> Ordering {
         .then(a.cmp(&b))
 }
 
+/// How a navigation was started, so its result updates the history correctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavKind {
+    /// Enter, Backspace, path bar: a new step that clears the forward list.
+    New,
+    Back,
+    Forward,
+}
+
+/// Browser-style back/forward lists. Only successful listings are recorded.
+#[derive(Default)]
+pub struct History {
+    back: Vec<PathBuf>,
+    forward: Vec<PathBuf>,
+}
+
+impl History {
+    pub fn back_target(&self) -> Option<&PathBuf> {
+        self.back.last()
+    }
+
+    pub fn forward_target(&self) -> Option<&PathBuf> {
+        self.forward.last()
+    }
+
+    /// Updates the lists once a listing started by `kind` finishes. `to` is the
+    /// folder now shown, or `None` if the listing failed.
+    pub fn settle(&mut self, kind: NavKind, from: &Path, to: Option<&Path>) {
+        let Some(to) = to else {
+            // A folder that vanished would block Back/Forward forever: drop it.
+            match kind {
+                NavKind::New => {}
+                NavKind::Back => drop(self.back.pop()),
+                NavKind::Forward => drop(self.forward.pop()),
+            }
+            return;
+        };
+        if from == to {
+            return;
+        }
+        let from = from.to_path_buf();
+        match kind {
+            NavKind::New => {
+                self.back.push(from);
+                self.forward.clear();
+            }
+            NavKind::Back => {
+                self.back.pop();
+                self.forward.push(from);
+            }
+            NavKind::Forward => {
+                self.forward.pop();
+                self.back.push(from);
+            }
+        }
+    }
+}
+
+/// When going up from `current` to `target`, the child we left, so it can be
+/// re-selected. `None` for any other move.
+fn came_from(current: &Path, target: &Path) -> Option<String> {
+    (current.parent() == Some(target))
+        .then(|| current.file_name())
+        .flatten()
+        .map(|n| n.to_string_lossy().into_owned())
+}
+
 pub struct LumenApp {
     view: View,
     lister: Lister,
@@ -189,6 +256,9 @@ pub struct LumenApp {
     shown_id: u64,
     /// Entry to select once the pending listing arrives.
     select_after_load: Option<String>,
+    /// How the pending listing was started.
+    pending_nav: NavKind,
+    history: History,
 }
 
 /// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
@@ -209,12 +279,25 @@ impl LumenApp {
             path_bar: PathBar::default(),
             shown_id: 0,
             select_after_load: None,
+            pending_nav: NavKind::New,
+            history: History::default(),
         };
         app.navigate(ctx, start, None);
         app
     }
 
     fn navigate(&mut self, ctx: &egui::Context, path: PathBuf, select: Option<String>) {
+        self.navigate_as(ctx, NavKind::New, path, select);
+    }
+
+    fn navigate_as(
+        &mut self,
+        ctx: &egui::Context,
+        kind: NavKind,
+        path: PathBuf,
+        select: Option<String>,
+    ) {
+        self.pending_nav = kind;
         self.select_after_load = select;
         let ctx = ctx.clone();
         // Wake the UI as soon as the worker finishes, without polling in a loop.
@@ -234,8 +317,20 @@ impl LumenApp {
     fn go_parent(&mut self, ctx: &egui::Context) {
         let current = self.view.current.clone();
         if let Some(parent) = current.parent() {
-            let came_from = current.file_name().map(|n| n.to_string_lossy().into_owned());
-            self.navigate(ctx, parent.to_path_buf(), came_from);
+            let select = came_from(&current, parent);
+            self.navigate(ctx, parent.to_path_buf(), select);
+        }
+    }
+
+    fn go_history(&mut self, ctx: &egui::Context, kind: NavKind) {
+        let target = match kind {
+            NavKind::Back => self.history.back_target(),
+            NavKind::Forward => self.history.forward_target(),
+            NavKind::New => None,
+        };
+        if let Some(target) = target.cloned() {
+            let select = came_from(&self.view.current, &target);
+            self.navigate_as(ctx, kind, target, select);
         }
     }
 
@@ -247,6 +342,8 @@ impl LumenApp {
             Action::GoParent => self.go_parent(ctx),
             Action::Move(_) | Action::First | Action::Last => self.view.move_selection(action),
             Action::TypeChar(c) => self.view.type_char(c, Instant::now()),
+            Action::Back => self.go_history(ctx, NavKind::Back),
+            Action::Forward => self.go_history(ctx, NavKind::Forward),
         }
     }
 }
@@ -258,7 +355,10 @@ impl eframe::App for LumenApp {
         if let Some(listing) = self.lister.poll() {
             self.shown_id = listing.id;
             let select = self.select_after_load.take();
+            let from = self.view.current.clone();
+            let to = listing.result.is_ok().then(|| listing.path.clone());
             self.view.apply_listing(listing, select.as_deref());
+            self.history.settle(self.pending_nav, &from, to.as_deref());
         }
 
         for action in input::read_actions(&ctx) {
@@ -608,6 +708,69 @@ mod tests {
         v.apply_listing(ok_listing("/y", vec![entry("notes", true)]), None);
         v.type_char('n', t0);
         assert_eq!(v.selected_entry().unwrap().name, "notes");
+    }
+
+    fn p(path: &str) -> PathBuf {
+        PathBuf::from(path)
+    }
+
+    /// Simulates the app: a successful listing moving from `from` to `to`.
+    fn go(h: &mut History, kind: NavKind, from: &str, to: &str) {
+        h.settle(kind, Path::new(from), Some(Path::new(to)));
+    }
+
+    #[test]
+    fn new_navigation_records_back_and_clears_forward() {
+        let mut h = History::default();
+        go(&mut h, NavKind::New, "/a", "/b");
+        go(&mut h, NavKind::New, "/b", "/c");
+        assert_eq!(h.back_target(), Some(&p("/b")));
+        go(&mut h, NavKind::Back, "/c", "/b");
+        assert_eq!(h.forward_target(), Some(&p("/c")));
+        go(&mut h, NavKind::New, "/b", "/d");
+        assert_eq!(h.forward_target(), None);
+        assert_eq!(h.back_target(), Some(&p("/b")));
+    }
+
+    #[test]
+    fn back_and_forward_walk_like_a_browser() {
+        let mut h = History::default();
+        go(&mut h, NavKind::New, "/a", "/b");
+        go(&mut h, NavKind::New, "/b", "/c");
+        go(&mut h, NavKind::Back, "/c", "/b");
+        go(&mut h, NavKind::Back, "/b", "/a");
+        assert_eq!(h.back_target(), None);
+        assert_eq!(h.forward_target(), Some(&p("/b")));
+        go(&mut h, NavKind::Forward, "/a", "/b");
+        go(&mut h, NavKind::Forward, "/b", "/c");
+        assert_eq!(h.forward_target(), None);
+        assert_eq!(h.back_target(), Some(&p("/b")));
+    }
+
+    #[test]
+    fn failed_or_same_folder_listings_are_not_recorded() {
+        let mut h = History::default();
+        h.settle(NavKind::New, Path::new("/a"), None);
+        go(&mut h, NavKind::New, "/a", "/a"); // startup or reload
+        assert_eq!(h.back_target(), None);
+        assert_eq!(h.forward_target(), None);
+    }
+
+    #[test]
+    fn a_vanished_folder_is_dropped_so_back_goes_further() {
+        let mut h = History::default();
+        go(&mut h, NavKind::New, "/a", "/gone");
+        go(&mut h, NavKind::New, "/gone", "/c");
+        h.settle(NavKind::Back, Path::new("/c"), None);
+        assert_eq!(h.back_target(), Some(&p("/a")));
+        assert_eq!(h.forward_target(), None);
+    }
+
+    #[test]
+    fn came_from_names_the_child_only_when_going_up() {
+        assert_eq!(came_from(Path::new("/usr/bin"), Path::new("/usr")).as_deref(), Some("bin"));
+        assert_eq!(came_from(Path::new("/usr/bin"), Path::new("/home")), None);
+        assert_eq!(came_from(Path::new("/usr"), Path::new("/usr/bin")), None);
     }
 
     #[test]
