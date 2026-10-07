@@ -1,6 +1,6 @@
 //! All keyboard shortcuts live here so they are easy to find and change.
 
-use eframe::egui::{Context, Event, Key, Modifiers};
+use eframe::egui::{Context, Event, Id, Key, Modifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -24,6 +24,13 @@ pub enum Action {
     Rename,
     /// Create a folder here and start renaming it (Ctrl+Shift+N).
     NewFolder,
+    /// Put the selected entry in Lumen's clipboard (Ctrl+C / Ctrl+X).
+    Copy,
+    Cut,
+    /// Paste the clipboard into the current folder (Ctrl+V).
+    Paste,
+    /// Stop the running copy or move (Escape).
+    Cancel,
 }
 
 /// Answer to an open confirmation dialog.
@@ -55,6 +62,16 @@ const PAGE: isize = 20;
 /// Only text fields count: a row focused with Tab must not swallow the arrows.
 pub fn read_actions(ctx: &Context) -> Vec<Action> {
     let typing = ctx.text_edit_focused();
+    let mut actions = read_keys(ctx, typing);
+    if !typing {
+        // Outside `input_mut`: egui's context lock is not reentrant.
+        let events = ctx.input(|i| i.events.clone());
+        actions.extend(clipboard_actions(ctx, &events));
+    }
+    actions
+}
+
+fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
     ctx.input_mut(|i| {
         let mut actions = Vec::new();
         if i.consume_key(Modifiers::COMMAND, Key::L) {
@@ -86,6 +103,7 @@ pub fn read_actions(ctx: &Context) -> Vec<Action> {
             (Key::Backspace, Action::GoParent),
             (Key::Delete, Action::Trash),
             (Key::F2, Action::Rename),
+            (Key::Escape, Action::Cancel),
         ];
         // egui ignores extra Shift/Alt when matching, so Shift+Arrow would act
         // like a plain arrow. Require no modifiers; those combos are reserved.
@@ -106,6 +124,35 @@ pub fn read_actions(ctx: &Context) -> Vec<Action> {
         }
         actions
     })
+}
+
+/// egui-winit turns Ctrl+C / Ctrl+X into `Copy` / `Cut` events, but Ctrl+V
+/// becomes a `Paste` event only when the system clipboard holds text; with
+/// anything else only the V release arrives. Lumen's clipboard is its own, so
+/// paste on either, and not twice for the same keystroke.
+fn clipboard_actions(ctx: &Context, events: &[Event]) -> Vec<Action> {
+    let pasted_id = Id::new("lumen_paste_event_seen");
+    let mut pasted = ctx.data(|d| d.get_temp::<bool>(pasted_id)).unwrap_or(false);
+    let mut actions = Vec::new();
+    for event in events {
+        match event {
+            Event::Copy => actions.push(Action::Copy),
+            Event::Cut => actions.push(Action::Cut),
+            Event::Paste(_) => {
+                actions.push(Action::Paste);
+                pasted = true;
+            }
+            Event::Key { key: Key::V, pressed: false, modifiers, .. } if modifiers.command => {
+                if !pasted {
+                    actions.push(Action::Paste);
+                }
+                pasted = false;
+            }
+            _ => {}
+        }
+    }
+    ctx.data_mut(|d| d.insert_temp(pasted_id, pasted));
+    actions
 }
 
 #[cfg(test)]
@@ -184,6 +231,48 @@ mod tests {
             Event::Text("N".into()),
         ];
         assert_eq!(actions_for(events), [Action::NewFolder]);
+    }
+
+    fn release(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers }
+    }
+
+    #[test]
+    fn clipboard_events_become_copy_cut_and_paste() {
+        let actions = actions_for(vec![Event::Copy, Event::Cut, Event::Paste("any".into())]);
+        assert_eq!(actions, [Action::Copy, Action::Cut, Action::Paste]);
+    }
+
+    /// One context across frames, like the running app.
+    fn frames(ctx: &Context, events: Vec<Event>) -> Vec<Action> {
+        let mut actions = Vec::new();
+        ctx.run_ui(RawInput { events, ..RawInput::default() }, |ui| {
+            actions = read_actions(ui.ctx());
+        })
+        .drop_without_applying_deltas();
+        actions
+    }
+
+    #[test]
+    fn ctrl_v_with_no_text_in_the_system_clipboard_pastes_on_release() {
+        // egui-winit sends no press event then, only the release.
+        let ctx = Context::default();
+        assert_eq!(frames(&ctx, vec![release(Key::V, Modifiers::COMMAND)]), [Action::Paste]);
+        assert_eq!(frames(&ctx, vec![release(Key::V, Modifiers::NONE)]), []);
+    }
+
+    #[test]
+    fn a_paste_event_is_not_repeated_by_its_release() {
+        let ctx = Context::default();
+        assert_eq!(frames(&ctx, vec![Event::Paste("t".into())]), [Action::Paste]);
+        assert_eq!(frames(&ctx, vec![release(Key::V, Modifiers::COMMAND)]), []);
+        // The next Ctrl+V with an empty system clipboard works again.
+        assert_eq!(frames(&ctx, vec![release(Key::V, Modifiers::COMMAND)]), [Action::Paste]);
+    }
+
+    #[test]
+    fn escape_cancels() {
+        assert_eq!(actions_for(vec![key(Key::Escape, Modifiers::NONE)]), [Action::Cancel]);
     }
 
     fn confirm_for(events: Vec<Event>) -> Option<Confirm> {

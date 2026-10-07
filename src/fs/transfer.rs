@@ -5,7 +5,11 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::ops::{exists, trash};
 
@@ -285,6 +289,83 @@ impl<F: FnMut(&Progress)> Copier<'_, F> {
     }
 }
 
+/// What the worker thread tells the UI.
+enum JobEvent {
+    Progress(Progress),
+    Finished(Result<Outcome, String>),
+}
+
+/// A copy or move running on its own thread, so the window keeps responding.
+pub struct Job {
+    pub mode: Mode,
+    /// Latest progress received; updated by [`Job::poll`].
+    pub progress: Progress,
+    rx: Receiver<JobEvent>,
+    cancel: Arc<AtomicBool>,
+}
+
+/// Minimum time between progress messages, so a fast copy does not flood the UI.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
+
+impl Job {
+    /// Starts [`run`] on a new thread. `wake` runs on that thread whenever there
+    /// is news (the UI uses it to request a repaint).
+    pub fn start(
+        source: PathBuf,
+        target: PathBuf,
+        mode: Mode,
+        replace: bool,
+        wake: impl Fn() + Send + 'static,
+    ) -> Self {
+        Self::start_with(Arc::new(AtomicBool::new(false)), source, target, mode, replace, wake)
+    }
+
+    fn start_with(
+        cancel: Arc<AtomicBool>,
+        source: PathBuf,
+        target: PathBuf,
+        mode: Mode,
+        replace: bool,
+        wake: impl Fn() + Send + 'static,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let flag = cancel.clone();
+        thread::spawn(move || {
+            let mut latest = Progress::default();
+            let mut sent: Option<Instant> = None;
+            let result = run(&source, &target, mode, replace, &flag, |p| {
+                latest = *p;
+                if sent.is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL) {
+                    sent = Some(Instant::now());
+                    // The receiver only disappears when the app is closing.
+                    let _ = tx.send(JobEvent::Progress(*p));
+                    wake();
+                }
+            });
+            let _ = tx.send(JobEvent::Progress(latest));
+            let _ = tx.send(JobEvent::Finished(result));
+            wake();
+        });
+        Self { mode, progress: Progress::default(), rx, cancel }
+    }
+
+    /// Asks the worker to stop; it finishes with [`Outcome::Cancelled`].
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Takes the messages that arrived. Returns the result once the job is over.
+    pub fn poll(&mut self) -> Option<Result<Outcome, String>> {
+        while let Ok(event) = self.rx.try_recv() {
+            match event {
+                JobEvent::Progress(p) => self.progress = p,
+                JobEvent::Finished(result) => return Some(result),
+            }
+        }
+        None
+    }
+}
+
 /// Copies the link itself, never what it points to.
 #[cfg(unix)]
 fn copy_link(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -518,6 +599,70 @@ mod tests {
         assert_eq!(err, "Cannot replace “x”: it contains what is being pasted");
         assert_eq!(read(&dir.join("x/x")), "inner");
         assert_eq!(in_trash(&dir), Vec::<String>::new());
+    }
+
+    /// Polls `job` each time it wakes us until it reports a result.
+    fn wait(job: &mut Job, woke: &Receiver<()>) -> Result<Outcome, String> {
+        loop {
+            woke.recv_timeout(Duration::from_secs(5)).expect("job woke the UI");
+            if let Some(result) = job.poll() {
+                return result;
+            }
+        }
+    }
+
+    #[test]
+    fn a_job_copies_in_the_background_and_ends_with_full_progress() {
+        let dir = fresh_fixture("xfer-job");
+        let src = sample_tree(&dir);
+        let (tx, woke) = mpsc::channel();
+        let mut job = Job::start(src, dir.join("dst"), Mode::Copy, false, move || {
+            let _ = tx.send(());
+        });
+        assert_eq!(job.mode, Mode::Copy);
+        assert_eq!(wait(&mut job, &woke), Ok(Outcome::Done));
+        assert_same_tree(&dir.join("dst"));
+        assert_eq!((job.progress.files_done, job.progress.files_total), (4, 4));
+        assert_eq!(job.progress.percent(), 100);
+    }
+
+    #[test]
+    fn a_cancelled_job_reports_it() {
+        let dir = fresh_fixture("xfer-job-cancel");
+        let src = sample_tree(&dir);
+        let (tx, woke) = mpsc::channel();
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut job = Job::start_with(flag.clone(), src, dir.join("dst"), Mode::Copy, false, move || {
+            let _ = tx.send(());
+        });
+        job.cancel();
+        assert!(flag.load(Ordering::Relaxed), "cancel reaches the worker's flag");
+        // Raced against a fast copy, so only check the job ends cleanly.
+        assert!(matches!(wait(&mut job, &woke), Ok(Outcome::Cancelled | Outcome::Done)));
+    }
+
+    #[test]
+    fn a_job_cancelled_before_it_starts_copies_nothing() {
+        let dir = fresh_fixture("xfer-job-precancel");
+        let src = sample_tree(&dir);
+        let (tx, woke) = mpsc::channel();
+        let flag = Arc::new(AtomicBool::new(true));
+        let mut job = Job::start_with(flag, src, dir.join("dst"), Mode::Copy, false, move || {
+            let _ = tx.send(());
+        });
+        assert_eq!(wait(&mut job, &woke), Ok(Outcome::Cancelled));
+        assert!(!dir.join("dst").exists());
+    }
+
+    #[test]
+    fn a_failing_job_reports_the_error() {
+        let dir = fresh_fixture("xfer-job-error");
+        let (tx, woke) = mpsc::channel();
+        let mut job = Job::start(dir.join("ghost"), dir.join("t"), Mode::Move, false, move || {
+            let _ = tx.send(());
+        });
+        let err = wait(&mut job, &woke).unwrap_err();
+        assert!(err.contains("ghost"), "{err}");
     }
 
     #[test]

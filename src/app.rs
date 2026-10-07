@@ -9,6 +9,7 @@ use eframe::egui;
 use crate::fs::{self, Entry, Lister, Listing};
 use crate::input::{self, Action, Confirm};
 use crate::fs::ops::Renamed;
+use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
 use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_bar::PathBar, status_bar::Status};
 
 /// How the table should bring the selection into view on the next frame.
@@ -262,6 +263,8 @@ enum Dialog {
     Trash { path: PathBuf, name: String, select: Option<String> },
     /// Renaming onto an existing name; the edit resumes if the user says no.
     Replace(RenameEdit),
+    /// Pasting onto an existing name.
+    Paste { source: PathBuf, target: PathBuf, mode: Mode },
 }
 
 impl Dialog {
@@ -272,15 +275,36 @@ impl Dialog {
                 "“{}” already exists. Replace it? The existing one goes to the trash.",
                 edit.text
             ),
+            Self::Paste { target, .. } => format!(
+                "“{}” already exists here. Replace it? The existing one goes to the trash.",
+                file_name(target).unwrap_or_default()
+            ),
         }
     }
 
     fn yes_label(&self) -> &'static str {
         match self {
             Self::Trash { .. } => "Move to Trash",
-            Self::Replace(_) => "Replace",
+            Self::Replace(_) | Self::Paste { .. } => "Replace",
         }
     }
+}
+
+fn file_name(path: &Path) -> Option<String> {
+    path.file_name().map(|n| n.to_string_lossy().into_owned())
+}
+
+/// Lumen's own clipboard (not the system one): one entry, copied or cut.
+#[derive(Clone)]
+struct Clip {
+    path: PathBuf,
+    mode: Mode,
+}
+
+/// A paste in progress and where it lands.
+struct Running {
+    job: Job,
+    target: PathBuf,
 }
 
 pub struct LumenApp {
@@ -300,6 +324,11 @@ pub struct LumenApp {
     rename_after_load: Option<PathBuf>,
     /// Error to show once the pending reload lands (a reload clears errors).
     error_after_load: Option<String>,
+    clipboard: Option<Clip>,
+    /// Copy or move running in the background; one at a time.
+    job: Option<Running>,
+    /// Informational line in the status bar ("1 item copied").
+    notice: Option<String>,
 }
 
 /// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
@@ -326,6 +355,9 @@ impl LumenApp {
             rename: None,
             rename_after_load: None,
             error_after_load: None,
+            clipboard: None,
+            job: None,
+            notice: None,
         };
         app.navigate(ctx, start, None);
         app
@@ -429,6 +461,79 @@ impl LumenApp {
         }
     }
 
+    fn set_clipboard(&mut self, mode: Mode) {
+        let Some(entry) = self.view.selected_entry() else { return };
+        self.clipboard = Some(Clip { path: entry.path.clone(), mode });
+        self.notice = Some(match mode {
+            Mode::Copy => "1 item copied".into(),
+            Mode::Move => "1 item cut".into(),
+        });
+    }
+
+    fn paste(&mut self, ctx: &egui::Context) {
+        if self.job.is_some() {
+            self.view.error = Some("Another operation is still running".into());
+            return;
+        }
+        let Some(Clip { path, mode }) = self.clipboard.clone() else {
+            self.notice = Some("Nothing to paste: Ctrl+C or Ctrl+X first".into());
+            return;
+        };
+        match transfer::plan(&path, &self.view.current, mode) {
+            Ok(Plan::Ready(target)) => self.start_job(ctx, path, target, mode, false),
+            Ok(Plan::Nothing) => {}
+            Ok(Plan::TargetExists(target)) => {
+                self.dialog = Some(Dialog::Paste { source: path, target, mode });
+            }
+            Err(err) => self.view.error = Some(err),
+        }
+    }
+
+    fn start_job(
+        &mut self,
+        ctx: &egui::Context,
+        source: PathBuf,
+        target: PathBuf,
+        mode: Mode,
+        replace: bool,
+    ) {
+        self.notice = None;
+        self.view.error = None;
+        let ctx = ctx.clone();
+        let job = Job::start(source, target.clone(), mode, replace, move || ctx.request_repaint());
+        self.job = Some(Running { job, target });
+    }
+
+    fn finish_job(&mut self, ctx: &egui::Context, running: Running, result: Result<Outcome, String>) {
+        let mode = running.job.mode;
+        match result {
+            Ok(Outcome::Done) => {
+                // The cut entry has moved; pasting it again would find nothing.
+                if mode == Mode::Move {
+                    self.clipboard = None;
+                }
+            }
+            Ok(Outcome::Cancelled) => {
+                self.notice = Some(match mode {
+                    Mode::Copy => "Copy cancelled".into(),
+                    Mode::Move => "Move cancelled".into(),
+                });
+            }
+            Err(err) => self.error_after_load = Some(err),
+        }
+        // A navigation started meanwhile shows fresh contents anyway; reloading
+        // here would supersede it.
+        if self.lister.is_pending(self.shown_id) {
+            return;
+        }
+        let select = if running.target.parent() == Some(self.view.current.as_path()) {
+            file_name(&running.target)
+        } else {
+            self.view.selected_entry().map(|e| e.name.clone())
+        };
+        self.reload(ctx, select);
+    }
+
     fn answer_dialog(&mut self, ctx: &egui::Context, answer: Confirm) {
         let Some(dialog) = self.dialog.take() else { return };
         if answer == Confirm::No {
@@ -447,6 +552,9 @@ impl LumenApp {
                 }
             },
             Dialog::Replace(edit) => self.finish_rename(ctx, edit, true),
+            Dialog::Paste { source, target, mode } => {
+                self.start_job(ctx, source, target, mode, true);
+            }
         }
     }
 
@@ -463,6 +571,14 @@ impl LumenApp {
             Action::Trash => self.ask_trash(),
             Action::Rename => self.start_rename(),
             Action::NewFolder => self.new_folder(ctx),
+            Action::Copy => self.set_clipboard(Mode::Copy),
+            Action::Cut => self.set_clipboard(Mode::Move),
+            Action::Paste => self.paste(ctx),
+            Action::Cancel => {
+                if let Some(running) = &self.job {
+                    running.job.cancel();
+                }
+            }
         }
     }
 }
@@ -493,6 +609,12 @@ impl eframe::App for LumenApp {
             {
                 self.start_rename();
             }
+        }
+
+        if let Some(result) = self.job.as_mut().and_then(|r| r.job.poll())
+            && let Some(running) = self.job.take()
+        {
+            self.finish_job(&ctx, running, result);
         }
 
         // An open dialog takes the keyboard; the list must not react underneath.
@@ -526,6 +648,11 @@ impl eframe::App for LumenApp {
                     loading: self.lister.is_pending(self.shown_id),
                     last_elapsed: self.view.last_elapsed,
                     error: self.view.error.as_deref(),
+                    job: self
+                        .job
+                        .as_ref()
+                        .map(|r| ui::status_bar::progress_text(r.job.mode, &r.job.progress)),
+                    notice: self.notice.as_deref(),
                 },
             );
         });
