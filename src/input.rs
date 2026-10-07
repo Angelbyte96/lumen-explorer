@@ -20,6 +20,8 @@ pub enum Action {
     TypeChar(char),
     /// Move the selected entry to the trash (asks first).
     Trash,
+    /// Edit the selected entry's name in place.
+    Rename,
 }
 
 /// Answer to an open confirmation dialog.
@@ -78,6 +80,7 @@ pub fn read_actions(ctx: &Context) -> Vec<Action> {
             (Key::Enter, Action::Activate),
             (Key::Backspace, Action::GoParent),
             (Key::Delete, Action::Trash),
+            (Key::F2, Action::Rename),
         ];
         // egui ignores extra Shift/Alt when matching, so Shift+Arrow would act
         // like a plain arrow. Require no modifiers; those combos are reserved.
@@ -161,6 +164,11 @@ mod tests {
         let shift_delete =
             vec![Event::ModifiersChanged(Modifiers::SHIFT), key(Key::Delete, Modifiers::SHIFT)];
         assert_eq!(actions_for(shift_delete), []);
+    }
+
+    #[test]
+    fn f2_renames() {
+        assert_eq!(actions_for(vec![key(Key::F2, Modifiers::NONE)]), [Action::Rename]);
     }
 
     fn confirm_for(events: Vec<Event>) -> Option<Confirm> {

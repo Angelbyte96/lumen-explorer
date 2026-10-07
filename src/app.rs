@@ -8,7 +8,8 @@ use eframe::egui;
 
 use crate::fs::{self, Entry, Lister, Listing};
 use crate::input::{self, Action, Confirm};
-use crate::ui::{self, file_list::ListEvent, path_bar::PathBar, status_bar::Status};
+use crate::fs::ops::Renamed;
+use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_bar::PathBar, status_bar::Status};
 
 /// How the table should bring the selection into view on the next frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,18 +260,25 @@ fn came_from(current: &Path, target: &Path) -> Option<String> {
 /// A destructive operation waiting for the user's Enter or Escape.
 enum Dialog {
     Trash { path: PathBuf, name: String, select: Option<String> },
+    /// Renaming onto an existing name; the edit resumes if the user says no.
+    Replace(RenameEdit),
 }
 
 impl Dialog {
     fn message(&self) -> String {
         match self {
             Self::Trash { name, .. } => format!("Move “{name}” to the trash?"),
+            Self::Replace(edit) => format!(
+                "“{}” already exists. Replace it? The existing one goes to the trash.",
+                edit.text
+            ),
         }
     }
 
     fn yes_label(&self) -> &'static str {
         match self {
             Self::Trash { .. } => "Move to Trash",
+            Self::Replace(_) => "Replace",
         }
     }
 }
@@ -287,6 +295,7 @@ pub struct LumenApp {
     pending_nav: NavKind,
     history: History,
     dialog: Option<Dialog>,
+    rename: Option<RenameEdit>,
     /// Error to show once the pending reload lands (a reload clears errors).
     error_after_load: Option<String>,
 }
@@ -312,6 +321,7 @@ impl LumenApp {
             pending_nav: NavKind::New,
             history: History::default(),
             dialog: None,
+            rename: None,
             error_after_load: None,
         };
         app.navigate(ctx, start, None);
@@ -380,9 +390,35 @@ impl LumenApp {
         });
     }
 
+    fn start_rename(&mut self) {
+        let Some(entry) = self.view.selected_entry() else { return };
+        self.rename = Some(RenameEdit::new(entry.path.clone(), &entry.name, entry.is_dir));
+    }
+
+    /// Applies a finished in-place edit. Invalid names keep the field open.
+    fn finish_rename(&mut self, ctx: &egui::Context, mut edit: RenameEdit, replace: bool) {
+        match fs::ops::rename(&edit.path, &edit.text, replace) {
+            Ok(Renamed::To(_)) => {
+                self.view.error = None;
+                self.reload(ctx, Some(edit.text));
+            }
+            Ok(Renamed::Unchanged) => {}
+            Ok(Renamed::TargetExists) => self.dialog = Some(Dialog::Replace(edit)),
+            Err(err) => {
+                self.view.error = Some(err);
+                edit.focus = true;
+                self.rename = Some(edit);
+            }
+        }
+    }
+
     fn answer_dialog(&mut self, ctx: &egui::Context, answer: Confirm) {
         let Some(dialog) = self.dialog.take() else { return };
         if answer == Confirm::No {
+            if let Dialog::Replace(mut edit) = dialog {
+                edit.focus = true;
+                self.rename = Some(edit);
+            }
             return;
         }
         match dialog {
@@ -392,6 +428,7 @@ impl LumenApp {
                 }
                 self.reload(ctx, select);
             }
+            Dialog::Replace(edit) => self.finish_rename(ctx, edit, true),
         }
     }
 
@@ -406,6 +443,7 @@ impl LumenApp {
             Action::Back => self.go_history(ctx, NavKind::Back),
             Action::Forward => self.go_history(ctx, NavKind::Forward),
             Action::Trash => self.ask_trash(),
+            Action::Rename => self.start_rename(),
         }
     }
 }
@@ -423,6 +461,12 @@ impl eframe::App for LumenApp {
             self.history.settle(self.pending_nav, &from, to.as_deref());
             if let Some(err) = self.error_after_load.take() {
                 self.view.error = Some(err);
+            }
+            // The edited entry may be gone (another folder, a reload).
+            if let Some(edit) = &self.rename
+                && !self.view.entries.iter().any(|e| e.path == edit.path)
+            {
+                self.rename = None;
             }
         }
 
@@ -470,6 +514,7 @@ impl eframe::App for LumenApp {
                 self.view.selected,
                 scroll,
                 self.view.sort,
+                self.rename.as_mut(),
             );
             match event {
                 Some(ListEvent::Select(i)) => self.view.selected = Some(i),
@@ -478,9 +523,24 @@ impl eframe::App for LumenApp {
                     self.activate_selected(&ctx);
                 }
                 Some(ListEvent::Sort(column)) => self.view.sort_by(column),
+                Some(ListEvent::RenameEnded(submit)) => {
+                    if let Some(edit) = self.rename.take()
+                        && submit
+                    {
+                        self.finish_rename(&ctx, edit, false);
+                    }
+                }
                 None => {}
             }
         });
+
+        // A click on another row or a scroll can take focus without ending the
+        // edit above (one event per frame); an unfocused field is a cancel.
+        if self.rename.as_ref().is_some_and(|e| !e.focus)
+            && !ctx.memory(|m| m.has_focus(ui::file_list::rename_id()))
+        {
+            self.rename = None;
+        }
 
         if let Some(dialog) = &self.dialog
             && let Some(answer) = ui::confirm::show(&ctx, &dialog.message(), dialog.yes_label())
