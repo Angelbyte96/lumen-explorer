@@ -10,15 +10,17 @@ pub fn show(ctx: &egui::Context, message: &str, yes_label: &str) -> Option<Confi
     let response = egui::Modal::new(egui::Id::new("lumen_confirm")).show(ctx, |ui| {
         ui.set_max_width(420.0);
         ui.label(message);
+        ui.add_space(4.0);
+        ui.weak("Enter to confirm · Esc to cancel");
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Right to left: the confirming button ends up rightmost.
             if ui.button(yes_label).clicked() {
                 answer = Some(Confirm::Yes);
             }
             if ui.button("Cancel").clicked() {
                 answer = Some(Confirm::No);
             }
-            ui.weak("Enter to confirm · Esc to cancel");
         });
     });
     // Clicking outside the dialog cancels, like Escape.
