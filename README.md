@@ -25,8 +25,13 @@ cargo test                     # unit tests (fixtures live in ~/pruebas-explorad
 | Ctrl+H | Show / hide hidden files |
 | Alt+← / Alt+→ | Back / forward through visited folders |
 | Type letters | Jump to the first entry starting with them (a 1 s pause starts over) |
+| Delete | Move the selected entry to the trash (asks first; Enter confirms, Esc cancels) |
+| F2 | Rename the selected entry in place (Enter to apply, Esc to cancel) |
+| Ctrl+Shift+N | Create "New Folder" here and rename it |
 
 Click the Name, Size or Modified header to sort by that column; click it again to reverse. Folders always stay on top.
+
+Lumen never deletes permanently: Delete moves entries to the system trash, and renaming onto an existing name asks first and sends the old entry to the trash.
 
 The status bar shows the item count and how long the last listing took.
 Listing always runs on a background thread, so the window never freezes.
