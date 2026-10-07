@@ -102,8 +102,17 @@ pub struct RumboApp {
     select_after_load: Option<String>,
 }
 
+/// Global look and feel. Scrolling is instant: an animated scroll to the
+/// selection makes rows appear to trickle in (e.g. after Ctrl+H).
+fn apply_style(ctx: &egui::Context) {
+    ctx.all_styles_mut(|style| {
+        style.scroll_animation = egui::style::ScrollAnimation::none();
+    });
+}
+
 impl RumboApp {
     pub fn new(ctx: &egui::Context, start: PathBuf, log: bool) -> Self {
+        apply_style(ctx);
         let mut app = Self {
             view: View { current: start.clone(), ..View::default() },
             lister: Lister::new(log),
@@ -225,6 +234,18 @@ mod tests {
     use super::*;
     use crate::fs::lister::ListError;
     use std::path::Path;
+
+    #[test]
+    fn scrolling_is_instant_in_both_themes() {
+        let ctx = egui::Context::default();
+        apply_style(&ctx);
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            assert_eq!(
+                ctx.style_of(theme).scroll_animation,
+                egui::style::ScrollAnimation::none()
+            );
+        }
+    }
 
     fn entry(name: &str, is_dir: bool) -> Entry {
         Entry {
