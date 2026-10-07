@@ -9,6 +9,16 @@ use crate::fs::{self, Entry, Lister, Listing};
 use crate::input::{self, Action};
 use crate::ui::{self, file_list::ListEvent, path_bar::PathBar, status_bar::Status};
 
+/// How the table should bring the selection into view on the next frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scroll {
+    /// Short glide, for keyboard moves within the list.
+    Smooth,
+    /// Jump, for when the whole list changes (new folder, Ctrl+H); animating
+    /// there makes rows appear to trickle in.
+    Instant,
+}
+
 /// What is on screen. Pure data, no egui or threads, so it is unit-testable.
 #[derive(Default)]
 pub struct View {
@@ -23,7 +33,7 @@ pub struct View {
     pub last_elapsed: Option<Duration>,
     pub error: Option<String>,
     /// Set when the selection changed via keyboard, so the table scrolls to it.
-    pub scroll_to_selected: bool,
+    pub scroll: Option<Scroll>,
 }
 
 impl View {
@@ -39,7 +49,7 @@ impl View {
                 self.rebuild_rows(None);
                 let wanted = select_name.and_then(|name| self.row_of_name(name));
                 self.selected = wanted.or((!self.rows.is_empty()).then_some(0));
-                self.scroll_to_selected = true;
+                self.scroll = Some(Scroll::Instant);
             }
             Err(err) => self.error = Some(err.to_string()),
         }
@@ -49,7 +59,7 @@ impl View {
         let keep = self.selected_entry().map(|e| e.name.clone());
         self.show_hidden = !self.show_hidden;
         self.rebuild_rows(keep.as_deref());
-        self.scroll_to_selected = true;
+        self.scroll = Some(Scroll::Instant);
     }
 
     pub fn move_selection(&mut self, action: Action) {
@@ -64,7 +74,7 @@ impl View {
             Action::Last => last,
             _ => cur,
         });
-        self.scroll_to_selected = true;
+        self.scroll = Some(Scroll::Smooth);
     }
 
     pub fn selected_entry(&self) -> Option<&Entry> {
@@ -102,11 +112,12 @@ pub struct RumboApp {
     select_after_load: Option<String>,
 }
 
-/// Global look and feel. Scrolling is instant: an animated scroll to the
-/// selection makes rows appear to trickle in (e.g. after Ctrl+H).
+/// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
+/// keyboard feels instant; list-wide changes skip them entirely (see [`Scroll`]).
 fn apply_style(ctx: &egui::Context) {
     ctx.all_styles_mut(|style| {
-        style.scroll_animation = egui::style::ScrollAnimation::none();
+        style.scroll_animation =
+            egui::style::ScrollAnimation::new(2000.0, egui::Rangef::new(0.05, 0.09));
     });
 }
 
@@ -199,7 +210,7 @@ impl eframe::App for RumboApp {
         });
 
         egui::CentralPanel::default_margins().show(ui, |ui| {
-            let scroll = std::mem::take(&mut self.view.scroll_to_selected);
+            let scroll = self.view.scroll.take();
             let event = ui::file_list::show(
                 ui,
                 &self.view.entries,
@@ -236,15 +247,20 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn scrolling_is_instant_in_both_themes() {
+    fn scroll_animation_is_subtle_in_both_themes() {
         let ctx = egui::Context::default();
         apply_style(&ctx);
         for theme in [egui::Theme::Dark, egui::Theme::Light] {
-            assert_eq!(
-                ctx.style_of(theme).scroll_animation,
-                egui::style::ScrollAnimation::none()
-            );
+            let anim = ctx.style_of(theme).scroll_animation;
+            assert!(anim.duration.min > 0.0, "keyboard scrolling should glide");
+            assert!(anim.duration.max <= 0.1, "but never longer than 100 ms");
         }
+    }
+
+    #[test]
+    fn loading_a_folder_scrolls_instantly() {
+        let v = loaded_view();
+        assert_eq!(v.scroll, Some(Scroll::Instant));
     }
 
     fn entry(name: &str, is_dir: bool) -> Entry {
@@ -309,9 +325,13 @@ mod tests {
     #[test]
     fn toggle_hidden_requests_scroll_to_kept_selection() {
         let mut v = loaded_view();
-        v.scroll_to_selected = false;
+        v.scroll = None;
         v.toggle_hidden();
-        assert!(v.scroll_to_selected);
+        assert_eq!(
+            v.scroll,
+            Some(Scroll::Instant),
+            "animating here makes rows trickle in"
+        );
     }
 
     #[test]
@@ -336,7 +356,7 @@ mod tests {
         assert_eq!(v.selected, Some(0));
         v.move_selection(Action::Last);
         assert_eq!(v.selected, Some(2));
-        assert!(v.scroll_to_selected);
+        assert_eq!(v.scroll, Some(Scroll::Smooth));
     }
 
     #[test]

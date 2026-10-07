@@ -3,6 +3,7 @@
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
+use crate::app::Scroll;
 use crate::format::{format_size, format_time};
 use crate::fs::Entry;
 
@@ -17,7 +18,7 @@ pub fn show(
     entries: &[Entry],
     rows: &[usize],
     selected: Option<usize>,
-    scroll_to_selected: bool,
+    scroll: Option<Scroll>,
 ) -> Option<ListEvent> {
     let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
     let mut event = None;
@@ -28,8 +29,12 @@ pub fn show(
         .column(Column::remainder().at_least(200.0).clip(true))
         .column(Column::exact(90.0))
         .column(Column::exact(140.0));
-    if scroll_to_selected && let Some(sel) = selected {
-        table = table.scroll_to_row(sel, None);
+    if let Some(scroll) = scroll
+        && let Some(sel) = selected
+    {
+        table = table
+            .scroll_to_row(sel, None)
+            .animate_scrolling(scroll == Scroll::Smooth);
     }
 
     table
