@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 
@@ -45,6 +45,9 @@ impl Sort {
     }
 }
 
+/// Pause after which type-to-search starts a new word.
+pub const SEARCH_RESET: Duration = Duration::from_secs(1);
+
 /// What is on screen. Pure data, no egui or threads, so it is unit-testable.
 #[derive(Default)]
 pub struct View {
@@ -62,6 +65,9 @@ pub struct View {
     pub error: Option<String>,
     /// Set when the selection changed via keyboard, so the table scrolls to it.
     pub scroll: Option<Scroll>,
+    /// Type-to-search: lowercase prefix typed so far and when the last key came.
+    search: String,
+    search_at: Option<Instant>,
 }
 
 impl View {
@@ -74,6 +80,7 @@ impl View {
                 self.entries = entries;
                 self.last_elapsed = Some(listing.elapsed);
                 self.error = None;
+                self.search.clear();
                 self.rebuild_rows(None);
                 let wanted = select_name.and_then(|name| self.row_of_name(name));
                 self.selected = wanted.or((!self.rows.is_empty()).then_some(0));
@@ -95,6 +102,23 @@ impl View {
         self.sort = self.sort.clicked(column);
         self.rebuild_rows(keep.as_deref());
         self.scroll = Some(Scroll::Instant);
+    }
+
+    /// Selects the first visible row whose name starts with what was typed.
+    /// Takes `now` so tests control the clock.
+    pub fn type_char(&mut self, c: char, now: Instant) {
+        if self.search_at.is_none_or(|at| now.duration_since(at) >= SEARCH_RESET) {
+            self.search.clear();
+        }
+        self.search_at = Some(now);
+        self.search.extend(c.to_lowercase());
+        let found = self.rows.iter().position(|&i| {
+            self.entries[i].name.to_lowercase().starts_with(&self.search)
+        });
+        if let Some(row) = found {
+            self.selected = Some(row);
+            self.scroll = Some(Scroll::Smooth);
+        }
     }
 
     pub fn move_selection(&mut self, action: Action) {
@@ -222,6 +246,7 @@ impl LumenApp {
             Action::Activate => self.activate_selected(ctx),
             Action::GoParent => self.go_parent(ctx),
             Action::Move(_) | Action::First | Action::Last => self.view.move_selection(action),
+            Action::TypeChar(c) => self.view.type_char(c, Instant::now()),
         }
     }
 }
@@ -302,6 +327,7 @@ mod tests {
     use super::*;
     use crate::fs::lister::ListError;
     use std::path::Path;
+    use std::time::Instant;
 
     #[test]
     fn scroll_animation_is_subtle_in_both_themes() {
@@ -510,6 +536,78 @@ mod tests {
         assert_eq!(row_names(&v), ["y", "x"]);
         v.toggle_hidden();
         assert_eq!(row_names(&v), ["y", "x"]);
+    }
+
+    fn search_view() -> View {
+        let entries = vec![
+            entry(".docker", true),
+            entry("Desktop", true),
+            entry("Documents", true),
+            entry("downloads", true),
+            entry("notes.txt", false),
+        ];
+        let mut v = View::default();
+        v.apply_listing(ok_listing("/home/u", entries), None);
+        v
+    }
+
+    fn type_str(v: &mut View, text: &str, start: Instant, gap: Duration) -> Instant {
+        let mut now = start;
+        for c in text.chars() {
+            v.type_char(c, now);
+            now += gap;
+        }
+        now
+    }
+
+    #[test]
+    fn typing_jumps_to_first_case_insensitive_prefix_match() {
+        let mut v = search_view();
+        let t0 = Instant::now();
+        type_str(&mut v, "d", t0, Duration::ZERO);
+        assert_eq!(v.selected_entry().unwrap().name, "Desktop");
+        type_str(&mut v, "oc", t0 + Duration::from_millis(300), Duration::from_millis(300));
+        assert_eq!(v.selected_entry().unwrap().name, "Documents");
+        assert_eq!(v.scroll, Some(Scroll::Smooth));
+    }
+
+    #[test]
+    fn pausing_restarts_the_search() {
+        let mut v = search_view();
+        let t0 = Instant::now();
+        let after = type_str(&mut v, "do", t0, Duration::from_millis(200));
+        v.type_char('n', after + SEARCH_RESET);
+        assert_eq!(v.selected_entry().unwrap().name, "notes.txt");
+    }
+
+    #[test]
+    fn no_match_keeps_the_selection() {
+        let mut v = search_view();
+        let t0 = Instant::now();
+        type_str(&mut v, "no", t0, Duration::ZERO);
+        v.type_char('x', t0);
+        assert_eq!(v.selected_entry().unwrap().name, "notes.txt");
+    }
+
+    #[test]
+    fn hidden_rows_are_not_matched_until_shown() {
+        let mut v = search_view();
+        let t0 = Instant::now();
+        type_str(&mut v, ".d", t0, Duration::ZERO);
+        assert_eq!(v.selected_entry().unwrap().name, "Desktop", "selection unchanged");
+        v.toggle_hidden();
+        type_str(&mut v, ".d", t0 + SEARCH_RESET * 2, Duration::ZERO);
+        assert_eq!(v.selected_entry().unwrap().name, ".docker");
+    }
+
+    #[test]
+    fn changing_folder_restarts_the_search() {
+        let mut v = search_view();
+        let t0 = Instant::now();
+        type_str(&mut v, "do", t0, Duration::ZERO);
+        v.apply_listing(ok_listing("/y", vec![entry("notes", true)]), None);
+        v.type_char('n', t0);
+        assert_eq!(v.selected_entry().unwrap().name, "notes");
     }
 
     #[test]
