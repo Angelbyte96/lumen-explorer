@@ -4,6 +4,7 @@ pub mod entry;
 pub mod lister;
 pub mod ops;
 pub mod transfer;
+pub mod watch;
 
 use std::path::{Path, PathBuf};
 

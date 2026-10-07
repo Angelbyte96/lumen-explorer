@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use crate::fs::watch::Watcher;
 use crate::fs::{self, Entry, Lister, Listing};
 use crate::input::{self, Action, Confirm};
 use crate::fs::ops::Renamed;
@@ -90,6 +91,28 @@ impl View {
             }
             Err(err) => self.error = Some(err.to_string()),
         }
+    }
+
+    /// Applies a listing of the folder already shown, after something changed
+    /// it. Unlike a navigation it keeps the selection (the same row if the entry
+    /// vanished), the type-to-search word, the error line and the scroll.
+    pub fn apply_refresh(&mut self, listing: Listing) {
+        let entries = match listing.result {
+            Ok(entries) => entries,
+            Err(err) => {
+                self.error = Some(err.to_string());
+                return;
+            }
+        };
+        let keep = self.selected_entry().map(|e| e.name.clone());
+        let row = self.selected;
+        self.entries = entries;
+        self.last_elapsed = Some(listing.elapsed);
+        self.rebuild_rows(None);
+        let last = self.rows.len().checked_sub(1);
+        self.selected = keep
+            .and_then(|name| self.row_of_name(&name))
+            .or_else(|| Some(row?.min(last?)));
     }
 
     pub fn toggle_hidden(&mut self) {
@@ -198,6 +221,39 @@ pub enum NavKind {
     New,
     Back,
     Forward,
+    /// The open folder changed on disk; not a step in the history.
+    Refresh,
+}
+
+/// Wait between the first change on disk and the reload. Later changes in that
+/// window ride along, so a long copy reloads a few times a second, not per file.
+pub const REFRESH_DELAY: Duration = Duration::from_millis(200);
+
+/// Schedules the reload that follows changes on disk.
+#[derive(Default)]
+pub struct RefreshTimer {
+    due: Option<Instant>,
+}
+
+impl RefreshTimer {
+    /// A change happened; reload at most `REFRESH_DELAY` after the first one.
+    pub fn note_change(&mut self, now: Instant) {
+        self.due.get_or_insert(now + REFRESH_DELAY);
+    }
+
+    /// Whether it is time to reload; clears the schedule when it is.
+    pub fn take_due(&mut self, now: Instant) -> bool {
+        let due = self.due.is_some_and(|at| now >= at);
+        if due {
+            self.due = None;
+        }
+        due
+    }
+
+    /// How long until the scheduled reload, to wake the UI then.
+    pub fn wait(&self, now: Instant) -> Option<Duration> {
+        self.due.map(|at| at.saturating_duration_since(now))
+    }
 }
 
 /// Browser-style back/forward lists. Only successful listings are recorded.
@@ -222,7 +278,7 @@ impl History {
         let Some(to) = to else {
             // A folder that vanished would block Back/Forward forever: drop it.
             match kind {
-                NavKind::New => {}
+                NavKind::New | NavKind::Refresh => {}
                 NavKind::Back => drop(self.back.pop()),
                 NavKind::Forward => drop(self.forward.pop()),
             }
@@ -233,6 +289,7 @@ impl History {
         }
         let from = from.to_path_buf();
         match kind {
+            NavKind::Refresh => {}
             NavKind::New => {
                 self.back.push(from);
                 self.forward.clear();
@@ -329,6 +386,9 @@ pub struct LumenApp {
     job: Option<Running>,
     /// Informational line in the status bar ("1 item copied").
     notice: Option<String>,
+    /// Watches the folder on screen; changes schedule a refresh.
+    watcher: Watcher,
+    refresh: RefreshTimer,
 }
 
 /// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
@@ -358,6 +418,11 @@ impl LumenApp {
             clipboard: None,
             job: None,
             notice: None,
+            watcher: Watcher::new({
+                let ctx = ctx.clone();
+                move || ctx.request_repaint()
+            }),
+            refresh: RefreshTimer::default(),
         };
         app.navigate(ctx, start, None);
         app
@@ -403,7 +468,7 @@ impl LumenApp {
         let target = match kind {
             NavKind::Back => self.history.back_target(),
             NavKind::Forward => self.history.forward_target(),
-            NavKind::New => None,
+            NavKind::New | NavKind::Refresh => None,
         };
         if let Some(target) = target.cloned() {
             let select = came_from(&self.view.current, &target);
@@ -558,6 +623,25 @@ impl LumenApp {
         }
     }
 
+    /// Reloads the open folder a moment after it changed on disk.
+    fn refresh_if_changed(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        if self.watcher.take_changed() {
+            self.refresh.note_change(now);
+        }
+        if self.refresh.take_due(now) {
+            if self.lister.is_pending(self.shown_id) {
+                // Never supersede a navigation; try again once it has landed.
+                self.refresh.note_change(now);
+            } else {
+                self.navigate_as(ctx, NavKind::Refresh, self.view.current.clone(), None);
+            }
+        }
+        if let Some(wait) = self.refresh.wait(now) {
+            ctx.request_repaint_after(wait);
+        }
+    }
+
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::FocusPathBar => self.path_bar.request_focus(),
@@ -592,8 +676,15 @@ impl eframe::App for LumenApp {
             let select = self.select_after_load.take();
             let from = self.view.current.clone();
             let to = listing.result.is_ok().then(|| listing.path.clone());
-            self.view.apply_listing(listing, select.as_deref());
+            if self.pending_nav == NavKind::Refresh {
+                self.view.apply_refresh(listing);
+            } else {
+                self.view.apply_listing(listing, select.as_deref());
+            }
             self.history.settle(self.pending_nav, &from, to.as_deref());
+            if to.is_some() {
+                self.watcher.watch(&self.view.current);
+            }
             if let Some(err) = self.error_after_load.take() {
                 self.view.error = Some(err);
             }
@@ -610,6 +701,8 @@ impl eframe::App for LumenApp {
                 self.start_rename();
             }
         }
+
+        self.refresh_if_changed(&ctx);
 
         if let Some(result) = self.job.as_mut().and_then(|r| r.job.poll())
             && let Some(running) = self.job.take()
@@ -1097,6 +1190,95 @@ mod tests {
         let entries = vec![entry("a", true), entry("b", true), entry("c", true)];
         v.apply_listing(ok_listing("/x", entries), Some("b"));
         assert_eq!(v.selected_entry().unwrap().name, "b");
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_selected_entry_when_rows_shift() {
+        let mut v = loaded_view(); // src, a.txt, b.txt
+        v.selected = Some(2); // b.txt
+        v.scroll = None;
+        v.apply_refresh(ok_listing(
+            "/x",
+            vec![entry("src", true), entry("0.txt", false), entry("a.txt", false), entry("b.txt", false)],
+        ));
+        assert_eq!(row_names(&v), ["src", "0.txt", "a.txt", "b.txt"]);
+        assert_eq!(v.selected_entry().unwrap().name, "b.txt");
+        assert_eq!(v.scroll, None, "a refresh does not move the view");
+    }
+
+    #[test]
+    fn when_the_selected_entry_vanishes_the_selection_stays_on_its_row() {
+        let mut v = loaded_view(); // src, a.txt, b.txt
+        v.selected = Some(1); // a.txt
+        v.apply_refresh(ok_listing("/x", vec![entry("src", true), entry("b.txt", false)]));
+        assert_eq!(v.selected_entry().unwrap().name, "b.txt");
+        v.apply_refresh(ok_listing("/x", vec![entry("src", true)]));
+        assert_eq!(v.selected_entry().unwrap().name, "src", "clamped to the last row");
+        v.apply_refresh(ok_listing("/x", vec![]));
+        assert_eq!(v.selected, None);
+    }
+
+    #[test]
+    fn a_refresh_keeps_sort_hidden_filter_search_and_error() {
+        let mut v = sortable_view();
+        v.sort_by(SortColumn::Size);
+        v.sort_by(SortColumn::Size); // descending
+        let t0 = Instant::now();
+        v.type_char('b', t0);
+        v.error = Some("Cannot copy x".into());
+        v.apply_refresh(ok_listing(
+            "/s",
+            vec![
+                entry("a_dir", true),
+                file(".h", Some(99), None),
+                file("b.txt", Some(10), Some(3)),
+                file("e.txt", Some(50), None),
+            ],
+        ));
+        assert_eq!(row_names(&v), ["a_dir", "e.txt", "b.txt"], "size descending, hidden filtered");
+        assert_eq!(v.error.as_deref(), Some("Cannot copy x"));
+        assert_eq!(v.last_elapsed, Some(Duration::from_millis(3)));
+        // Still the same search word: "b" + "." finds b.txt, not a new search for ".".
+        v.type_char('.', t0 + Duration::from_millis(100));
+        assert_eq!(v.selected_entry().unwrap().name, "b.txt");
+    }
+
+    #[test]
+    fn a_failed_refresh_keeps_the_list_and_shows_why() {
+        let mut v = loaded_view();
+        v.apply_refresh(Listing {
+            id: 2,
+            path: PathBuf::from("/x"),
+            result: Err(ListError::NotFound(PathBuf::from("/x"))),
+            elapsed: Duration::ZERO,
+        });
+        assert_eq!(row_names(&v), ["src", "a.txt", "b.txt"]);
+        assert_eq!(v.error.as_deref(), Some("Path does not exist: /x"));
+    }
+
+    #[test]
+    fn refresh_timer_fires_once_after_the_first_change() {
+        let mut t = RefreshTimer::default();
+        let t0 = Instant::now();
+        assert!(!t.take_due(t0));
+        assert_eq!(t.wait(t0), None);
+        t.note_change(t0);
+        t.note_change(t0 + Duration::from_millis(150)); // does not postpone
+        assert_eq!(t.wait(t0 + Duration::from_millis(50)), Some(REFRESH_DELAY - Duration::from_millis(50)));
+        assert!(!t.take_due(t0 + Duration::from_millis(199)));
+        assert!(t.take_due(t0 + REFRESH_DELAY));
+        assert!(!t.take_due(t0 + REFRESH_DELAY * 2), "fires once");
+        assert_eq!(t.wait(t0 + REFRESH_DELAY * 2), None);
+    }
+
+    #[test]
+    fn a_refresh_is_not_a_history_step_even_when_it_fails() {
+        let mut h = History::default();
+        go(&mut h, NavKind::New, "/a", "/b");
+        go(&mut h, NavKind::Refresh, "/b", "/b");
+        h.settle(NavKind::Refresh, Path::new("/b"), None);
+        assert_eq!(h.back_target(), Some(&p("/a")));
+        assert_eq!(h.forward_target(), None);
     }
 
     #[test]
