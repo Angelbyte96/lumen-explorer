@@ -23,6 +23,10 @@ cargo test                     # unit tests (fixtures live in ~/pruebas-explorad
 | Backspace | Go to parent folder |
 | Ctrl+L | Edit the path bar (Enter to go, Esc to cancel; `~` is your home) |
 | Ctrl+H | Show / hide hidden files |
+| Alt+← / Alt+→ | Back / forward through visited folders |
+| Type letters | Jump to the first entry starting with them (a 1 s pause starts over) |
+
+Click the Name, Size or Modified header to sort by that column; click it again to reverse. Folders always stay on top.
 
 The status bar shows the item count and how long the last listing took.
 Listing always runs on a background thread, so the window never freezes.
