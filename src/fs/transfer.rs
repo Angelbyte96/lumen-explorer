@@ -11,7 +11,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::ops::{exists, trash};
+use super::ops::{exists, same_entry, trash};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -61,19 +61,22 @@ impl Progress {
 /// "notes (copy 2).txt"; folders and dotfiles get the suffix at the end.
 pub fn copy_name(name: &OsStr, n: u32, is_dir: bool) -> OsString {
     let suffix = if n == 1 { " (copy)".to_owned() } else { format!(" (copy {n})") };
+    let bytes = name.as_encoded_bytes();
     // Index 0 is a dotfile's leading dot, not an extension.
-    let split = name
-        .to_str()
-        .filter(|_| !is_dir)
-        .and_then(|s| s.rfind('.').filter(|&i| i > 0).map(|i| s.split_at(i)));
-    match split {
-        Some((stem, ext)) => format!("{stem}{suffix}{ext}").into(),
-        None => {
-            let mut out = name.to_os_string();
-            out.push(suffix);
-            out
-        }
-    }
+    let dot = bytes.iter().rposition(|&b| b == b'.').filter(|&i| i > 0 && !is_dir);
+    let Some(dot) = dot else {
+        let mut out = name.to_os_string();
+        out.push(suffix);
+        return out;
+    };
+    let (stem, ext) = bytes.split_at(dot);
+    let mut out = Vec::with_capacity(bytes.len() + suffix.len());
+    out.extend_from_slice(stem);
+    out.extend_from_slice(suffix.as_bytes());
+    out.extend_from_slice(ext);
+    // SAFETY: split at an ASCII '.' of a valid encoded name and joined with
+    // UTF-8, which `from_encoded_bytes_unchecked` allows.
+    unsafe { OsString::from_encoded_bytes_unchecked(out) }
 }
 
 fn missing(path: &Path) -> String {
@@ -101,7 +104,9 @@ pub fn plan(source: &Path, dest_dir: &Path, mode: Mode) -> Result<Plan, String> 
     if meta.is_dir() && dest.starts_with(&entry) {
         return Err(format!("Cannot paste “{}” into itself", name.to_string_lossy()));
     }
-    if entry.parent() == Some(dest.as_path()) {
+    // Same inode also catches the folder reached through a bind mount.
+    let parent = entry.parent().expect("canonical_entry keeps the parent");
+    if parent == dest || same_entry(parent, &dest) {
         return Ok(match mode {
             Mode::Move => Plan::Nothing,
             Mode::Copy => {
@@ -133,7 +138,9 @@ pub fn run(
     }
     if replace && exists(target) {
         // Trashing a folder that holds the source would take the source with it.
-        if canonical_entry(source)?.starts_with(canonical_entry(target)?) {
+        if canonical_entry(source)?.starts_with(canonical_entry(target)?)
+            || same_entry(source, target)
+        {
             let name = target.file_name().unwrap_or_default().to_string_lossy();
             return Err(format!("Cannot replace “{name}”: it contains what is being pasted"));
         }
@@ -141,6 +148,11 @@ pub fn run(
     }
     match mode {
         Mode::Copy => copy_all(source, target, cancel, on_progress),
+        // `rename` silently replaces a file that appeared after `plan` checked.
+        Mode::Move if !replace && exists(target) => Err(format!(
+            "“{}” already exists",
+            target.file_name().unwrap_or_default().to_string_lossy()
+        )),
         Mode::Move => match std::fs::rename(source, target) {
             Ok(()) => {
                 on_progress(&Progress { files_done: 1, files_total: 1, ..Progress::default() });
@@ -239,8 +251,14 @@ impl<F: FnMut(&Progress)> Copier<'_, F> {
             }
             // Last, so a read-only folder still receives its contents.
             std::fs::set_permissions(to, meta.permissions()).map_err(fail)?;
-        } else {
+        } else if kind.is_file() {
             return self.copy_file(from, to, &meta);
+        } else {
+            // Pipes, sockets and devices: opening one can block forever or never end.
+            return Err(format!(
+                "Cannot copy {}: not a regular file, folder or link",
+                from.display()
+            ));
         }
         Ok(Outcome::Done)
     }
@@ -663,6 +681,70 @@ mod tests {
         });
         let err = wait(&mut job, &woke).unwrap_err();
         assert!(err.contains("ghost"), "{err}");
+    }
+
+    #[test]
+    fn same_folder_through_a_symlinked_path() {
+        let dir = fresh_fixture("xfer-same-link");
+        std::fs::create_dir(dir.join("real")).unwrap();
+        std::fs::write(dir.join("real/a.txt"), "A").unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("alias")).unwrap();
+        assert_eq!(
+            plan(&dir.join("real/a.txt"), &dir.join("alias"), Mode::Copy),
+            Ok(Plan::Ready(dir.join("alias/a (copy).txt")))
+        );
+        assert_eq!(plan(&dir.join("alias/a.txt"), &dir.join("real"), Mode::Move), Ok(Plan::Nothing));
+    }
+
+    #[test]
+    fn replacing_a_link_to_the_source_keeps_the_source() {
+        let dir = fresh_fixture("xfer-replace-link");
+        std::fs::create_dir(dir.join("q")).unwrap();
+        std::fs::write(dir.join("f.txt"), "SRC").unwrap();
+        std::os::unix::fs::symlink(dir.join("f.txt"), dir.join("q/f.txt")).unwrap();
+        let done = run(&dir.join("f.txt"), &dir.join("q/f.txt"), Mode::Copy, true, &never(), |_| {});
+        assert_eq!(done, Ok(Outcome::Done));
+        assert_eq!(read(&dir.join("f.txt")), "SRC");
+        assert_eq!(read(&dir.join("q/f.txt")), "SRC");
+        purge_trashed_from(&dir.join("q"));
+    }
+
+    #[test]
+    fn non_utf8_copy_name_keeps_the_extension() {
+        use std::os::unix::ffi::OsStrExt;
+        let name = copy_name(OsStr::from_bytes(b"caf\xe9.txt"), 1, false);
+        assert_eq!(name.as_bytes(), b"caf\xe9 (copy).txt");
+    }
+
+    #[test]
+    fn a_fifo_does_not_block_the_copy() {
+        let dir = fresh_fixture("xfer-fifo");
+        std::fs::create_dir(dir.join("src")).unwrap();
+        let made = std::process::Command::new("mkfifo").arg(dir.join("src/pipe")).status();
+        assert!(made.unwrap().success());
+        let (tx, woke) = mpsc::channel();
+        let mut job = Job::start(dir.join("src"), dir.join("dst"), Mode::Copy, false, move || {
+            let _ = tx.send(());
+        });
+        job.cancel();
+        // A hang panics after 5 s. Opening the pipe here to unblock a stuck
+        // reader would itself block (a FIFO writer waits for a reader).
+        let result = wait(&mut job, &woke);
+        assert!(result.is_err() || result == Ok(Outcome::Cancelled));
+    }
+
+    #[test]
+    fn special_files_are_reported_not_opened() {
+        let dir = fresh_fixture("xfer-special");
+        std::fs::create_dir(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.txt"), "A").unwrap();
+        let made = std::process::Command::new("mkfifo").arg(dir.join("src/pipe")).status();
+        assert!(made.unwrap().success());
+        let err = run(&dir.join("src"), &dir.join("dst"), Mode::Copy, false, &never(), |_| {})
+            .unwrap_err();
+        assert!(err.ends_with("pipe: not a regular file, folder or link"), "{err}");
+        assert_eq!(read(&dir.join("dst/a.txt")), "A", "what was copied stays");
+        assert!(std::fs::symlink_metadata(dir.join("dst/pipe")).is_err());
     }
 
     #[test]

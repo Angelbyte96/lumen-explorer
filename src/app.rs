@@ -587,8 +587,8 @@ impl LumenApp {
             Err(err) => self.error_after_load = Some(err),
         }
         // A navigation started meanwhile shows fresh contents anyway; reloading
-        // here would supersede it.
-        if self.lister.is_pending(self.shown_id) {
+        // here would supersede it. A pending refresh may be replaced.
+        if self.lister.is_pending(self.shown_id) && self.pending_nav != NavKind::Refresh {
             return;
         }
         let select = if running.target.parent() == Some(self.view.current.as_path()) {
@@ -684,6 +684,9 @@ impl eframe::App for LumenApp {
             self.history.settle(self.pending_nav, &from, to.as_deref());
             if to.is_some() {
                 self.watcher.watch(&self.view.current);
+            } else if self.pending_nav == NavKind::Refresh {
+                // The open folder is gone; watch it afresh if it comes back.
+                self.watcher.forget();
             }
             if let Some(err) = self.error_after_load.take() {
                 self.view.error = Some(err);

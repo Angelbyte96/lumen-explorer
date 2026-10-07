@@ -32,8 +32,9 @@ fn is_case_change_of_same_entry(from: &Path, to: &Path, old: &str, new: &str) ->
     old.to_lowercase() == new.to_lowercase() && same_entry(from, to)
 }
 
+/// Same device and inode: one entry reached through two paths.
 #[cfg(unix)]
-fn same_entry(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_entry(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
         (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
@@ -42,7 +43,7 @@ fn same_entry(a: &Path, b: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn same_entry(_: &Path, _: &Path) -> bool {
+pub(crate) fn same_entry(_: &Path, _: &Path) -> bool {
     false
 }
 

@@ -58,6 +58,14 @@ impl Watcher {
         }
     }
 
+    /// Stops watching, e.g. because the folder was deleted; the next
+    /// [`Watcher::watch`] starts afresh even for the same path.
+    pub fn forget(&mut self) {
+        if let (Some(inner), Some(old)) = (&mut self.inner, self.watched.take()) {
+            let _ = inner.unwatch(&old);
+        }
+    }
+
     /// Whether something changed since the last call.
     pub fn take_changed(&self) -> bool {
         self.changed.swap(false, Ordering::SeqCst)
@@ -136,6 +144,24 @@ mod tests {
         std::fs::write(dir.join("sub/deep.txt"), "").unwrap();
         std::thread::sleep(SETTLE);
         assert!(!w.take_changed());
+    }
+
+    #[test]
+    fn a_forgotten_folder_is_watched_again_when_recreated() {
+        let dir = fresh_fixture("watch-recreate");
+        let open = dir.join("open");
+        std::fs::create_dir(&open).unwrap();
+        let (mut w, _woke) = watcher();
+        w.watch(&open);
+        std::fs::remove_dir(&open).unwrap();
+        std::thread::sleep(SETTLE);
+        w.take_changed();
+        w.forget();
+        std::fs::create_dir(&open).unwrap();
+        w.watch(&open);
+        std::fs::write(open.join("x"), "").unwrap();
+        std::thread::sleep(SETTLE);
+        assert!(w.take_changed());
     }
 
     #[test]
