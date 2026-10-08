@@ -543,6 +543,14 @@ impl Dialog {
         }
     }
 
+    /// The line under the message saying what the keys do.
+    fn hint(&self) -> &'static str {
+        match self {
+            Self::Paste { .. } => "Enter to replace · Esc to skip",
+            Self::Trash { .. } | Self::Replace(_) => "Enter to confirm · Esc to cancel",
+        }
+    }
+
     /// The other answer (Escape): a paste goes on without this item.
     fn no_label(&self) -> &'static str {
         match self {
@@ -572,6 +580,14 @@ struct Clip {
 /// or a question about a taken name.
 struct Batch {
     mode: Mode,
+    /// The folder on screen when Ctrl+V was pressed; browsing elsewhere
+    /// meanwhile does not move the rest.
+    dest: PathBuf,
+    /// Every entry of the paste, to tell its own from a clipboard set since.
+    sources: Vec<PathBuf>,
+    /// A taken name found while something else had the keyboard: asked once
+    /// it is free, so a key meant for that never answers this.
+    parked: Option<Dialog>,
     /// Entries not started yet, in order.
     queue: VecDeque<PathBuf>,
     total: usize,
@@ -1055,7 +1071,16 @@ impl LumenApp {
         self.notice = None;
         self.tab.view.error = None;
         let total = paths.len();
-        self.batch = Some(Batch { mode, queue: paths.into(), total, landed: None, in_place: Vec::new() });
+        self.batch = Some(Batch {
+            mode,
+            dest: self.tab.view.current.clone(),
+            sources: paths.clone(),
+            parked: None,
+            queue: paths.into(),
+            total,
+            landed: None,
+            in_place: Vec::new(),
+        });
         self.next_paste(ctx);
     }
 
@@ -1069,11 +1094,12 @@ impl LumenApp {
                 return;
             };
             let mode = batch.mode;
-            match transfer::plan(&source, &self.tab.view.current, mode) {
+            match transfer::plan(&source, &batch.dest, mode) {
                 Ok(Plan::Ready(target)) => return self.start_job(ctx, source, target, mode, false),
                 Ok(Plan::Nothing) => batch.in_place.push(source),
                 Ok(Plan::TargetExists(target)) => {
-                    self.dialog = Some(Dialog::Paste { source, target, mode });
+                    batch.parked = Some(Dialog::Paste { source, target, mode });
+                    self.raise_parked_question();
                     return;
                 }
                 Err(err) => {
@@ -1084,12 +1110,29 @@ impl LumenApp {
         }
     }
 
+    /// Something other than the list reads the keys: a question, the path
+    /// box, the menu or a rename.
+    fn keys_taken(&self) -> bool {
+        self.dialog.is_some() || self.path_popup.is_open() || self.context_menu.is_some() || self.rename.is_some()
+    }
+
+    /// Asks the paste's parked question once nothing else has the keyboard.
+    fn raise_parked_question(&mut self) {
+        if !self.keys_taken()
+            && let Some(question) = self.batch.as_mut().and_then(|b| b.parked.take())
+        {
+            self.dialog = Some(question);
+        }
+    }
+
     /// The batch is over (done, cancelled or failed): what was cut and has
     /// moved leaves the clipboard, and the folder is listed again.
     fn end_paste(&mut self, ctx: &egui::Context) {
         let Some(batch) = self.batch.take() else { return };
-        if batch.mode == Mode::Move
-            && let Some(clip) = self.clipboard.as_mut()
+        // Only while the clipboard is still this cut: a newer Ctrl+C or Ctrl+X stays whole.
+        if let Some(clip) = self.clipboard.as_mut()
+            && clip.mode == Mode::Move
+            && clip.paths == batch.sources
         {
             clip.paths.retain(|path| fs::ops::exists(path));
             if clip.paths.is_empty() {
@@ -1474,7 +1517,9 @@ impl LumenApp {
             // Clearing a filter is the cheaper surprise than cancelling a copy.
             // A count is cheaper to lose than a copy, too.
             Action::Cancel => {
-                self.hold_absorbed = self.tab.view.clear_filter() || self.tab.view.drop_picks();
+                // Picks the user cannot see are dropped too, but do not use up the press.
+                let seen = self.tab.view.picked_count() > 0;
+                self.hold_absorbed = self.tab.view.clear_filter() || (self.tab.view.drop_picks() && seen);
                 if !self.hold_absorbed && self.cancel_count() {
                     self.notice = Some("Calculation cancelled".into());
                     self.hold_absorbed = true;
@@ -1503,12 +1548,6 @@ impl eframe::App for LumenApp {
         self.refresh_if_changed(&ctx);
         self.poll_count();
 
-        if let Some(result) = self.job.as_mut().and_then(|r| r.job.poll())
-            && let Some(running) = self.job.take()
-        {
-            self.finish_job(&ctx, running, result);
-        }
-
         // An open dialog takes the keyboard; the list must not react underneath.
         if self.dialog.is_some() {
             if let Some(answer) = input::read_confirm(&ctx) {
@@ -1520,6 +1559,13 @@ impl eframe::App for LumenApp {
             for action in input::read_actions(&ctx) {
                 self.handle_action(&ctx, action);
             }
+        }
+
+        // After the keys: a question this raises is drawn before any key can answer it.
+        if let Some(result) = self.job.as_mut().and_then(|r| r.job.poll())
+            && let Some(running) = self.job.take()
+        {
+            self.finish_job(&ctx, running, result);
         }
 
         egui::Panel::top("tabs").show(ui, |ui| {
@@ -1685,8 +1731,9 @@ impl eframe::App for LumenApp {
             self.rename = None;
         }
 
+        self.raise_parked_question();
         if let Some(dialog) = &self.dialog
-            && let Some(answer) = ui::confirm::show(&ctx, &dialog.message(), dialog.yes_label(), dialog.no_label())
+            && let Some(answer) = ui::confirm::show(&ctx, &dialog.message(), dialog.hint(), dialog.yes_label(), dialog.no_label())
         {
             self.answer_dialog(&ctx, answer);
         }
@@ -2003,6 +2050,155 @@ mod tests {
         wait_paste(&ctx, &mut app);
         assert!(!dir.join("b (copy).txt").exists(), "the second item never starts");
         assert!(app.batch.is_none());
+    }
+
+    /// Finishes the entry being copied, without starting a frame.
+    fn finish_current(ctx: &egui::Context, app: &mut LumenApp) {
+        for _ in 0..500 {
+            if let Some(result) = app.job.as_mut().and_then(|r| r.job.poll()) {
+                let running = app.job.take().unwrap();
+                app.finish_job(ctx, running, result);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("item did not finish");
+    }
+
+    #[test]
+    fn navigating_mid_paste_keeps_the_rest_in_the_paste_folder() {
+        let (ctx, mut app, dir) = app_in("app-batch-drift-nav");
+        std::fs::create_dir(dir.join("other")).unwrap();
+        pick(&mut app, &["a.txt", "b.txt"]);
+        app.handle_action(&ctx, Action::Copy);
+        app.navigate(&ctx, dir.join("sub"), None);
+        land(&mut app);
+        app.handle_action(&ctx, Action::Paste);
+        app.navigate(&ctx, dir.join("other"), None);
+        land(&mut app);
+        wait_paste(&ctx, &mut app);
+        assert_eq!(names_in(&dir.join("other")), Vec::<String>::new());
+        assert_eq!(names_in(&dir.join("sub")), ["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn switching_tabs_mid_paste_keeps_the_rest_in_the_paste_folder() {
+        let (ctx, mut app, dir) = app_in("app-batch-drift-tab");
+        std::fs::create_dir(dir.join("other")).unwrap();
+        pick(&mut app, &["a.txt", "b.txt"]);
+        app.handle_action(&ctx, Action::Cut);
+        app.navigate(&ctx, dir.join("sub"), None);
+        land(&mut app);
+        app.handle_action(&ctx, Action::Paste);
+        app.handle_action(&ctx, Action::NewTab);
+        land(&mut app);
+        app.navigate(&ctx, dir.join("other"), None);
+        land(&mut app);
+        wait_paste(&ctx, &mut app);
+        assert_eq!(names_in(&dir.join("other")), Vec::<String>::new());
+        assert_eq!(names_in(&dir.join("sub")), ["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn a_paste_question_waits_for_the_open_trash_question() {
+        let (ctx, mut app, dir) = app_in("app-batch-dialog-swap");
+        let sub = dir.join("sub");
+        std::fs::write(sub.join("b.txt"), "OLD").unwrap();
+        std::fs::write(sub.join("c.txt"), "C").unwrap();
+        pick(&mut app, &["a.txt", "b.txt"]);
+        app.handle_action(&ctx, Action::Copy);
+        app.navigate(&ctx, sub.clone(), None);
+        land(&mut app);
+        app.handle_action(&ctx, Action::Paste);
+        let row = app.tab.view.row_of_name("c.txt").unwrap();
+        app.tab.view.select_row(row);
+        app.handle_action(&ctx, Action::Trash);
+        finish_current(&ctx, &mut app);
+        assert_eq!(app.dialog.as_ref().unwrap().message(), "Move “c.txt” to the trash?");
+        app.answer_dialog(&ctx, Confirm::Yes);
+        let trashed = crate::fs::ops::tests::trashed_names_from(&sub);
+        crate::fs::ops::tests::purge_trashed_from(&sub);
+        assert_eq!(trashed, crate::fs::ops::tests::as_trashed(&["c.txt"]));
+        assert_eq!(std::fs::read_to_string(sub.join("b.txt")).unwrap(), "OLD", "not replaced unasked");
+        app.raise_parked_question();
+        let dialog = app.dialog.as_ref().expect("asked once the other question is gone");
+        assert_eq!(dialog.message(), "“b.txt” already exists here. Replace it? The existing one goes to the trash.");
+        app.answer_dialog(&ctx, Confirm::No);
+        wait_paste(&ctx, &mut app);
+        assert!(app.batch.is_none());
+    }
+
+    #[test]
+    fn a_paste_question_waits_while_the_path_box_menu_or_rename_has_the_keys() {
+        let (ctx, mut app, dir) = app_in("app-batch-park");
+        std::fs::write(dir.join("sub/a.txt"), "OLD").unwrap();
+        app.clipboard = Some(Clip { paths: vec![dir.join("a.txt")], mode: Mode::Copy });
+        app.navigate(&ctx, dir.join("sub"), None);
+        land(&mut app);
+        app.path_popup.open();
+        app.paste(&ctx);
+        assert!(app.dialog.is_none(), "typing a path must not answer it");
+        app.raise_parked_question();
+        assert!(app.dialog.is_none());
+        app.path_popup = PathPopup::default();
+        app.raise_parked_question();
+        assert!(app.dialog.is_some());
+    }
+
+    #[test]
+    fn the_dialogs_say_what_enter_and_escape_do() {
+        let trash = Dialog::Trash { paths: vec![PathBuf::from("/x/a")], select: None };
+        assert_eq!(trash.hint(), "Enter to confirm · Esc to cancel", "as before");
+        let paste = Dialog::Paste { source: "/x/a".into(), target: "/y/a".into(), mode: Mode::Copy };
+        assert_eq!(paste.hint(), "Enter to replace · Esc to skip");
+    }
+
+    #[test]
+    fn hidden_and_filtered_picks_are_not_trashed() {
+        let (ctx, mut app, dir) = app_in("app-batch-hidden-picks");
+        std::fs::write(dir.join(".h"), "H").unwrap();
+        app.tab.view.apply_refresh(listing_of(&dir));
+        app.handle_action(&ctx, Action::ToggleHidden);
+        app.handle_action(&ctx, Action::SelectAll);
+        app.handle_action(&ctx, Action::ToggleHidden);
+        app.handle_action(&ctx, Action::Trash);
+        assert_eq!(app.dialog.as_ref().unwrap().message(), "Move 3 items to the trash?");
+        app.answer_dialog(&ctx, Confirm::No);
+        app.handle_action(&ctx, Action::TypeChar('a'));
+        app.handle_action(&ctx, Action::Trash);
+        assert_eq!(app.dialog.as_ref().unwrap().message(), "Move “a.txt” to the trash?");
+        app.answer_dialog(&ctx, Confirm::No);
+        assert_eq!(names_in(&dir), [".h", "a.txt", "b.txt", "sub"]);
+    }
+
+    #[test]
+    fn escape_with_only_unseen_picks_goes_on_to_the_copy() {
+        let (ctx, mut app, dir) = app_in("app-escape-unseen");
+        std::fs::write(dir.join(".g"), "G").unwrap();
+        std::fs::write(dir.join(".h"), "H").unwrap();
+        app.tab.view.apply_refresh(listing_of(&dir));
+        app.handle_action(&ctx, Action::ToggleHidden);
+        pick(&mut app, &[".g", ".h"]);
+        app.handle_action(&ctx, Action::ToggleHidden);
+        assert_eq!(app.tab.view.picked_count(), 0, "the picks are hidden");
+        app.clipboard = Some(Clip { paths: vec![dir.join("a.txt")], mode: Mode::Copy });
+        app.paste(&ctx);
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.job.as_ref().unwrap().job.cancel_requested(), "no picks shown: Esc reaches the copy");
+    }
+
+    #[test]
+    fn copying_during_a_cut_paste_keeps_the_new_clipboard_whole() {
+        let (ctx, mut app, dir) = app_in("app-batch-recopy");
+        pick(&mut app, &["a.txt"]);
+        app.handle_action(&ctx, Action::Cut);
+        app.navigate(&ctx, dir.join("sub"), None);
+        land(&mut app);
+        app.handle_action(&ctx, Action::Paste);
+        app.clipboard = Some(Clip { paths: vec![dir.join("a.txt"), dir.join("b.txt")], mode: Mode::Copy });
+        wait_paste(&ctx, &mut app);
+        let Some(Clip { paths, .. }) = &app.clipboard else { panic!("kept") };
+        assert_eq!(paths, &[dir.join("a.txt"), dir.join("b.txt")], "not the paste's own clipboard");
     }
 
     #[test]
@@ -2824,6 +3020,20 @@ mod tests {
         v.apply_listing(ok_listing("/y", vec![entry("a.txt", false), entry("b.txt", false)]), None);
         assert_eq!(v.picked_count(), 0, "same names, another folder");
         assert_eq!(selection_names(&v), ["a.txt"]);
+    }
+
+    #[test]
+    fn picks_survive_sort_and_hidden_toggle() {
+        let mut v = loaded_view();
+        v.select_row(1);
+        v.toggle_pick(2);
+        v.sort_by(SortColumn::Name);
+        let mut got = selection_names(&v);
+        got.sort();
+        assert_eq!(got, ["a.txt", "b.txt"]);
+        v.toggle_hidden();
+        v.toggle_hidden();
+        assert_eq!(v.picked_count(), 2);
     }
 
     #[test]
