@@ -8,6 +8,39 @@ pub mod status_bar;
 pub mod tabs;
 pub mod toolbar;
 
+/// Drives egui frame by frame, with real pointer events, for UI tests.
+#[cfg(test)]
+pub mod testing {
+    use eframe::egui::{self, Event, PointerButton, Pos2, RawInput};
+
+    pub const SCREEN: egui::Rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+
+    /// Runs one frame with these events; returns what `draw` returned.
+    pub fn frame<R>(ctx: &egui::Context, events: Vec<Event>, mut draw: impl FnMut(&mut egui::Ui) -> R) -> R {
+        let mut out = None;
+        let input = RawInput { events, screen_rect: Some(SCREEN), ..RawInput::default() };
+        ctx.run_ui(input, |root| {
+            egui::CentralPanel::default().show(root, |ui| out = Some(draw(ui)));
+        })
+        .drop_without_applying_deltas();
+        out.expect("the frame ran")
+    }
+
+    /// Lays out, then presses and releases the primary button at `pos`;
+    /// returns what `ui` returned on the release frame.
+    pub fn click<R>(ctx: &egui::Context, pos: Pos2, mut ui: impl FnMut(&mut egui::Ui) -> R) -> R {
+        let button = |pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(ctx, vec![Event::PointerMoved(pos)], &mut ui);
+        frame(ctx, vec![button(true)], &mut ui);
+        frame(ctx, vec![button(false)], &mut ui)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use eframe::egui::{self, FontId};
