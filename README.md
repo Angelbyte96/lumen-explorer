@@ -28,8 +28,8 @@ cargo test                     # unit tests (fixtures live in ~/pruebas-explorad
 | Ctrl+D | Bookmark the current folder, or remove its bookmark (same as the ☆ button) |
 | Ctrl+H | Show / hide hidden files |
 | Alt+← / Alt+→ | Back / forward through visited folders |
-| Type text | Filter the list to names containing it (ignores case; shown at the bottom left) |
-| Space | Open / close the preview panel (with text in the filter, Space is just a space) |
+| Type text | Filter the list to names containing every typed word, in any order, ignoring case ("slides contenido" finds "Slides de contenido"); the matched letters are highlighted and the text is shown at the bottom left |
+| Space | Open / close the preview panel (with text in the filter, Space starts another word) |
 | Delete | Move the selected entry to the trash (asks first; Enter confirms, Esc cancels) |
 | F2 | Rename the selected entry in place (Enter to apply, Esc to cancel) |
 | Ctrl+Shift+N | Create "New Folder" here and rename it |

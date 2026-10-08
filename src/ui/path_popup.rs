@@ -255,12 +255,7 @@ impl PathPopup {
                                         ui.set_min_width(ui.available_width());
                                         ui.horizontal(|ui| {
                                             crate::ui::icons::show(ui, entry, ui.text_style_height(&egui::TextStyle::Body));
-                                            let ranges = word_ranges(&entry.name, &typed).unwrap_or_default();
-                                            let visuals = ui.visuals();
-                                            let normal = if entry.hidden { visuals.weak_text_color() } else { visuals.text_color() };
-                                            let font = egui::TextStyle::Body.resolve(ui.style());
-                                            let job = marked_name(&entry.name, &ranges, normal, visuals.hyperlink_color, font);
-                                            ui.add(egui::Label::new(job).selectable(false).truncate());
+                                            crate::ui::file_list::name_label(ui, entry, &typed);
                                         });
                                     });
                                 })

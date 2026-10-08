@@ -159,7 +159,7 @@ fn folder(ui: &mut egui::Ui, entries: &[Entry], show_hidden: bool, sort: Sort) {
                 row.col(|ui| {
                     ui.horizontal(|ui| {
                         icons::show(ui, entry, ui.text_style_height(&egui::TextStyle::Body));
-                        name_label(ui, entry);
+                        name_label(ui, entry, "");
                     });
                 });
                 row.col(|ui| {
