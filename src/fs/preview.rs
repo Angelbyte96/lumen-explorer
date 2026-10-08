@@ -298,8 +298,8 @@ mod tests {
         let mut previewer = Previewer::new();
         let (tx, done) = mpsc::channel();
         let tx2 = tx.clone();
-        let first = previewer.request(dir.join("a.txt"), move || drop(tx2.send(())));
-        let second = previewer.request(dir.join("b.txt"), move || drop(tx.send(())));
+        let first = previewer.request(dir.join("a.txt"), move || { let _ = tx2.send(()); });
+        let second = previewer.request(dir.join("b.txt"), move || { let _ = tx.send(()); });
         assert!(second > first);
         done.recv_timeout(Duration::from_secs(5)).unwrap();
         // The first request may or may not have run; only the second is reported.

@@ -10,8 +10,9 @@ use crate::fs::watch::Watcher;
 use crate::fs::{self, Entry, Lister, Listing};
 use crate::input::{self, Action, Confirm};
 use crate::fs::ops::Renamed;
+use crate::fs::preview::Previewer;
 use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
-use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_bar::PathBar, status_bar::Status};
+use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_bar::PathBar, preview::PreviewPane, status_bar::Status};
 
 /// How the table should bring the selection into view on the next frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,6 +421,9 @@ pub struct LumenApp {
     refresh: RefreshTimer,
     /// Side panel toggled with Space.
     preview_open: bool,
+    previewer: Previewer,
+    /// What the panel shows: the selected entry, once its preview loads.
+    preview: Option<PreviewPane>,
 }
 
 /// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
@@ -455,6 +459,8 @@ impl LumenApp {
             }),
             refresh: RefreshTimer::default(),
             preview_open: false,
+            previewer: Previewer::new(),
+            preview: None,
         };
         app.navigate(ctx, start, None);
         app
@@ -658,6 +664,31 @@ impl LumenApp {
         }
     }
 
+    /// Keeps the open panel on the selected entry, loading it again when the
+    /// selection moves or the entry changes on disk.
+    fn sync_preview(&mut self, ctx: &egui::Context) {
+        let entry = self.view.selected_entry().filter(|_| self.preview_open);
+        let current = match (entry, &self.preview) {
+            (Some(entry), Some(pane)) => pane.shows(entry),
+            (None, None) => true,
+            _ => false,
+        };
+        if !current {
+            self.preview = entry.map(|entry| {
+                let ctx = ctx.clone();
+                self.previewer.request(entry.path.clone(), move || ctx.request_repaint());
+                PreviewPane::new(entry)
+            });
+        }
+        // Only the newest request is ever delivered, and it belongs to this pane.
+        if let Some(preview) = self.previewer.poll()
+            && let Some(pane) = &mut self.preview
+            && pane.path == preview.path
+        {
+            pane.content = Some(preview.content);
+        }
+    }
+
     /// Reloads the open folder a moment after it changed on disk.
     fn refresh_if_changed(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
@@ -800,6 +831,23 @@ impl eframe::App for LumenApp {
             );
         });
 
+        self.sync_preview(&ctx);
+        if self.preview_open {
+            let width = ui.available_width();
+            egui::Panel::right("preview")
+                .resizable(true)
+                .default_size(width * 0.4)
+                .size_range(200.0..=width * 0.75)
+                .show(ui, |ui| match (&mut self.preview, self.view.selected_entry()) {
+                    (Some(pane), Some(entry)) => {
+                        ui::preview::show(ui, entry, pane, self.view.show_hidden);
+                    }
+                    _ => {
+                        ui.weak("Nothing selected");
+                    }
+                });
+        }
+
         egui::CentralPanel::default_margins().show(ui, |ui| {
             let scroll = self.view.scroll.take();
             let event = ui::file_list::show(
@@ -859,6 +907,7 @@ pub fn start_dir(arg: Option<String>) -> PathBuf {
 mod tests {
     use super::*;
     use crate::fs::lister::ListError;
+    use crate::fs::preview::Content;
     use std::path::Path;
     use std::time::Instant;
 
@@ -933,6 +982,65 @@ mod tests {
         assert!(!app.job.as_ref().unwrap().job.cancel_requested(), "the copy goes on");
         app.handle_action(&ctx, Action::Cancel);
         assert!(app.job.as_ref().unwrap().job.cancel_requested());
+    }
+
+    /// Lets the preview worker finish, as the next frames would.
+    fn wait_preview<'a>(ctx: &egui::Context, app: &'a mut LumenApp) -> &'a Content {
+        for _ in 0..500 {
+            app.sync_preview(ctx);
+            if app.preview.as_ref().is_some_and(|p| p.content.is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        app.preview.as_ref().and_then(|p| p.content.as_ref()).expect("preview loaded")
+    }
+
+    fn preview_text(content: &Content) -> &str {
+        match content {
+            Content::Text { text, .. } => text,
+            _ => panic!("expected text"),
+        }
+    }
+
+    #[test]
+    fn the_preview_follows_the_selection_while_open() {
+        let (ctx, mut app, dir) = app_in("app-preview-follow"); // sub, a.txt, b.txt
+        app.sync_preview(&ctx);
+        assert!(app.preview.is_none(), "closed: nothing is loaded");
+        app.handle_action(&ctx, Action::TypeChar(' '));
+        let Content::Folder(Ok(entries)) = wait_preview(&ctx, &mut app) else { panic!("folder") };
+        assert!(entries.is_empty(), "sub is empty");
+        app.handle_action(&ctx, Action::Move(1));
+        assert_eq!(preview_text(wait_preview(&ctx, &mut app)), "A");
+        assert_eq!(app.preview.as_ref().unwrap().path, dir.join("a.txt"));
+        app.handle_action(&ctx, Action::TypeChar(' '));
+        app.sync_preview(&ctx);
+        assert!(app.preview.is_none(), "Space closed it");
+    }
+
+    #[test]
+    fn a_file_changed_on_disk_is_previewed_again() {
+        let (ctx, mut app, dir) = app_in("app-preview-changed");
+        app.handle_action(&ctx, Action::Move(1)); // a.txt
+        app.handle_action(&ctx, Action::TypeChar(' '));
+        assert_eq!(preview_text(wait_preview(&ctx, &mut app)), "A");
+        std::fs::write(dir.join("a.txt"), "AAA").unwrap();
+        let entries = fs::lister::read_entries(&dir).unwrap();
+        app.view.apply_refresh(Listing { id: 1, path: dir, result: Ok(entries), elapsed: Duration::ZERO });
+        assert_eq!(preview_text(wait_preview(&ctx, &mut app)), "AAA");
+    }
+
+    #[test]
+    fn with_nothing_selected_the_open_preview_is_empty() {
+        let (ctx, mut app, _) = app_in("app-preview-none");
+        app.handle_action(&ctx, Action::TypeChar(' '));
+        for c in "zzz".chars() {
+            app.handle_action(&ctx, Action::TypeChar(c));
+        }
+        app.sync_preview(&ctx);
+        assert!(app.preview_open);
+        assert!(app.preview.is_none());
     }
 
     #[test]
