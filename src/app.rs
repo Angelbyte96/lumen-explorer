@@ -732,8 +732,8 @@ impl LumenApp {
 
     /// Opens a file with its default app (Enter in the list or the path box).
     fn open_file(&mut self, path: &Path) {
-        if let Err(err) = open::that_detached(path) {
-            self.tab.view.error = Some(format!("Cannot open {}: {err}", path.display()));
+        if let Err(err) = fs::ops::open_with_default_app(path) {
+            self.tab.view.error = Some(err);
         }
     }
 

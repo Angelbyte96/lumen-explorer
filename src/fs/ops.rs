@@ -11,6 +11,56 @@ pub fn trash(path: &Path) -> Result<(), String> {
     trash::delete(path).map_err(|e| format!("Cannot move {} to trash: {e}", path.display()))
 }
 
+/// Opens a file with its default app, without waiting for it.
+#[cfg(not(windows))]
+pub fn open_with_default_app(path: &Path) -> Result<(), String> {
+    open::that_detached(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))
+}
+
+/// Opens a file the way a double-click in File Explorer does. The `open` crate
+/// goes through PowerShell, whose zone check asks about every downloaded file,
+/// even a PNG; Explorer asks only about types Windows calls dangerous.
+#[cfg(windows)]
+pub fn open_with_default_app(path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{AssocIsDangerous, SEE_MASK_NOZONECHECKS, SHELLEXECUTEINFOW, ShellExecuteExW};
+    const SW_SHOWNORMAL: i32 = 1;
+    let wide = |s: &std::ffi::OsStr| s.encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let dangerous = assoc_key(path).map(|ext| {
+        let ext = wide(ext.as_ref());
+        // SAFETY: `ext` is a NUL-terminated UTF-16 string that outlives the call.
+        unsafe { AssocIsDangerous(ext.as_ptr()) != 0 }
+    });
+    let file = wide(path.as_os_str());
+    let verb = wide("open".as_ref());
+    // SAFETY: an all-zero SHELLEXECUTEINFOW is valid (null pointers and handles).
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = if skip_zone_check(dangerous) { SEE_MASK_NOZONECHECKS } else { 0 };
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.nShow = SW_SHOWNORMAL;
+    // SAFETY: `info` is sized and filled above; `file` and `verb` outlive the call.
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(format!("Cannot open {}: {err}", path.display()));
+    }
+    Ok(())
+}
+
+/// ".png" for "photo.png": what Windows looks up to judge a file type.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn assoc_key(path: &Path) -> Option<String> {
+    path.extension().map(|ext| format!(".{}", ext.to_string_lossy()))
+}
+
+/// Skip Windows' "untrusted source" prompt only when the type is known and safe,
+/// as File Explorer does. A file without an extension keeps the check.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn skip_zone_check(dangerous: Option<bool>) -> bool {
+    dangerous == Some(false)
+}
+
 /// Checks a name typed by the user for a new or renamed entry.
 pub fn validate_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
@@ -301,6 +351,21 @@ pub(crate) mod tests {
         assert!(same_entry(&dir.join("sub"), &dir.join("sub")), "folders too");
         assert!(!same_entry(&dir.join("a.txt"), &dir.join("b.txt")));
         assert!(!same_entry(&dir.join("a.txt"), &dir.join("ghost.txt")), "a missing entry is never the same");
+    }
+
+    #[test]
+    fn the_type_asked_about_is_the_extension_with_its_dot() {
+        assert_eq!(assoc_key(Path::new("C:/d/photo.PNG")), Some(".PNG".into()));
+        assert_eq!(assoc_key(Path::new("archive.tar.gz")), Some(".gz".into()));
+        assert_eq!(assoc_key(Path::new("Makefile")), None, "no extension");
+        assert_eq!(assoc_key(Path::new(".bashrc")), None, "a leading dot is a name, not an extension");
+    }
+
+    #[test]
+    fn the_zone_check_is_skipped_only_for_a_type_known_to_be_safe() {
+        assert!(skip_zone_check(Some(false)), "safe type: open like File Explorer");
+        assert!(!skip_zone_check(Some(true)), "dangerous type: Windows still warns");
+        assert!(!skip_zone_check(None), "no extension: Windows still warns");
     }
 
     #[test]

@@ -15,7 +15,6 @@ eframe = { version = "0.36", default-features = false, features = [
     "x11",
 ] }
 egui_extras = { version = "0.36", default-features = false }
-open = "5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # On Windows trash needs a COM threading model; apartment-threaded is its default
 # and what winit's main thread uses. The feature does nothing elsewhere.
@@ -28,14 +27,20 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Opens files with their default app. Not on Windows: see fs::ops::open_with_default_app.
+[target.'cfg(not(windows))'.dependencies]
+open = "5"
+
 # Drive letters, volume names and free space for the side panel; file
-# identities for renames. The same
+# identities for renames; opening files as File Explorer does. The same
 # windows-sys eframe already uses: only adds the feature.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
 ] }
 
 # GNOME on Wayland leaves the title bar to the app. Without this feature winit
