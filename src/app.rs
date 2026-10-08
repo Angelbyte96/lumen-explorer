@@ -206,16 +206,7 @@ impl View {
     }
 
     fn rebuild_rows(&mut self, keep_name: Option<&str>) {
-        let show_hidden = self.show_hidden;
-        let needle = self.filter.to_lowercase();
-        self.rows = (0..self.entries.len())
-            .filter(|&i| {
-                let e = &self.entries[i];
-                (show_hidden || !e.hidden) && (needle.is_empty() || e.name.to_lowercase().contains(&needle))
-            })
-            .collect();
-        let (entries, sort) = (&self.entries, self.sort);
-        self.rows.sort_by(|&a, &b| compare(entries, sort, a, b));
+        self.rows = visible_rows(&self.entries, self.show_hidden, &self.filter, self.sort);
         self.selected = keep_name
             .and_then(|name| self.row_of_name(name))
             .or((!self.rows.is_empty()).then_some(0));
@@ -224,6 +215,20 @@ impl View {
     fn row_of_name(&self, name: &str) -> Option<usize> {
         self.rows.iter().position(|&i| self.entries[i].name == name)
     }
+}
+
+/// Indices into `entries` that pass the hidden-files and text filters, in
+/// display order. Shared by the list and the folder preview.
+pub fn visible_rows(entries: &[Entry], show_hidden: bool, filter: &str, sort: Sort) -> Vec<usize> {
+    let needle = filter.to_lowercase();
+    let mut rows: Vec<usize> = (0..entries.len())
+        .filter(|&i| {
+            let e = &entries[i];
+            (show_hidden || !e.hidden) && (needle.is_empty() || e.name.to_lowercase().contains(&needle))
+        })
+        .collect();
+    rows.sort_by(|&a, &b| compare(entries, sort, a, b));
+    rows
 }
 
 /// Orders two indices into `entries`. The lister already delivers entries
@@ -862,7 +867,7 @@ impl eframe::App for LumenApp {
                 .size_range(200.0..=width * 0.75)
                 .show(ui, |ui| match (&mut self.preview, self.view.selected_entry()) {
                     (Some(pane), Some(entry)) => {
-                        ui::preview::show(ui, entry, pane, self.view.show_hidden);
+                        ui::preview::show(ui, entry, pane, self.view.show_hidden, self.view.sort);
                     }
                     _ => {
                         ui.weak("Nothing selected");
@@ -1250,6 +1255,18 @@ mod tests {
         ];
         v.apply_listing(ok_listing("/s", entries), None);
         v
+    }
+
+    #[test]
+    fn visible_rows_sort_and_hide_like_the_list_for_any_entries() {
+        let v = sortable_view();
+        let size_desc = Sort { column: SortColumn::Size, descending: true };
+        let rows = visible_rows(&v.entries, false, "", size_desc);
+        let names: Vec<&str> = rows.iter().map(|&i| v.entries[i].name.as_str()).collect();
+        assert_eq!(names, ["a_dir", "b_dir", "a.txt", "b.txt", "d.txt", "c.txt"]);
+        let entries = vec![entry(".git", true), entry("src", true), entry("a.txt", false)];
+        assert_eq!(visible_rows(&entries, false, "", Sort::default()), [1, 2]);
+        assert_eq!(visible_rows(&entries, true, "", Sort::default()), [0, 1, 2]);
     }
 
     #[test]

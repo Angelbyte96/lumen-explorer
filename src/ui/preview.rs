@@ -5,6 +5,9 @@ use std::time::SystemTime;
 
 use eframe::egui;
 
+use egui_extras::{Column, TableBuilder};
+
+use crate::app::{Sort, visible_rows};
 use crate::format::{format_size, format_time};
 use crate::fs::Entry;
 use crate::fs::preview::Content;
@@ -39,7 +42,7 @@ impl PreviewPane {
 }
 
 /// Draws the panel for the selected `entry`.
-pub fn show(ui: &mut egui::Ui, entry: &Entry, pane: &mut PreviewPane, show_hidden: bool) {
+pub fn show(ui: &mut egui::Ui, entry: &Entry, pane: &mut PreviewPane, show_hidden: bool, sort: Sort) {
     ui.add_space(6.0);
     let icon = if entry.is_dir { "🗀" } else { "🗋" };
     ui.add(egui::Label::new(egui::RichText::new(format!("{icon} {}", entry.name)).strong()).truncate());
@@ -53,7 +56,7 @@ pub fn show(ui: &mut egui::Ui, entry: &Entry, pane: &mut PreviewPane, show_hidde
                 ui.label("Loading…");
             });
         }
-        Some(Content::Folder(Ok(entries))) => folder(ui, entries, show_hidden),
+        Some(Content::Folder(Ok(entries))) => folder(ui, entries, show_hidden, sort),
         Some(Content::Folder(Err(err))) => {
             ui.colored_label(ui.visuals().error_fg_color, err);
         }
@@ -107,24 +110,54 @@ fn kind(entry: &Entry) -> String {
     }
 }
 
-/// The folder's entries, honouring Ctrl+H like the main list. Only visible
-/// rows are laid out, so a huge folder previews as fast as a small one.
-fn folder(ui: &mut egui::Ui, entries: &[Entry], show_hidden: bool) {
-    let shown: Vec<&Entry> = entries.iter().filter(|e| show_hidden || !e.hidden).collect();
-    if shown.is_empty() {
+/// The folder's entries as a read-only table, sorted and filtered for hidden
+/// files like the main list. Only visible rows are laid out, so a huge folder
+/// previews as fast as a small one.
+fn folder(ui: &mut egui::Ui, entries: &[Entry], show_hidden: bool, sort: Sort) {
+    let rows = visible_rows(entries, show_hidden, "", sort);
+    if rows.is_empty() {
         ui.weak("Empty folder");
         return;
     }
-    ui.weak(format!("{} items", shown.len()));
-    let row_height = ui.text_style_height(&egui::TextStyle::Body);
-    egui::ScrollArea::vertical().auto_shrink(false).show_rows(ui, row_height, shown.len(), |ui, range| {
-        for entry in &shown[range] {
-            let icon = if entry.is_dir { "🗀" } else { "🗋" };
-            let text = egui::RichText::new(format!("{icon} {}", entry.name));
-            let text = if entry.hidden { text.weak() } else { text };
-            ui.add(egui::Label::new(text).selectable(false).truncate());
-        }
-    });
+    ui.weak(format!("{} items", rows.len()));
+    let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+    TableBuilder::new(ui)
+        // Its own id: the main list's scroll and column state must not leak in.
+        .id_salt("lumen_preview_table")
+        .striped(true)
+        .column(Column::remainder().at_least(100.0).clip(true))
+        .column(Column::auto().at_least(50.0).clip(true))
+        .column(Column::exact(70.0))
+        .column(Column::exact(120.0))
+        .header(row_height, |mut header| {
+            for label in ["Name", "Type", "Size", "Modified"] {
+                header.col(|ui| {
+                    ui.strong(label);
+                });
+            }
+        })
+        .body(|body| {
+            body.rows(row_height, rows.len(), |mut row| {
+                let entry = &entries[rows[row.index()]];
+                row.col(|ui| {
+                    let icon = if entry.is_dir { "🗀" } else { "🗋" };
+                    let text = egui::RichText::new(format!("{icon} {}", entry.name));
+                    let text = if entry.hidden { text.weak() } else { text };
+                    ui.add(egui::Label::new(text).selectable(false).truncate());
+                });
+                row.col(|ui| {
+                    ui.add(egui::Label::new(kind(entry)).selectable(false).truncate());
+                });
+                row.col(|ui| {
+                    let size = entry.size.map(format_size).unwrap_or_default();
+                    ui.add(egui::Label::new(size).selectable(false));
+                });
+                row.col(|ui| {
+                    let date = entry.modified.map(format_time).unwrap_or_default();
+                    ui.add(egui::Label::new(date).selectable(false));
+                });
+            });
+        });
 }
 
 #[cfg(test)]
