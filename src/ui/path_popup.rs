@@ -1,7 +1,8 @@
 //! The path box, like File Pilot's: Ctrl+L (or a click on the crumb bar) opens
 //! it centred on the window with the current path selected, so typing a name
 //! replaces it. Below the field it lists what is in the folder typed so far,
-//! narrowed by the part being typed (its first match is picked); Up/Down pick
+//! narrowed by the words being typed, in any order, matches highlighted (the
+//! first match is picked); Up/Down pick
 //! a row, Enter uses it (or the typed path), Tab completes it, Ctrl+Enter opens
 //! it in a new tab, Escape closes.
 
@@ -184,7 +185,12 @@ impl PathPopup {
             .show(ctx, |ui| {
                 ui.set_width(width);
                 ui.horizontal(|ui| {
-                    crate::ui::icons::folder(ui);
+                    // A magnifier while a name is being searched, like File Pilot.
+                    if typed.trim().is_empty() {
+                        crate::ui::icons::folder(ui);
+                    } else {
+                        crate::ui::icons::magnifier(ui);
+                    }
                     let buttons = 4.0 * (ui.spacing().interact_size.x + ui.spacing().item_spacing.x);
                     let field = egui::TextEdit::singleline(&mut self.text)
                         .id(field_id())
@@ -247,7 +253,12 @@ impl PathPopup {
                                         ui.set_min_width(ui.available_width());
                                         ui.horizontal(|ui| {
                                             crate::ui::icons::show(ui, entry, ui.text_style_height(&egui::TextStyle::Body));
-                                            crate::ui::file_list::name_label(ui, entry);
+                                            let ranges = word_ranges(&entry.name, &typed).unwrap_or_default();
+                                            let visuals = ui.visuals();
+                                            let normal = if entry.hidden { visuals.weak_text_color() } else { visuals.text_color() };
+                                            let font = egui::TextStyle::Body.resolve(ui.style());
+                                            let job = marked_name(&entry.name, &ranges, normal, visuals.hyperlink_color, font);
+                                            ui.add(egui::Label::new(job).selectable(false).truncate());
                                         });
                                     });
                                 })
@@ -340,21 +351,62 @@ pub fn split_input(text: &str) -> (&str, &str) {
     }
 }
 
-/// Indices of the entries to list for `typed`, case-insensitive: names that
-/// start with it first, then names that contain it, each in folder order.
-/// Hidden entries only when shown, or when `typed` starts with a dot.
+/// Indices of the entries to list for `typed`: names holding every typed word
+/// (see [`word_ranges`]), those starting with the first word first, each group
+/// in folder order. Hidden entries only when shown, or when typed with a dot.
 pub fn matches(entries: &[Entry], typed: &str, show_hidden: bool) -> Vec<usize> {
-    let typed = typed.to_lowercase();
-    let hidden_ok = show_hidden || typed.starts_with('.');
-    let names: Vec<(usize, String)> = entries
+    let first = typed.split_whitespace().next().unwrap_or("").to_lowercase();
+    let hidden_ok = show_hidden || first.starts_with('.');
+    let (starting, rest): (Vec<usize>, Vec<usize>) = entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| hidden_ok || !e.hidden)
-        .map(|(i, e)| (i, e.name.to_lowercase()))
-        .collect();
-    let starting = names.iter().filter(|(_, n)| n.starts_with(&typed)).map(|(i, _)| *i);
-    let containing = names.iter().filter(|(_, n)| !n.starts_with(&typed) && n.contains(&typed)).map(|(i, _)| *i);
-    starting.chain(containing).collect()
+        .filter(|(_, e)| (hidden_ok || !e.hidden) && word_ranges(&e.name, typed).is_some())
+        .map(|(i, _)| i)
+        .partition(|&i| entries[i].name.to_lowercase().starts_with(&first));
+    starting.into_iter().chain(rest).collect()
+}
+
+/// Where each typed word is in `name`, as byte ranges sorted by position,
+/// or `None` when a word is missing. Words are split on spaces and found in
+/// any order, case-insensitive; each word takes its own characters, so "a a"
+/// needs two a's.
+pub fn word_ranges(name: &str, typed: &str) -> Option<Vec<std::ops::Range<usize>>> {
+    // Letter by letter, so a byte range in the folded name is one in `name`.
+    let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let letters: Vec<(usize, char)> = name.char_indices().map(|(at, c)| (at, fold(c))).collect();
+    let mut taken = vec![false; letters.len()];
+    let mut ranges = Vec::new();
+    for word in typed.split_whitespace() {
+        let word: Vec<char> = word.chars().map(fold).collect();
+        let fits = |start: usize| {
+            start + word.len() <= letters.len()
+                && word.iter().enumerate().all(|(k, c)| !taken[start + k] && letters[start + k].1 == *c)
+        };
+        let start = (0..letters.len()).find(|&start| fits(start))?;
+        let end = start + word.len();
+        taken[start..end].fill(true);
+        let end_byte = letters.get(end).map_or(name.len(), |(at, _)| *at);
+        ranges.push(letters[start].0..end_byte);
+    }
+    ranges.sort_by_key(|r| r.start);
+    Some(ranges)
+}
+
+/// A row's name with the typed words in `marked`, the rest in `normal`.
+pub fn marked_name(name: &str, ranges: &[std::ops::Range<usize>], normal: egui::Color32, marked: egui::Color32, font: egui::FontId) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let mut at = 0;
+    for range in ranges {
+        if range.start > at {
+            job.append(&name[at..range.start], 0.0, egui::TextFormat::simple(font.clone(), normal));
+        }
+        job.append(&name[range.clone()], 0.0, egui::TextFormat::simple(font.clone(), marked));
+        at = range.end;
+    }
+    if at < name.len() || name.is_empty() {
+        job.append(&name[at..], 0.0, egui::TextFormat::simple(font, normal));
+    }
+    job
 }
 
 /// Tab: the folder part with `entry`'s name, and a separator after a folder
@@ -547,6 +599,40 @@ mod tests {
         assert_eq!(names(matches(&entries, ".c", false)), [".config"], "a leading dot asks for hidden ones");
         assert_eq!(matches(&entries, "", true).len(), 5);
         assert!(matches(&entries, "zzz", false).is_empty());
+    }
+
+    #[test]
+    fn every_word_is_found_in_any_order_and_marked() {
+        assert_eq!(word_ranges("Descargas", "des"), Some(vec![std::ops::Range { start: 0, end: 3 }]));
+        assert_eq!(word_ranges("Descargas", "des gas"), Some(vec![0..3, 6..9]));
+        assert_eq!(word_ranges("Descargas", "GAS  des "), Some(vec![0..3, 6..9]), "any order, extra spaces");
+        assert_eq!(word_ranges("revision tareas.pdf", "tareas revision"), Some(vec![0..8, 9..15]));
+        assert_eq!(word_ranges("Descargas", "des xyz"), None, "every word must be there");
+        assert_eq!(word_ranges("banana", "an an"), Some(vec![1..3, 3..5]), "each word its own letters");
+        assert_eq!(word_ranges("ban", "an an"), None);
+        assert_eq!(word_ranges("Vídeos", "VÍD"), Some(vec![std::ops::Range { start: 0, end: 4 }]), "byte ranges around a multibyte letter");
+        assert_eq!(word_ranges("Descargas", ""), Some(vec![]), "nothing typed: everything matches");
+    }
+
+    #[test]
+    fn only_the_matched_letters_are_coloured() {
+        let (normal, marked) = (egui::Color32::GRAY, egui::Color32::LIGHT_BLUE);
+        let job = marked_name("Descargas", &[0..3, 6..9], normal, marked, egui::FontId::default());
+        let parts: Vec<(&str, egui::Color32)> =
+            job.sections.iter().map(|s| (&job.text[s.byte_range.start.0..s.byte_range.end.0], s.format.color)).collect();
+        assert_eq!(parts, [("Des", marked), ("car", normal), ("gas", marked)]);
+        let plain = marked_name("Vídeos", &[], normal, marked, egui::FontId::default());
+        assert_eq!(plain.sections.len(), 1);
+        assert_eq!(plain.text, "Vídeos");
+    }
+
+    #[test]
+    fn rows_match_words_in_any_order() {
+        let entries = [e("Descargas", true), e("revision tareas.pdf", false), e("tareas.txt", false)];
+        let names = |idx: Vec<usize>| idx.into_iter().map(|i| entries[i].name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(matches(&entries, "tareas revision", false)), ["revision tareas.pdf"]);
+        assert_eq!(names(matches(&entries, "tar", false)), ["tareas.txt", "revision tareas.pdf"], "starting with it first");
+        assert_eq!(names(matches(&entries, "des gas", false)), ["Descargas"]);
     }
 
     #[test]
