@@ -12,6 +12,7 @@ use crate::fs::count::{Count, Totals};
 use crate::fs::watch::Watcher;
 use crate::fs::{self, Entry, Lister, Listing};
 use crate::input::{self, Action, Confirm};
+use crate::menu::{self, Command};
 use crate::places::{self, Bookmarks, Mount, Place, Recents, Usage};
 use crate::fs::ops::Renamed;
 use crate::fs::preview::Previewer;
@@ -19,6 +20,7 @@ use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::ui::tabs::TabEvent;
 use crate::ui::toolbar::{Nav, ToolbarEvent};
+use crate::ui::context_menu::{ContextMenu, MenuEvent};
 use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_popup::{PathPopup, PopupEvent}, preview::PreviewPane, status_bar::Status};
 
 /// How the table should bring the selection into view on the next frame.
@@ -550,6 +552,11 @@ impl Dialog {
     }
 }
 
+/// Copy Path: one path per line.
+fn paths_text(paths: &[&Path]) -> String {
+    paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join("\n")
+}
+
 fn file_name(path: &Path) -> Option<String> {
     path.file_name().map(|n| n.to_string_lossy().into_owned())
 }
@@ -642,6 +649,8 @@ pub struct LumenApp {
     /// Inner window size in points, saved when Lumen closes.
     window: Option<[f32; 2]>,
     path_popup: PathPopup,
+    /// The right-click menu, while open.
+    context_menu: Option<ContextMenu>,
     dialog: Option<Dialog>,
     rename: Option<RenameEdit>,
     clipboard: Option<Clip>,
@@ -701,6 +710,7 @@ impl LumenApp {
             saved: Config::default(),
             window: None,
             path_popup: PathPopup::default(),
+            context_menu: None,
             dialog: None,
             rename: None,
             clipboard: None,
@@ -854,11 +864,73 @@ impl LumenApp {
 
     fn activate_selected(&mut self, ctx: &egui::Context) {
         let Some(entry) = self.tab.view.selected_entry() else { return };
-        let path = entry.path.clone();
-        if entry.is_dir {
+        self.activate(ctx, entry.path.clone(), entry.is_dir);
+    }
+
+    fn activate(&mut self, ctx: &egui::Context, path: PathBuf, is_dir: bool) {
+        if is_dir {
             self.navigate(ctx, path, None);
         } else {
             self.open_file(&path);
+        }
+    }
+
+    /// Right click on row `row`: the menu for the selection, which becomes
+    /// that row unless the row is already part of it.
+    fn open_entry_menu(&mut self, row: usize, pos: egui::Pos2) {
+        let view = &mut self.tab.view;
+        let in_selection = if view.picked_count() > 0 { view.is_picked(row) } else { view.selected == Some(row) };
+        if !in_selection {
+            view.select_row(row);
+        }
+        let selection = view.selection();
+        let bookmarked = matches!(selection.as_slice(), [one] if one.is_dir && self.bookmarks.contains(&one.path));
+        self.context_menu = Some(ContextMenu::new(menu::entry_menu(&selection, bookmarked), pos));
+    }
+
+    /// Right click on the list's empty space: the menu for the folder itself.
+    fn open_background_menu(&mut self, pos: egui::Pos2) {
+        let items = menu::background_menu(self.clipboard.is_some(), self.tab.view.sort);
+        self.context_menu = Some(ContextMenu::new(items, pos));
+    }
+
+    fn run_command(&mut self, ctx: &egui::Context, command: Command) {
+        let single = self.tab.view.single().map(|e| (e.path.clone(), e.is_dir));
+        match command {
+            Command::Open => {
+                if let Some((path, is_dir)) = single {
+                    self.activate(ctx, path, is_dir);
+                }
+            }
+            Command::OpenInNewTab => {
+                if let Some((path, true)) = single {
+                    self.new_tab(ctx);
+                    self.navigate(ctx, path, None);
+                }
+            }
+            Command::Cut => self.set_clipboard(Mode::Move),
+            Command::Copy => self.set_clipboard(Mode::Copy),
+            Command::CopyPath => {
+                let selection = self.tab.view.selection();
+                let paths: Vec<&Path> = selection.iter().map(|e| e.path.as_path()).collect();
+                ctx.copy_text(paths_text(&paths));
+                self.notice = Some(if paths.len() == 1 { "Path copied".into() } else { format!("{} paths copied", paths.len()) });
+            }
+            Command::Paste => self.paste(ctx),
+            Command::Rename => self.start_rename(),
+            Command::Trash => self.ask_trash(),
+            Command::ToggleBookmark => {
+                if let Some((path, true)) = single {
+                    self.toggle_bookmark(path);
+                }
+            }
+            Command::Count => self.count_selected(ctx),
+            Command::NewFolder => self.new_folder(ctx),
+            Command::Sort(column) => self.tab.view.sort_by(column),
+            Command::Refresh => {
+                let keep = self.tab.view.selected_entry().map(|e| e.name.clone());
+                self.reload(ctx, keep);
+            }
         }
     }
 
@@ -1177,10 +1249,10 @@ impl LumenApp {
     }
 
     /// Ctrl+D or the star: bookmarks the folder on screen, or removes it.
-    fn toggle_bookmark(&mut self) {
-        let current = self.tab.view.current.clone();
-        let name = file_name(&current).unwrap_or_else(|| current.display().to_string());
-        self.notice = Some(if self.bookmarks.toggle(&current) {
+    /// Ctrl+D (the folder on screen) or the menu (the folder clicked).
+    fn toggle_bookmark(&mut self, folder: PathBuf) {
+        let name = file_name(&folder).unwrap_or_else(|| folder.display().to_string());
+        self.notice = Some(if self.bookmarks.toggle(&folder) {
             format!("Added “{name}” to bookmarks")
         } else {
             format!("Removed “{name}” from bookmarks")
@@ -1194,7 +1266,7 @@ impl LumenApp {
             ToolbarEvent::Forward => self.go_history(ctx, NavKind::Forward),
             // Unlike Backspace, the button means "up" whatever the filter holds.
             ToolbarEvent::Up => self.go_parent(ctx),
-            ToolbarEvent::ToggleBookmark => self.toggle_bookmark(),
+            ToolbarEvent::ToggleBookmark => self.toggle_bookmark(self.tab.view.current.clone()),
             ToolbarEvent::Go(path) => self.navigate(ctx, path, None),
             ToolbarEvent::EditPath => self.path_popup.open(),
         }
@@ -1392,7 +1464,7 @@ impl LumenApp {
             Action::Cut => self.set_clipboard(Mode::Move),
             Action::Paste => self.paste(ctx),
             Action::Count => self.count_selected(ctx),
-            Action::ToggleBookmark => self.toggle_bookmark(),
+            Action::ToggleBookmark => self.toggle_bookmark(self.tab.view.current.clone()),
             Action::NewTab => self.new_tab(ctx),
             Action::CloseTab => self.close_tab(ctx, self.active),
             Action::NextTab => self.select_tab(ctx, (self.active + 1) % self.tabs.len()),
@@ -1442,8 +1514,8 @@ impl eframe::App for LumenApp {
             if let Some(answer) = input::read_confirm(&ctx) {
                 self.answer_dialog(&ctx, answer);
             }
-        } else if self.path_popup.is_open() {
-            // The path box reads its own keys when it is drawn.
+        } else if self.path_popup.is_open() || self.context_menu.is_some() {
+            // The path box and the menu read their own keys when drawn.
         } else {
             for action in input::read_actions(&ctx) {
                 self.handle_action(&ctx, action);
@@ -1560,6 +1632,11 @@ impl eframe::App for LumenApp {
             match event {
                 Some(ListEvent::Select(i)) => self.tab.view.select_row(i),
                 Some(ListEvent::Toggle(i)) => self.tab.view.toggle_pick(i),
+                Some(ListEvent::Menu(i)) => {
+                    if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                        self.open_entry_menu(i, pos);
+                    }
+                }
                 Some(ListEvent::Extend(i)) => self.tab.view.extend_to(i),
                 Some(ListEvent::Activate(i)) => {
                     self.tab.view.select_row(i);
@@ -1573,9 +1650,25 @@ impl eframe::App for LumenApp {
                         self.finish_rename(&ctx, edit, false);
                     }
                 }
-                None => {}
+                None => {
+                    // A right click below the rows: the menu for the folder.
+                    if let Some(pos) = ctx.input(|i| i.pointer.interact_pos().filter(|_| i.pointer.secondary_clicked()))
+                        && ui.max_rect().contains(pos)
+                    {
+                        self.open_background_menu(pos);
+                    }
+                }
             }
         });
+
+        if let Some(menu) = self.context_menu.as_mut()
+            && let Some(event) = menu.show(&ctx)
+        {
+            self.context_menu = None;
+            if let MenuEvent::Run(command) = event {
+                self.run_command(&ctx, command);
+            }
+        }
 
         let home = fs::home_dir();
         let shown = self.tab.view.show_hidden;
@@ -1960,6 +2053,73 @@ mod tests {
         pick(&mut app, &["sub"]);
         app.handle_action(&ctx, Action::Rename);
         assert_eq!(app.rename.as_ref().unwrap().text, "sub", "one picked row is the selection");
+    }
+
+    fn menu_labels(app: &LumenApp) -> Vec<String> {
+        app.context_menu.as_ref().expect("menu open").items().iter().map(|item| item.label.clone()).collect()
+    }
+
+    #[test]
+    fn a_right_click_outside_the_selection_selects_that_row_first() {
+        let (_ctx, mut app, _dir) = app_in("app-menu-row"); // sub, a.txt, b.txt
+        pick(&mut app, &["a.txt", "b.txt"]);
+        app.open_entry_menu(0, egui::pos2(10.0, 10.0));
+        assert_eq!(selection_names(&app.tab.view), ["sub"]);
+        assert!(menu_labels(&app).contains(&"Open in New Tab".to_owned()), "the menu of a folder");
+    }
+
+    #[test]
+    fn a_right_click_on_a_picked_row_keeps_every_pick() {
+        let (_ctx, mut app, _dir) = app_in("app-menu-picked");
+        pick(&mut app, &["a.txt", "b.txt"]);
+        app.open_entry_menu(1, egui::pos2(10.0, 10.0));
+        assert_eq!(selection_names(&app.tab.view), ["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn a_right_click_on_the_empty_space_keeps_the_selection() {
+        let (_ctx, mut app, _dir) = app_in("app-menu-background");
+        pick(&mut app, &["b.txt"]);
+        app.open_background_menu(egui::pos2(10.0, 10.0));
+        assert_eq!(selection_names(&app.tab.view), ["b.txt"]);
+        assert_eq!(menu_labels(&app), ["Paste", "New", "", "Sort by", "Refresh"]);
+        let paste = &app.context_menu.as_ref().unwrap().items()[0];
+        assert!(!paste.enabled, "nothing to paste yet");
+    }
+
+    #[test]
+    fn menu_commands_act_on_the_selection() {
+        let (ctx, mut app, dir) = app_in("app-menu-run");
+        pick(&mut app, &["sub"]);
+        app.run_command(&ctx, Command::ToggleBookmark);
+        assert!(app.bookmarks.contains(&dir.join("sub")), "the folder clicked, not the one on screen");
+        assert!(!app.bookmarks.contains(&dir));
+        app.run_command(&ctx, Command::OpenInNewTab);
+        assert_eq!((app.tabs.len(), app.active), (2, 1));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub")));
+        land(&mut app);
+        assert_eq!(app.tab.view.current, dir.join("sub"));
+    }
+
+    #[test]
+    fn sort_and_refresh_from_the_menu_keep_the_selected_entry() {
+        let (ctx, mut app, dir) = app_in("app-menu-sort");
+        pick(&mut app, &["b.txt"]);
+        app.run_command(&ctx, Command::Sort(SortColumn::Name));
+        assert!(app.tab.view.sort.descending, "Name again flips the order");
+        assert_eq!(selection_names(&app.tab.view), ["b.txt"]);
+        app.run_command(&ctx, Command::Refresh);
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.clone()));
+        land(&mut app);
+        assert_eq!(selection_names(&app.tab.view), ["b.txt"]);
+    }
+
+    #[test]
+    fn copy_path_writes_every_selected_path_one_per_line() {
+        let a = Path::new("/x/a.txt");
+        let b = Path::new("/x/b b.txt");
+        assert_eq!(paths_text(&[a, b]), "/x/a.txt\n/x/b b.txt");
+        assert_eq!(paths_text(&[a]), "/x/a.txt");
     }
 
     #[test]
