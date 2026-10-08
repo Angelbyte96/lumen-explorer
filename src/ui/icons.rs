@@ -64,6 +64,20 @@ pub fn show(ui: &mut egui::Ui, entry: &Entry) -> egui::Response {
     response
 }
 
+/// A magnifying glass, for the filter bar (the fonts have none).
+pub fn magnifier(ui: &mut egui::Ui) -> egui::Response {
+    let side = ui.text_style_height(&egui::TextStyle::Body);
+    let (rect, response) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
+    let color = ui.visuals().weak_text_color();
+    let stroke = Stroke::new(side * 0.1, color);
+    let r = side * 0.27;
+    let center = rect.center() - vec2(side * 0.08, side * 0.08);
+    ui.painter().circle_stroke(center, r, stroke);
+    let handle = vec2(1.0, 1.0).normalized();
+    ui.painter().line_segment([center + handle * r, center + handle * (r + side * 0.28)], Stroke::new(side * 0.13, color));
+    response
+}
+
 const FOLDER: Color32 = Color32::from_rgb(0xF2, 0xC1, 0x4E);
 const FOLDER_TAB: Color32 = Color32::from_rgb(0xD9, 0xA2, 0x2E);
 const PAGE: Color32 = Color32::from_rgb(0xE8, 0xEA, 0xED);

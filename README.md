@@ -21,7 +21,8 @@ cargo test                     # unit tests (fixtures live in ~/pruebas-explorad
 | Home / End | First / last entry |
 | Enter (or double click) | Enter folder / open file with the default app |
 | Backspace | Erase the last filter character, or go to the parent folder when the filter is empty (holding it stops once the filter is empty) |
-| Ctrl+L | Edit the path bar (Enter to go, Esc to cancel; `~` is your home) |
+| Ctrl+L | Type a path instead of the crumbs (Enter to go, Esc to cancel; `~` is your home); clicking the empty part of the crumb bar does the same |
+| Ctrl+D | Bookmark the current folder, or remove its bookmark (same as the ☆ button) |
 | Ctrl+H | Show / hide hidden files |
 | Alt+← / Alt+→ | Back / forward through visited folders |
 | Type text | Filter the list to names containing it (ignores case; shown at the bottom left) |
@@ -33,6 +34,8 @@ cargo test                     # unit tests (fixtures live in ~/pruebas-explorad
 | Ctrl+V | Paste into the current folder |
 | Alt+R | Count the selected folder: its size and how many folders and files it holds, all the way down (runs in the background; symlinks are not followed and other disks are not entered). Folders show `--` until counted; the result stays while you are in this folder |
 | Esc | Clear the filter; with an empty filter, stop the Alt+R count, then cancel the copy or move in progress (holding it stops at the first thing it undid) |
+
+The toolbar has back, forward and up buttons, the bookmark star and the current path as crumbs (`angelbyte › Descargas`): click a crumb to go there. Inside your home folder the crumbs start at it; elsewhere they start at `/`.
 
 The list and the folder preview show Name, Type, Date Modified, Folders, Files and Size. Click a header to sort by that column; click it again to reverse. Folders always stay on top; counted folders sort by their totals.
 

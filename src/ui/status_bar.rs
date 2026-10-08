@@ -76,7 +76,7 @@ fn filter_bar(ui: &mut egui::Ui, filter: &str) {
         .inner_margin(egui::Margin::symmetric(6, 1))
         .show(ui, |ui| {
             ui.set_min_width(180.0);
-            ui.label("🔍");
+            crate::ui::icons::magnifier(ui);
             ui.add(egui::Label::new(text).selectable(false));
         });
 }

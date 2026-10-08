@@ -2,6 +2,7 @@ mod app;
 mod format;
 mod fs;
 mod input;
+mod places;
 mod ui;
 
 use eframe::egui;

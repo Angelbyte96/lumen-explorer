@@ -94,6 +94,8 @@ pub struct Lister {
     tx: Sender<Listing>,
     rx: Receiver<Listing>,
     latest_id: u64,
+    #[cfg(test)]
+    latest_path: Option<PathBuf>,
     /// Print each listing time to stderr (enabled with `LUMEN_LOG=1`).
     log: bool,
 }
@@ -101,7 +103,14 @@ pub struct Lister {
 impl Lister {
     pub fn new(log: bool) -> Self {
         let (tx, rx) = mpsc::channel();
-        Self { tx, rx, latest_id: 0, log }
+        Self {
+            tx,
+            rx,
+            latest_id: 0,
+            #[cfg(test)]
+            latest_path: None,
+            log,
+        }
     }
 
     /// Starts listing `path` on a new thread. `on_done` runs on that thread when
@@ -109,6 +118,10 @@ impl Lister {
     pub fn request(&mut self, path: PathBuf, on_done: impl FnOnce() + Send + 'static) -> u64 {
         self.latest_id += 1;
         let id = self.latest_id;
+        #[cfg(test)]
+        {
+            self.latest_path = Some(path.clone());
+        }
         let tx = self.tx.clone();
         let log = self.log;
         thread::spawn(move || {
@@ -146,6 +159,12 @@ impl Lister {
 
     pub fn is_pending(&self, shown_id: u64) -> bool {
         shown_id != self.latest_id
+    }
+
+    /// The folder of the newest request.
+    #[cfg(test)]
+    pub fn last_requested(&self) -> Option<PathBuf> {
+        self.latest_path.clone()
     }
 }
 

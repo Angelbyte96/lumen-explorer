@@ -11,9 +11,11 @@ use crate::fs::count::{Count, Totals};
 use crate::fs::watch::Watcher;
 use crate::fs::{self, Entry, Lister, Listing};
 use crate::input::{self, Action, Confirm};
+use crate::places::Bookmarks;
 use crate::fs::ops::Renamed;
 use crate::fs::preview::Previewer;
 use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
+use crate::ui::toolbar::{Nav, ToolbarEvent};
 use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_bar::PathBar, preview::PreviewPane, status_bar::Status};
 
 /// How the table should bring the selection into view on the next frame.
@@ -461,6 +463,7 @@ pub struct LumenApp {
     clipboard: Option<Clip>,
     /// Copy or move running in the background; one at a time.
     job: Option<Running>,
+    bookmarks: Bookmarks,
     /// Folder size and counts being computed (Alt+R); one at a time.
     counting: Option<Count>,
     /// Informational line in the status bar ("1 item copied").
@@ -505,6 +508,7 @@ impl LumenApp {
             clipboard: None,
             job: None,
             counting: None,
+            bookmarks: Bookmarks::default(),
             notice: None,
             watcher: Watcher::new({
                 let ctx = ctx.clone();
@@ -722,6 +726,33 @@ impl LumenApp {
         }
     }
 
+    /// Ctrl+D or the star: bookmarks the folder on screen, or removes it.
+    fn toggle_bookmark(&mut self) {
+        let current = self.view.current.clone();
+        let name = file_name(&current).unwrap_or_else(|| current.display().to_string());
+        self.notice = Some(if self.bookmarks.toggle(&current) {
+            format!("Added “{name}” to bookmarks")
+        } else {
+            format!("Removed “{name}” from bookmarks")
+        });
+    }
+
+    fn handle_toolbar(&mut self, ctx: &egui::Context, event: ToolbarEvent) {
+        match event {
+            ToolbarEvent::Back => self.go_history(ctx, NavKind::Back),
+            ToolbarEvent::Forward => self.go_history(ctx, NavKind::Forward),
+            // Unlike Backspace, the button means "up" whatever the filter holds.
+            ToolbarEvent::Up => self.go_parent(ctx),
+            ToolbarEvent::ToggleBookmark => self.toggle_bookmark(),
+            ToolbarEvent::Go(path) => self.navigate(ctx, path, None),
+            ToolbarEvent::Typed(text) => {
+                let current = &self.view.current;
+                let target = fs::resolve_input_path(&text, current, fs::home_dir().as_deref());
+                self.navigate(ctx, target, None);
+            }
+        }
+    }
+
     /// Alt+R: counts what the selected folder holds, in the background.
     fn count_selected(&mut self, ctx: &egui::Context) {
         let Some(entry) = self.view.selected_entry().filter(|e| e.is_dir) else { return };
@@ -852,6 +883,7 @@ impl LumenApp {
             Action::Cut => self.set_clipboard(Mode::Move),
             Action::Paste => self.paste(ctx),
             Action::Count => self.count_selected(ctx),
+            Action::ToggleBookmark => self.toggle_bookmark(),
             // Clearing a filter is the cheaper surprise than cancelling a copy.
             // A count is cheaper to lose than a copy, too.
             Action::Cancel => {
@@ -931,12 +963,19 @@ impl eframe::App for LumenApp {
             }
         }
 
-        egui::Panel::top("path_bar").show(ui, |ui| {
+        egui::Panel::top("toolbar").show(ui, |ui| {
             ui.add_space(4.0);
             let current = self.view.current.clone();
-            if let Some(text) = self.path_bar.show(ui, &current) {
-                let target = fs::resolve_input_path(&text, &current, fs::home_dir().as_deref());
-                self.navigate(&ctx, target, None);
+            let home = fs::home_dir();
+            let nav = Nav {
+                current: &current,
+                home: home.as_deref(),
+                can_back: self.history.back_target().is_some(),
+                can_forward: self.history.forward_target().is_some(),
+                bookmarked: self.bookmarks.contains(&current),
+            };
+            if let Some(event) = ui::toolbar::show(ui, &nav, &mut self.path_bar) {
+                self.handle_toolbar(&ctx, event);
             }
             ui.add_space(2.0);
         });
@@ -1164,6 +1203,36 @@ mod tests {
         assert!(!app.job.as_ref().unwrap().job.cancel_requested(), "the copy goes on");
         app.handle_action(&ctx, Action::Cancel);
         assert!(app.job.as_ref().unwrap().job.cancel_requested());
+    }
+
+    #[test]
+    fn ctrl_d_bookmarks_the_current_folder_and_again_removes_it() {
+        let (ctx, mut app, dir) = app_in("app-bookmark");
+        app.handle_action(&ctx, Action::ToggleBookmark);
+        assert!(app.bookmarks.contains(&dir));
+        assert_eq!(app.notice.as_deref(), Some("Added “app-bookmark” to bookmarks"));
+        app.handle_toolbar(&ctx, ToolbarEvent::ToggleBookmark);
+        assert!(!app.bookmarks.contains(&dir), "the star does the same");
+        assert_eq!(app.notice.as_deref(), Some("Removed “app-bookmark” from bookmarks"));
+    }
+
+    #[test]
+    fn the_up_button_goes_up_even_with_a_filter() {
+        let (ctx, mut app, dir) = app_in("app-up-button");
+        app.handle_action(&ctx, Action::TypeChar('a'));
+        app.handle_toolbar(&ctx, ToolbarEvent::Up);
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(app.select_after_load, Some(name), "went up, selecting where we came from");
+        assert_eq!(app.view.filter(), "a", "the filter is not touched");
+    }
+
+    #[test]
+    fn a_crumb_or_typed_path_navigates() {
+        let (ctx, mut app, dir) = app_in("app-crumb");
+        app.handle_toolbar(&ctx, ToolbarEvent::Go(dir.join("sub")));
+        assert_eq!(app.lister.last_requested(), Some(dir.join("sub")));
+        app.handle_toolbar(&ctx, ToolbarEvent::Typed("sub/..".into()));
+        assert_eq!(app.lister.last_requested(), Some(dir.clone()));
     }
 
     /// Lets the running count finish, as the next frames would.
