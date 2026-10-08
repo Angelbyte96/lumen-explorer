@@ -146,15 +146,20 @@ pub fn count_cells(entry: &Entry, totals: Option<&Totals>) -> [String; 3] {
     }
 }
 
-/// Draws the Folders, Files and Size cells; numbers are right-aligned.
+/// Draws the Folders, Files and Size cells. Size is right-aligned so the
+/// units line up, like File Pilot; the counts stay under their headers.
 pub fn count_cols(row: &mut egui_extras::TableRow<'_, '_>, cells: &[String; 3]) {
-    for cell in cells {
+    let [folders, files, size] = cells;
+    for cell in [folders, files] {
         row.col(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(egui::Label::new(cell.as_str()).selectable(false));
-            });
+            ui.add(egui::Label::new(cell.as_str()).selectable(false));
         });
     }
+    row.col(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add(egui::Label::new(size.as_str()).selectable(false));
+        });
+    });
 }
 
 /// Id of the rename field, so the app can tell when it lost focus silently.
