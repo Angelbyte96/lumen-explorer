@@ -1,8 +1,9 @@
 //! The path box, like File Pilot's: Ctrl+L (or a click on the crumb bar) opens
-//! it over the list with the current path, cursor at its end. Below the field
-//! it lists what is in the folder typed so far, narrowed by the part being
-//! typed; Up/Down pick a row, Enter uses it (or the typed path), Tab completes
-//! it, Ctrl+Enter opens it in a new tab, Escape closes.
+//! it centred on the window with the current path selected, so typing a name
+//! replaces it. Below the field it lists what is in the folder typed so far,
+//! narrowed by the part being typed (its first match is picked); Up/Down pick
+//! a row, Enter uses it (or the typed path), Tab completes it, Ctrl+Enter opens
+//! it in a new tab, Escape closes.
 
 use std::path::{Path, PathBuf};
 
@@ -48,6 +49,12 @@ impl Keys {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Cursor {
+    SelectAll,
+    End,
+}
+
 /// Rows shown before the list scrolls.
 const VISIBLE_ROWS: f32 = 10.0;
 
@@ -57,9 +64,10 @@ pub struct PathPopup {
     text: String,
     /// The folder the text was filled from; another one refills it.
     filled_from: Option<PathBuf>,
-    /// Put the cursor at the end of the text on the next frame.
-    cursor_to_end: bool,
-    /// The picked row, an index into the rows shown.
+    /// Where to put the cursor on the next frame, if anywhere.
+    cursor: Option<Cursor>,
+    /// The row picked with Up/Down, an index into the rows shown. While a
+    /// name is typed and none is picked, the first row counts as picked.
     picked: Option<usize>,
     /// The folder last listed and what it holds (or why it could not be read).
     listing: Option<(PathBuf, Result<Vec<Entry>, String>)>,
@@ -80,9 +88,9 @@ impl PathPopup {
         &self.text
     }
 
-    fn set_text(&mut self, text: String) {
+    fn set_text(&mut self, text: String, cursor: Cursor) {
         self.text = text;
-        self.cursor_to_end = true;
+        self.cursor = Some(cursor);
         self.picked = None;
     }
 
@@ -114,7 +122,8 @@ impl PathPopup {
         }
         if self.filled_from.as_deref() != Some(current) {
             self.filled_from = Some(current.to_path_buf());
-            self.set_text(initial_text(current));
+            // Selected, like File Pilot: typing a name replaces the path.
+            self.set_text(initial_text(current), Cursor::SelectAll);
         }
         let keys = Keys::read(ctx);
         if keys.escape {
@@ -131,21 +140,26 @@ impl PathPopup {
         };
         let error = self.listing.as_ref().and_then(|(_, r)| r.as_ref().err().cloned());
         let rows = matches(&entries, &typed, show_hidden);
+        // A typed name picks its first match, so typing it and Enter opens it.
+        let first = (!typed.is_empty() && !rows.is_empty()).then_some(0);
 
         if keys.down && !rows.is_empty() {
-            self.picked = Some(self.picked.map_or(0, |p| (p + 1).min(rows.len() - 1)));
+            self.picked = Some(self.picked.or(first).map_or(0, |p| (p + 1).min(rows.len() - 1)));
         }
         if keys.up {
-            self.picked = self.picked.and_then(|p| p.checked_sub(1));
+            self.picked = self.picked.or(first).and_then(|p| p.checked_sub(1));
         }
+        let picked = self.picked.or(first);
         if keys.tab
-            && let Some(&row) = rows.get(self.picked.unwrap_or(0))
+            && let Some(&row) = rows.get(picked.unwrap_or(0))
         {
-            self.set_text(complete(&folder_text, &entries[row]));
+            // The full path, also when only a name was typed.
+            let folder_text = if folder_text.is_empty() { initial_text(current) } else { folder_text };
+            self.set_text(complete(&folder_text, &entries[row]), Cursor::End);
             return None;
         }
         if keys.enter || keys.ctrl_enter {
-            let (path, select) = match self.picked.and_then(|p| rows.get(p)) {
+            let (path, select) = match picked.and_then(|p| rows.get(p)) {
                 Some(&row) => entry_target(&entries[row]),
                 None => typed_target(&self.text, current, home),
             };
@@ -154,12 +168,15 @@ impl PathPopup {
         }
 
         let mut event = None;
-        // Over the list, a little inside its edges, like File Pilot.
-        let margin = 12.0;
+        // Centred on the window, three quarters of its width, just below the
+        // toolbar (the top of `anchor`), like File Pilot, at any window size.
+        let window = ctx.content_rect();
         let frame = egui::Frame::popup(&ctx.global_style());
-        let width = (anchor.width() - 2.0 * margin - frame.total_margin().sum().x).max(240.0);
+        let outer = (window.width() * 0.75).max(320.0_f32.min(window.width()));
+        let width = outer - frame.total_margin().sum().x;
+        let left = window.center().x - outer / 2.0;
         let area = egui::Modal::default_area(egui::Id::new("lumen_path_popup_area"))
-            .anchor(egui::Align2::LEFT_TOP, anchor.left_top().to_vec2() + egui::vec2(margin, 8.0));
+            .anchor(egui::Align2::LEFT_TOP, egui::vec2(left, anchor.top() + 8.0));
         let modal = egui::Modal::new(egui::Id::new("lumen_path_popup"))
             .area(area)
             .frame(frame)
@@ -174,11 +191,13 @@ impl PathPopup {
                         .desired_width(ui.available_width() - buttons)
                         .frame(egui::Frame::NONE)
                         .show(ui);
-                    if self.cursor_to_end {
-                        self.cursor_to_end = false;
-                        let end = egui::text::CCursor::new(self.text.chars().count());
+                    if let Some(cursor) = self.cursor.take() {
+                        let range = match cursor {
+                            Cursor::SelectAll => egui::text::CCursorRange::select_all(&field.galley),
+                            Cursor::End => egui::text::CCursorRange::one(egui::text::CCursor::new(self.text.chars().count())),
+                        };
                         let mut state = field.state;
-                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+                        state.cursor.set_char_range(Some(range));
                         state.store(ui.ctx(), field_id());
                     }
                     // The field keeps the keyboard while the box is open.
@@ -195,7 +214,7 @@ impl PathPopup {
                         ui.separator();
                         if button(ui, "up", toolbar::UP, "Parent folder").clicked() {
                             let parent = folder.parent().unwrap_or(&folder).to_path_buf();
-                            self.set_text(initial_text(&parent));
+                            self.set_text(initial_text(&parent), Cursor::End);
                         }
                         if button(ui, "forward", toolbar::FORWARD, "Forward").clicked() {
                             event = Some(PopupEvent::Forward);
@@ -218,7 +237,7 @@ impl PathPopup {
                         }
                         for (shown, &row) in rows.iter().enumerate() {
                             let entry = &entries[row];
-                            let picked = self.picked == Some(shown);
+                            let picked = picked == Some(shown);
                             let line = egui::UiBuilder::new().id(row_id(shown)).sense(egui::Sense::click());
                             let response = ui
                                 .scope_builder(line, |ui| {
@@ -413,12 +432,43 @@ mod tests {
     }
 
     #[test]
-    fn it_opens_with_the_path_and_typing_goes_after_it() {
+    fn it_opens_with_the_path_selected_so_typing_replaces_it() {
         let (ctx, mut popup, dir) = opened("popup-type");
         assert_eq!(popup.text(), initial_text(&dir));
         assert_eq!(step(&ctx, &mut popup, &dir, vec![text("sub")]), None);
+        assert_eq!(popup.text(), "sub", "the selected path was replaced");
         assert_eq!(step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::NONE)]), go(dir.join("sub"), None, false));
         assert!(!popup.is_open(), "it closes once used");
+    }
+
+    #[test]
+    fn a_typed_name_picks_its_first_match_so_enter_opens_it() {
+        let (ctx, mut popup, dir) = opened("popup-first");
+        step(&ctx, &mut popup, &dir, vec![text("SU")]);
+        assert_eq!(step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::NONE)]), go(dir.join("sub"), None, false));
+        popup.open();
+        step(&ctx, &mut popup, &dir, vec![]);
+        step(&ctx, &mut popup, &dir, vec![text("a.")]);
+        let used = step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert_eq!(used, go(dir.clone(), Some("a.txt"), false));
+        popup.open();
+        step(&ctx, &mut popup, &dir, vec![]);
+        step(&ctx, &mut popup, &dir, vec![text("nothing-like-it")]);
+        let used = step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert_eq!(used, go(dir.join("nothing-like-it"), None, false), "no match: the typed path");
+    }
+
+    #[test]
+    fn the_box_is_centred_on_the_window_whatever_the_list_size() {
+        let (ctx, mut popup, dir) = opened("popup-centre");
+        let list = egui::Rect::from_min_max(egui::pos2(200.0, 60.0), SCREEN.max);
+        for _ in 0..3 {
+            frame(&ctx, vec![], |ui| popup.show(ui.ctx(), list, &dir, None, false));
+        }
+        let area = ctx.memory(|m| m.area_rect(egui::Id::new("lumen_path_popup_area"))).expect("shown");
+        assert!((area.center().x - SCREEN.center().x).abs() < 1.0, "centred: {area:?}");
+        assert!((area.width() - 0.75 * SCREEN.width()).abs() < 1.0, "75% wide: {area:?}");
+        assert!(area.top() >= list.top(), "below the toolbar: {area:?}");
     }
 
     #[test]
