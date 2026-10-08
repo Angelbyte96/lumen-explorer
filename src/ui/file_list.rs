@@ -10,6 +10,7 @@ use crate::format::{format_size, format_time};
 use crate::fs::Entry;
 use crate::fs::count::Totals;
 use crate::ui::icons;
+use crate::ui::path_popup::{marked_name, word_ranges};
 
 pub enum ListEvent {
     Select(usize),
@@ -114,7 +115,7 @@ pub fn show(
                             }
                             return;
                         }
-                        name_label(ui, entry);
+                        name_label(ui, entry, view.filter());
                     });
                 });
                 row.col(|ui| {
@@ -136,11 +137,15 @@ pub fn show(
     event
 }
 
-/// The entry's name, dimmed when hidden, cut with "…" when too long.
-pub fn name_label(ui: &mut egui::Ui, entry: &Entry) {
-    let text = egui::RichText::new(&entry.name);
-    let text = if entry.hidden { text.weak() } else { text };
-    ui.add(egui::Label::new(text).selectable(false).truncate());
+/// The entry's name, dimmed when hidden, cut with "…" when too long. The
+/// letters matching the `typed` words are in the link colour.
+pub fn name_label(ui: &mut egui::Ui, entry: &Entry, typed: &str) {
+    let ranges = word_ranges(&entry.name, typed).unwrap_or_default();
+    let visuals = ui.visuals();
+    let normal = if entry.hidden { visuals.weak_text_color() } else { visuals.text_color() };
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let job = marked_name(&entry.name, &ranges, normal, visuals.hyperlink_color, font);
+    ui.add(egui::Label::new(job).selectable(false).truncate());
 }
 
 /// Header labels and the column each one sorts, in display order.
@@ -325,6 +330,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_filter_words_are_highlighted_in_the_name() {
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        let listing = crate::fs::Listing {
+            id: 1,
+            path: PathBuf::from("/x"),
+            result: Ok(vec![entry("Slides de contenido"), entry("notes.txt")]),
+            elapsed: std::time::Duration::ZERO,
+        };
+        view.apply_listing(listing, None);
+        for c in "contenido sli".chars() {
+            view.push_filter(c);
+        }
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                show(ui, &view, 0, None, None);
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let marked = ctx.global_style().visuals.hyperlink_color;
+        let galley = shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == "Slides de contenido" => Some(t.galley.clone()),
+                _ => None,
+            })
+            .expect("name painted");
+        let coloured: Vec<&str> = galley
+            .job
+            .sections
+            .iter()
+            .filter(|section| section.format.color == marked)
+            .map(|section| &galley.job.text[section.byte_range.start.0..section.byte_range.end.0])
+            .collect();
+        assert_eq!(coloured, ["Sli", "contenido"]);
     }
 
     #[test]

@@ -76,7 +76,8 @@ pub struct View {
     pub error: Option<String>,
     /// Set when the selection changed via keyboard, so the table scrolls to it.
     pub scroll: Option<Scroll>,
-    /// What was typed in the filter bar; rows must contain it, ignoring case.
+    /// What was typed in the filter bar; rows must contain each of its words,
+    /// in any order, ignoring case (like the Ctrl+L box).
     filter: String,
     /// Folder totals computed with Alt+R, by entry name. Kept while the folder
     /// stays on screen, dropped when another folder is shown.
@@ -254,11 +255,10 @@ pub fn visible_rows(
     filter: &str,
     sort: Sort,
 ) -> Vec<usize> {
-    let needle = filter.to_lowercase();
     let mut rows: Vec<usize> = (0..entries.len())
         .filter(|&i| {
             let e = &entries[i];
-            (show_hidden || !e.hidden) && (needle.is_empty() || e.name.to_lowercase().contains(&needle))
+            (show_hidden || !e.hidden) && crate::ui::path_popup::word_ranges(&e.name, filter).is_some()
         })
         .collect();
     // Kinds are built once, not on every comparison.
@@ -2393,12 +2393,35 @@ mod tests {
     }
 
     #[test]
-    fn a_space_after_other_characters_is_part_of_the_filter() {
+    fn a_space_after_other_characters_starts_another_word() {
         let mut v = View::default();
-        let entries = vec![entry("my doc.txt", false), entry("mydoc.txt", false)];
+        let entries = vec![entry("my doc.txt", false), entry("mydoc.txt", false), entry("yd.txt", false)];
         v.apply_listing(ok_listing("/s", entries), None);
         type_str(&mut v, "my d");
-        assert_eq!(row_names(&v), ["my doc.txt"]);
+        assert_eq!(v.filter(), "my d", "the space is kept in what was typed");
+        assert_eq!(row_names(&v), ["my doc.txt", "mydoc.txt"]);
+    }
+
+    #[test]
+    fn the_filter_finds_every_word_in_any_order_and_keeps_the_sort() {
+        let mut v = View::default();
+        let entries = vec![
+            entry("Slides de contenido", true),
+            entry("contenido", true),
+            entry("slides.pdf", false),
+            entry("Contenido de slides.txt", false),
+        ];
+        v.apply_listing(ok_listing("/s", entries), None);
+        type_str(&mut v, "slides contenido");
+        assert_eq!(row_names(&v), ["Slides de contenido", "Contenido de slides.txt"]);
+        assert_eq!(v.selected_entry().unwrap().name, "Slides de contenido");
+        v.clear_filter();
+        type_str(&mut v, "CONTENIDO  slides");
+        assert_eq!(row_names(&v), ["Slides de contenido", "Contenido de slides.txt"], "any order, case, extra spaces");
+        v.clear_filter();
+        // "Slides de contenido" holds "de" twice (sli-de-s, de), not three times.
+        type_str(&mut v, "de de de");
+        assert_eq!(row_names(&v), Vec::<&str>::new(), "a repeated word needs its own letters");
     }
 
     #[test]
