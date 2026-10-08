@@ -1,7 +1,7 @@
 //! Application state and the per-frame UI loop.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -83,6 +83,12 @@ pub struct View {
     /// Folder totals computed with Alt+R, by entry name. Kept while the folder
     /// stays on screen, dropped when another folder is shown.
     pub totals: HashMap<String, Totals>,
+    /// Entries picked with Ctrl+A, Ctrl+click or Shift, by name so a refresh,
+    /// a sort or the filter does not move them. Only the rows shown count.
+    /// Empty: the selection is the cursor row alone.
+    picks: HashSet<String>,
+    /// Entry a Shift range starts from.
+    anchor: Option<String>,
 }
 
 impl View {
@@ -96,6 +102,7 @@ impl View {
                 if listing.path != self.current {
                     self.filter.clear();
                     self.totals.clear();
+                    self.drop_picks();
                 }
                 self.current = listing.path;
                 self.entries = entries;
@@ -198,6 +205,7 @@ impl View {
     }
 
     pub fn move_selection(&mut self, action: Action) {
+        self.drop_picks();
         let Some(last) = self.rows.len().checked_sub(1) else {
             self.selected = None;
             return;
@@ -210,6 +218,85 @@ impl View {
             _ => cur,
         });
         self.scroll = Some(Scroll::Smooth);
+    }
+
+    /// A plain click: this row alone.
+    pub fn select_row(&mut self, row: usize) {
+        self.drop_picks();
+        self.selected = Some(row);
+    }
+
+    /// Ctrl+A: every row shown.
+    pub fn select_all(&mut self) {
+        self.picks = self.rows.iter().map(|&i| self.entries[i].name.clone()).collect();
+    }
+
+    /// Ctrl+click: adds or removes `row`. The first one keeps the cursor row
+    /// picked, as it was the selection until then.
+    pub fn toggle_pick(&mut self, row: usize) {
+        let Some(&idx) = self.rows.get(row) else { return };
+        if self.picks.is_empty()
+            && let Some(cursor) = self.selected_entry()
+        {
+            self.picks.insert(cursor.name.clone());
+        }
+        let name = &self.entries[idx].name;
+        if !self.picks.remove(name) {
+            self.picks.insert(name.clone());
+        }
+        self.anchor = Some(name.clone());
+        self.selected = Some(row);
+    }
+
+    /// Shift+click: the rows from the anchor (the last plain or Ctrl click) to `row`.
+    pub fn extend_to(&mut self, row: usize) {
+        if row >= self.rows.len() {
+            return;
+        }
+        let anchor = self
+            .anchor
+            .as_deref()
+            .and_then(|name| self.row_of_name(name))
+            .or(self.selected)
+            .unwrap_or(row);
+        self.anchor = Some(self.entries[self.rows[anchor]].name.clone());
+        let (from, to) = (anchor.min(row), anchor.max(row));
+        self.picks = self.rows[from..=to].iter().map(|&i| self.entries[i].name.clone()).collect();
+        self.selected = Some(row);
+    }
+
+    /// Shift+arrows: moves the cursor `delta` rows, selecting the range.
+    pub fn extend_by(&mut self, delta: isize) {
+        let Some(last) = self.rows.len().checked_sub(1) else { return };
+        let row = self.selected.unwrap_or(0).saturating_add_signed(delta).min(last);
+        self.extend_to(row);
+        self.scroll = Some(Scroll::Smooth);
+    }
+
+    /// Back to the cursor row alone. `false` when nothing was picked.
+    pub fn drop_picks(&mut self) -> bool {
+        self.anchor = None;
+        !std::mem::take(&mut self.picks).is_empty()
+    }
+
+    pub fn is_picked(&self, row: usize) -> bool {
+        self.rows.get(row).is_some_and(|&i| self.picks.contains(&self.entries[i].name))
+    }
+
+    /// Picked rows shown.
+    pub fn picked_count(&self) -> usize {
+        (0..self.rows.len()).filter(|&row| self.is_picked(row)).count()
+    }
+
+    /// What an operation acts on, in display order: the picked rows shown, or
+    /// the cursor row when none is.
+    #[cfg_attr(not(test), expect(dead_code, reason = "the file operations do not take it yet"))]
+    pub fn selection(&self) -> Vec<&Entry> {
+        let picked: Vec<&Entry> = (0..self.rows.len())
+            .filter(|&row| self.is_picked(row))
+            .map(|row| &self.entries[self.rows[row]])
+            .collect();
+        if picked.is_empty() { self.selected_entry().into_iter().collect() } else { picked }
     }
 
     pub fn selected_entry(&self) -> Option<&Entry> {
@@ -1176,6 +1263,8 @@ impl LumenApp {
                 }
             }
             Action::Move(_) | Action::First | Action::Last => self.tab.view.move_selection(action),
+            Action::Extend(rows) => self.tab.view.extend_by(rows),
+            Action::SelectAll => self.tab.view.select_all(),
             // A leading Space is the preview key; after other text it is just a space.
             Action::TypeChar(' ') if self.tab.view.filter().is_empty() => {
                 self.preview_open = !self.preview_open;
@@ -1201,7 +1290,7 @@ impl LumenApp {
             // Clearing a filter is the cheaper surprise than cancelling a copy.
             // A count is cheaper to lose than a copy, too.
             Action::Cancel => {
-                self.hold_absorbed = self.tab.view.clear_filter();
+                self.hold_absorbed = self.tab.view.clear_filter() || self.tab.view.drop_picks();
                 if !self.hold_absorbed && self.cancel_count() {
                     self.notice = Some("Calculation cancelled".into());
                     self.hold_absorbed = true;
@@ -1296,6 +1385,7 @@ impl eframe::App for LumenApp {
                     notice: self.notice.as_deref(),
                     folder_count: self.tab.view.folder_count(),
                     selected: self.tab.view.selected,
+                    picked: self.tab.view.picked_count(),
                     counting: self.counting.as_ref().map(|c| {
                         let name = file_name(&c.path).unwrap_or_default();
                         ui::status_bar::counting_text(&name, &c.progress)
@@ -1353,9 +1443,11 @@ impl eframe::App for LumenApp {
             let scroll = self.tab.view.scroll.take();
             let event = ui::file_list::show(ui, &self.tab.view, self.list_zoom, scroll, self.rename.as_mut());
             match event {
-                Some(ListEvent::Select(i)) => self.tab.view.selected = Some(i),
+                Some(ListEvent::Select(i)) => self.tab.view.select_row(i),
+                Some(ListEvent::Toggle(i)) => self.tab.view.toggle_pick(i),
+                Some(ListEvent::Extend(i)) => self.tab.view.extend_to(i),
                 Some(ListEvent::Activate(i)) => {
-                    self.tab.view.selected = Some(i);
+                    self.tab.view.select_row(i);
                     self.activate_selected(&ctx);
                 }
                 Some(ListEvent::Sort(column)) => self.tab.view.sort_by(column),
@@ -1582,6 +1674,25 @@ mod tests {
         app.handle_action(&ctx, Action::Cancel);
         assert_eq!(app.tab.view.filter(), "");
         assert!(!app.job.as_ref().unwrap().job.cancel_requested(), "the copy goes on");
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.job.as_ref().unwrap().job.cancel_requested());
+    }
+
+    #[test]
+    fn escape_drops_the_multi_selection_after_the_filter_and_before_the_copy() {
+        let (ctx, mut app, dir) = app_in("app-escape-picks");
+        app.clipboard = Some(Clip { path: dir.join("a.txt"), mode: Mode::Copy });
+        app.paste(&ctx);
+        app.handle_action(&ctx, Action::SelectAll);
+        app.handle_action(&ctx, Action::TypeChar('t'));
+        app.handle_action(&ctx, Action::Cancel);
+        assert_eq!(app.tab.view.filter(), "");
+        assert_eq!(app.tab.view.picked_count(), 3, "the filter went first");
+        app.handle_action(&ctx, Action::Cancel);
+        assert_eq!(app.tab.view.picked_count(), 0);
+        assert!(!app.job.as_ref().unwrap().job.cancel_requested(), "the copy goes on");
+        app.handle_action(&ctx, Action::CancelHeld);
+        assert!(!app.job.as_ref().unwrap().job.cancel_requested(), "a held Esc stops at the picks");
         app.handle_action(&ctx, Action::Cancel);
         assert!(app.job.as_ref().unwrap().job.cancel_requested());
     }
@@ -2188,6 +2299,96 @@ mod tests {
             v.push_filter(c);
         }
         assert_eq!(v.folder_count(), 0, "the filter left only a.txt");
+    }
+
+    fn selection_names(v: &View) -> Vec<&str> {
+        v.selection().iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn without_picks_the_selection_is_the_cursor_row() {
+        let mut v = loaded_view();
+        v.select_row(1);
+        assert_eq!(selection_names(&v), ["a.txt"]);
+        assert_eq!(v.picked_count(), 0);
+        assert!(!v.is_picked(1), "the cursor alone is not a pick");
+    }
+
+    #[test]
+    fn select_all_picks_every_row_shown_and_only_those() {
+        let mut v = loaded_view();
+        v.select_all();
+        assert_eq!(selection_names(&v), ["src", "a.txt", "b.txt"], "hidden entries stay out");
+        assert_eq!(v.picked_count(), 3);
+        v.drop_picks();
+        for c in ".txt".chars() {
+            v.push_filter(c);
+        }
+        v.select_all();
+        assert_eq!(selection_names(&v), ["a.txt", "b.txt"], "only what the filter left");
+    }
+
+    #[test]
+    fn ctrl_click_adds_and_removes_rows_starting_from_the_cursor() {
+        let mut v = loaded_view();
+        v.select_row(0);
+        v.toggle_pick(2);
+        assert_eq!(selection_names(&v), ["src", "b.txt"]);
+        assert_eq!(v.selected, Some(2), "the cursor follows the click");
+        v.toggle_pick(0);
+        assert_eq!(selection_names(&v), ["b.txt"]);
+        assert_eq!(v.picked_count(), 1);
+    }
+
+    #[test]
+    fn shift_selects_the_range_from_the_anchor_both_ways() {
+        let mut v = loaded_view();
+        v.select_row(1);
+        v.extend_by(1);
+        assert_eq!(selection_names(&v), ["a.txt", "b.txt"]);
+        assert_eq!(v.selected, Some(2));
+        v.extend_by(isize::MIN);
+        assert_eq!(selection_names(&v), ["src", "a.txt"], "the anchor stays on a.txt");
+        assert_eq!(v.selected, Some(0));
+        v.extend_to(2);
+        assert_eq!(selection_names(&v), ["a.txt", "b.txt"]);
+        v.extend_by(isize::MAX);
+        assert_eq!(v.selected, Some(2), "clamped to the last row");
+    }
+
+    #[test]
+    fn a_plain_move_or_click_goes_back_to_one_row() {
+        let mut v = loaded_view();
+        v.select_all();
+        v.move_selection(Action::Move(1));
+        assert_eq!(selection_names(&v), ["a.txt"]);
+        v.select_all();
+        v.select_row(2);
+        assert_eq!(selection_names(&v), ["b.txt"]);
+        v.extend_by(-1);
+        assert_eq!(selection_names(&v), ["a.txt", "b.txt"], "a new range anchors on the clicked row");
+    }
+
+    #[test]
+    fn picks_survive_a_refresh_and_reset_in_another_folder() {
+        let mut v = loaded_view();
+        v.select_row(1);
+        v.toggle_pick(2);
+        let again = vec![entry("src", true), entry("a.txt", false), entry("b.txt", false), entry("c.txt", false)];
+        v.apply_refresh(ok_listing("/x", again));
+        assert_eq!(selection_names(&v), ["a.txt", "b.txt"]);
+        v.apply_listing(ok_listing("/y", vec![entry("a.txt", false), entry("b.txt", false)]), None);
+        assert_eq!(v.picked_count(), 0, "same names, another folder");
+        assert_eq!(selection_names(&v), ["a.txt"]);
+    }
+
+    #[test]
+    fn drop_picks_reports_whether_there_were_any() {
+        let mut v = loaded_view();
+        assert!(!v.drop_picks());
+        v.select_all();
+        assert!(v.drop_picks());
+        assert_eq!(selection_names(&v), ["src"], "back to the cursor row");
     }
 
     #[test]

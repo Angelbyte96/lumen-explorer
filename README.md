@@ -76,6 +76,9 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 | ↑ / ↓ | Move selection |
 | PageUp / PageDown | Move 20 rows |
 | Home / End | First / last entry |
+| Shift+↑ / Shift+↓, Shift+PageUp / PageDown, Shift+Home / End | Select the range from where the selection started (also Shift+click) |
+| Ctrl+A | Select every row shown (with text in the filter, only the rows it left) |
+| Ctrl+click | Add a row to the selection, or take it out |
 | Enter (or double click) | Enter folder / open file with the default app |
 | Backspace | Erase the last filter character, or go to the parent folder when the filter is empty (holding it stops once the filter is empty) |
 | Ctrl+L | Open the path box, centred on the window, with the current path selected (type a name to replace it): it lists what is in the folder typed so far, narrowed by the words you type, in any order ("tareas revision" finds "revision tareas.pdf"), with the matching letters highlighted, a name typed in full listed first, and the first match picked. Up/Down pick a row, Enter or a click opens it (a file in its app) or the typed path (`~` is your home), Tab completes it, Ctrl+Enter opens it in a new tab (a file: its folder, with the file selected), Escape closes. Clicking the empty part of the crumb bar does the same |
@@ -96,7 +99,7 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 | Alt+R | Count the selected folder: its size and how many folders and files it holds, all the way down (runs in the background; symlinks are not followed and other disks are not entered). Folders show `--` until counted; the result stays while you are in this folder |
 | Ctrl+Plus / Ctrl+Minus, Ctrl+wheel | Bigger / smaller icons and rows in the list (5 sizes); the text, side panel and toolbar keep their size |
 | Ctrl+0 | Icons and rows back to the normal size |
-| Esc | Clear the filter; with an empty filter, stop the Alt+R count, then cancel the copy or move in progress (holding it stops at the first thing it undid) |
+| Esc | Clear the filter; with an empty filter, drop a multiple selection, then stop the Alt+R count, then cancel the copy or move in progress (holding it stops at the first thing it undid) |
 
 Each tab keeps its own folder, history, filter and selection; a tab is reloaded when you come back to it.
 
