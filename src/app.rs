@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::config::Config;
+use crate::config::{Config, Settings};
 use crate::fs::count::{Count, Totals};
 use crate::fs::watch::Watcher;
 use crate::fs::{self, Entry, Lister, Listing};
@@ -598,15 +598,12 @@ impl LumenApp {
         app
     }
 
-    /// Starts with saved settings, writing changes back to `path`.
-    pub fn with_config(
-        ctx: &egui::Context,
-        start: PathBuf,
-        log: bool,
-        config: Config,
-        path: Option<PathBuf>,
-    ) -> Self {
+    /// Starts with saved settings, writing changes back to their file.
+    pub fn with_config(ctx: &egui::Context, start: PathBuf, log: bool, settings: Settings) -> Self {
+        let Settings { config, path, error } = settings;
         let mut app = Self::new(ctx, start, log);
+        // Shown once the startup listing lands (it clears the error line).
+        app.tab.error_after_load = error;
         // The startup listing has not landed yet: it is sorted with these.
         app.tab.view.sort = config.sort;
         app.tab.view.show_hidden = config.show_hidden;
@@ -633,17 +630,31 @@ impl LumenApp {
     }
 
     /// Writes the settings when they differ from the file.
+    /// Another Lumen window may have saved meanwhile: the file is read again
+    /// and only what changed here is written over it.
     fn save_settings(&mut self, with_window: bool) {
-        let Some(path) = &self.config_path else { return };
+        let Some(path) = self.config_path.clone() else { return };
         let settings = self.settings(with_window);
         if settings == self.saved {
             return;
         }
-        if let Err(err) = settings.save(path) {
-            self.tab.view.error = Some(format!("Cannot save settings: {err}"));
+        let merged = Config::load(&path).and_then(|disk| {
+            let merged = Config::merge(&disk, &self.saved, &settings);
+            merged.save(&path).map(|()| merged)
+        });
+        match merged {
+            Ok(merged) => {
+                // Bookmarks are shared: list the other window's too. The rest
+                // of this window (its sort, its panels) stays as the user left it.
+                self.bookmarks = Bookmarks::from_paths(merged.bookmarks.clone());
+                self.saved = Config { bookmarks: merged.bookmarks, ..settings };
+            }
+            Err(err) => {
+                self.tab.view.error = Some(format!("Cannot save settings: {err}"));
+                // The next change tries again, not every frame.
+                self.saved = settings;
+            }
         }
-        // Even after a failure: the next change tries again, not every frame.
-        self.saved = settings;
     }
 
     /// Disks for the side panel, read again every few seconds so a plugged-in
@@ -1617,7 +1628,8 @@ mod tests {
     fn saved_settings_are_applied_at_startup() {
         let dir = crate::fs::ops::tests::fresh_fixture("app-config-start");
         let ctx = egui::Context::default();
-        let app = LumenApp::with_config(&ctx, dir, false, saved_config(), None);
+        let settings = Settings { config: saved_config(), path: None, error: None };
+        let app = LumenApp::with_config(&ctx, dir, false, settings);
         assert_eq!(app.tab.view.sort, Sort { column: SortColumn::Size, descending: true });
         assert!(app.tab.view.show_hidden);
         assert!(!app.sidebar_open);
@@ -1630,7 +1642,7 @@ mod tests {
     fn a_changed_setting_is_written_at_once_but_a_resize_only_on_close() {
         let (ctx, _, dir) = app_in("app-config-save");
         let path = dir.join("cfg/lumen/config");
-        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, Config::default(), Some(path.clone()));
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
         app.save_settings(false);
         assert!(!path.exists(), "nothing changed, nothing written");
         app.handle_action(&ctx, Action::ToggleBookmark);
@@ -1639,30 +1651,118 @@ mod tests {
         app.handle_toolbar(&ctx, ToolbarEvent::ToggleSidebar);
         app.handle_action(&ctx, Action::TypeChar(' ')); // preview
         app.save_settings(false);
-        let written = Config::load(&path);
+        let written = Config::load(&path).unwrap();
         assert_eq!(written.bookmarks, std::slice::from_ref(&dir));
         assert!(written.show_hidden && !written.sidebar && written.preview);
         assert_eq!(written.sort.column, SortColumn::Modified);
         app.window = Some([900.0, 600.0]);
         app.save_settings(false);
-        assert_eq!(Config::load(&path).window, None, "a resize alone is not written");
+        assert_eq!(Config::load(&path).unwrap().window, None, "a resize alone is not written");
         app.save_settings(true);
-        assert_eq!(Config::load(&path).window, Some([900.0, 600.0]), "closing writes it");
+        assert_eq!(Config::load(&path).unwrap().window, Some([900.0, 600.0]), "closing writes it");
     }
 
     #[test]
-    fn a_failed_save_says_so_once() {
-        let (ctx, _, dir) = app_in("app-config-fail");
+    fn a_settings_path_through_a_file_is_reported_at_startup() {
+        let (ctx, _, dir) = app_in("app-config-blocked");
         std::fs::write(dir.join("blocker"), "not a folder").unwrap();
         let path = dir.join("blocker/lumen/config");
-        let mut app = LumenApp::with_config(&ctx, dir, false, Config::default(), Some(path));
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path)));
         app.handle_action(&ctx, Action::ToggleHidden);
         app.save_settings(false);
-        let error = app.tab.view.error.clone().expect("the failure is shown");
-        assert!(error.starts_with("Cannot save settings: "), "{error}");
-        app.tab.view.error = None;
+        let error = app.tab.error_after_load.clone().expect("told once the folder lists");
+        assert!(error.starts_with("Cannot read settings"), "{error}");
+        assert_eq!(std::fs::read_to_string(dir.join("blocker")).unwrap(), "not a folder");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_save_says_so_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let (ctx, _, dir) = app_in("app-config-fail");
+        let locked = dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let mut app = LumenApp::with_config(&ctx, dir, false, crate::config::open(Some(locked.join("config"))));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        app.handle_action(&ctx, Action::ToggleHidden);
         app.save_settings(false);
-        assert_eq!(app.tab.view.error, None, "not repeated every frame");
+        let first = app.tab.view.error.take();
+        app.save_settings(false);
+        let second = app.tab.view.error.take();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = first.expect("the failure is shown");
+        assert!(error.starts_with("Cannot save settings: "), "{error}");
+        assert_eq!(second, None, "not repeated every frame");
+    }
+
+    #[test]
+    fn two_windows_keep_each_others_bookmarks() {
+        let (ctx, _, dir) = app_in("app-config-two");
+        let path = dir.join("cfg/lumen/config");
+        let open = || crate::config::open(Some(path.clone()));
+        let mut a = LumenApp::with_config(&ctx, dir.clone(), false, open());
+        let mut b = LumenApp::with_config(&ctx, dir.clone(), false, open());
+        a.handle_action(&ctx, Action::ToggleBookmark);
+        a.save_settings(false);
+        b.handle_action(&ctx, Action::ToggleHidden);
+        b.save_settings(false);
+        b.window = Some([900.0, 600.0]);
+        b.save_settings(true); // B closes after a resize
+        let written = Config::load(&path).unwrap();
+        assert_eq!(written.bookmarks, std::slice::from_ref(&dir), "A's bookmark survives B");
+        assert!(written.show_hidden, "B's own change is there too");
+        assert_eq!(b.bookmarks.paths(), std::slice::from_ref(&dir), "B now lists A's bookmark");
+        a.save_settings(false);
+        assert!(Config::load(&path).unwrap().show_hidden, "A does not undo B's Ctrl+H");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_settings_file_is_left_alone_on_close() {
+        use std::os::unix::fs::PermissionsExt;
+        let (ctx, _, dir) = app_in("app-config-unreadable");
+        let path = dir.join("config");
+        std::fs::write(&path, "bookmark = /srv\nsidebar = false\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
+        app.handle_action(&ctx, Action::ToggleBookmark);
+        app.window = Some([900.0, 600.0]);
+        app.save_settings(true);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "bookmark = /srv\nsidebar = false\n");
+        let error = app.tab.error_after_load.clone().expect("told once the folder lists");
+        assert!(error.starts_with("Cannot read settings"), "{error}");
+    }
+
+    /// A long, fixed pseudo-random run of tab operations keeps the bookkeeping sound.
+    #[test]
+    fn random_tab_operations_keep_the_slots_consistent() {
+        let (ctx, mut app, dir) = app_in("app-tab-fuzz");
+        let mut seed: u64 = 0x5eed;
+        let mut next = |n: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % n
+        };
+        for _ in 0..2000 {
+            match next(8) {
+                0 => app.handle_action(&ctx, Action::NewTab),
+                1 => app.handle_action(&ctx, Action::NextTab),
+                2 => app.handle_action(&ctx, Action::PrevTab),
+                3 => app.handle_action(&ctx, Action::CloseTab),
+                4 => app.close_tab(&ctx, next(app.tabs.len() + 1)),
+                5 => app.select_tab(&ctx, next(app.tabs.len() + 1)),
+                6 => app.handle_toolbar(&ctx, ToolbarEvent::Go(dir.join("sub"))),
+                _ => {}
+            }
+            if next(2) == 0 && app.tab.lister.last_requested().is_some() {
+                land(&mut app);
+            }
+            assert!(app.active < app.tabs.len());
+            for (i, slot) in app.tabs.iter().enumerate() {
+                assert_eq!(slot.is_none(), i == app.active, "only the tab on screen has an empty slot");
+            }
+            assert_eq!(app.tab_labels().len(), app.tabs.len());
+        }
     }
 
     #[test]

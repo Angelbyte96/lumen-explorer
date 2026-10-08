@@ -37,6 +37,8 @@ impl Config {
     /// Reads settings from `text`; anything missing or invalid keeps its default.
     pub fn parse(text: &str) -> Self {
         let mut config = Self::default();
+        // Some editors start a UTF-8 file with a byte order mark.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else { continue };
             let value = value.trim();
@@ -75,9 +77,43 @@ impl Config {
         text
     }
 
-    /// Reads `path`; a missing or unreadable file gives the defaults.
-    pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path).map(|text| Self::parse(&text)).unwrap_or_default()
+    /// Reads `path`; a missing file gives the defaults. Bytes that are not
+    /// UTF-8 only spoil their own line. Any other read error is returned, so
+    /// the caller never overwrites a file it could not read.
+    pub fn load(path: &Path) -> std::io::Result<Self> {
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Self::parse(&String::from_utf8_lossy(&bytes))),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// `disk` with the changes from `before` to `after` applied: what another
+    /// Lumen window saved meanwhile is kept, only this window's edits win.
+    pub fn merge(disk: &Self, before: &Self, after: &Self) -> Self {
+        let mut merged = disk.clone();
+        if before.sort != after.sort {
+            merged.sort = after.sort;
+        }
+        if before.show_hidden != after.show_hidden {
+            merged.show_hidden = after.show_hidden;
+        }
+        if before.sidebar != after.sidebar {
+            merged.sidebar = after.sidebar;
+        }
+        if before.preview != after.preview {
+            merged.preview = after.preview;
+        }
+        if before.window != after.window {
+            merged.window = after.window;
+        }
+        merged.bookmarks.retain(|p| !before.bookmarks.contains(p) || after.bookmarks.contains(p));
+        for path in &after.bookmarks {
+            if !before.bookmarks.contains(path) && !merged.bookmarks.contains(path) {
+                merged.bookmarks.push(path.clone());
+            }
+        }
+        merged
     }
 
     /// Writes `path` through a temporary file and a rename, so a crash midway
@@ -86,9 +122,36 @@ impl Config {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("tmp");
+        // Its own name per process: two Lumen windows may save at once.
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let tmp = path.with_file_name(format!("{name}.{}.tmp", std::process::id()));
         std::fs::write(&tmp, self.to_text())?;
         std::fs::rename(&tmp, path)
+    }
+}
+
+/// The settings to start with and where to save them.
+pub struct Settings {
+    pub config: Config,
+    /// `None`: nothing is saved this session (no home, or the file is unreadable).
+    pub path: Option<PathBuf>,
+    /// Why the file could not be read, to show the user.
+    pub error: Option<String>,
+}
+
+/// Loads the settings at `path`. If the file exists but cannot be read, Lumen
+/// starts with defaults and saves nothing, so the file is left as it was.
+pub fn open(path: Option<PathBuf>) -> Settings {
+    let Some(path) = path else {
+        return Settings { config: Config::default(), path: None, error: None };
+    };
+    match Config::load(&path) {
+        Ok(config) => Settings { config, path: Some(path), error: None },
+        Err(err) => Settings {
+            config: Config::default(),
+            path: None,
+            error: Some(format!("Cannot read settings {}: {err}. Changes will not be saved", path.display())),
+        },
     }
 }
 
@@ -215,12 +278,66 @@ bookmark =
     fn save_then_load_and_a_missing_file_gives_defaults() {
         let dir = crate::fs::ops::tests::fresh_fixture("config-save");
         let path = dir.join("lumen/config");
-        assert_eq!(Config::load(&path), Config::default());
+        assert_eq!(Config::load(&path).unwrap(), Config::default());
         sample().save(&path).unwrap();
-        assert_eq!(Config::load(&path), sample());
-        assert!(!dir.join("lumen/config.tmp").exists(), "the temporary file is renamed away");
+        assert_eq!(Config::load(&path).unwrap(), sample());
+        let left: Vec<_> = std::fs::read_dir(dir.join("lumen")).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, ["config"], "the temporary file is renamed away");
         Config::default().save(&path).unwrap();
-        assert_eq!(Config::load(&path), Config::default(), "saving again replaces it");
+        assert_eq!(Config::load(&path).unwrap(), Config::default(), "saving again replaces it");
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_spoils_only_itself() {
+        let dir = crate::fs::ops::tests::fresh_fixture("config-latin1");
+        let path = dir.join("config");
+        std::fs::write(&path, b"sidebar = false\nbookmark = /srv\nbookmark = /home/u/M\xfasica\n").unwrap();
+        let config = Config::load(&path).unwrap();
+        assert!(!config.sidebar);
+        assert_eq!(config.bookmarks[0], PathBuf::from("/srv"));
+    }
+
+    #[test]
+    fn a_byte_order_mark_does_not_hide_the_first_line() {
+        assert!(!Config::parse("\u{feff}sidebar = false\n").sidebar);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_is_an_error_and_opening_it_saves_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::fs::ops::tests::fresh_fixture("config-unreadable");
+        let path = dir.join("config");
+        std::fs::write(&path, "bookmark = /srv\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let loaded = Config::load(&path);
+        let settings = open(Some(path.clone()));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(loaded.is_err());
+        assert_eq!(settings.path, None, "nothing will be written over it");
+        assert_eq!(settings.config, Config::default());
+        let error = settings.error.expect("the user is told");
+        assert!(error.starts_with("Cannot read settings"), "{error}");
+        let missing = open(Some(dir.join("nope/config")));
+        assert_eq!((missing.path, missing.error), (Some(dir.join("nope/config")), None), "a first run saves");
+    }
+
+    #[test]
+    fn merging_keeps_what_another_window_saved() {
+        let disk = Config {
+            bookmarks: vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            sort: Sort { column: SortColumn::Size, descending: false },
+            ..Config::default()
+        };
+        // This window started with only /a, removed it, added /c and turned the sidebar off.
+        let before = Config { bookmarks: vec![PathBuf::from("/a")], ..Config::default() };
+        let after = Config { bookmarks: vec![PathBuf::from("/c")], sidebar: false, ..Config::default() };
+        let merged = Config::merge(&disk, &before, &after);
+        assert_eq!(merged.bookmarks, [PathBuf::from("/b"), PathBuf::from("/c")]);
+        assert!(!merged.sidebar, "this window's change wins");
+        assert_eq!(merged.sort.column, SortColumn::Size, "untouched here: the other window's sort stays");
+        let resized = Config { window: Some([900.0, 600.0]), ..before.clone() };
+        assert_eq!(Config::merge(&disk, &before, &resized).window, Some([900.0, 600.0]));
     }
 
     #[test]
