@@ -54,5 +54,5 @@ The preview panel follows the selection: a folder shows its contents, text and c
 
 The open folder reloads by itself when something changes on disk, keeping the selection and the sort order.
 
-The status bar shows the item count and how long the last listing took.
+The status bar shows the filter on the left ("Filter 9 files…" while empty), how long the last listing took, and on the right the folders shown and the selected row out of the rows shown ("1/9").
 Listing always runs on a background thread, so the window never freezes.
