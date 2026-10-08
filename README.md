@@ -21,7 +21,7 @@ cargo test                     # unit tests (fixtures live in ~/pruebas-explorad
 | Home / End | First / last entry |
 | Enter (or double click) | Enter folder / open file with the default app |
 | Backspace | Erase the last filter character, or go to the parent folder when the filter is empty (holding it stops once the filter is empty) |
-| Ctrl+L | Type a path instead of the crumbs (Enter to go, Esc to cancel; `~` is your home); clicking the empty part of the crumb bar does the same |
+| Ctrl+L | Edit the path instead of the crumbs, starting from the current one (Enter to go, Esc to cancel; `~` is your home); clicking the empty part of the crumb bar does the same |
 | Ctrl+T | Open the current folder in a new tab (also the + in the tab bar) |
 | Ctrl+W | Close the tab (also its ×); the last tab stays open |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
