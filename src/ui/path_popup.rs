@@ -16,6 +16,8 @@ use crate::fs::{self, Entry};
 pub enum PopupEvent {
     /// Open `path`, selecting `select` in it; in a new tab with Ctrl+Enter.
     Go { path: PathBuf, select: Option<String>, new_tab: bool },
+    /// Enter or a click on a file: open it with its default app.
+    Open(PathBuf),
     /// The ← and → buttons: the tab's history.
     Back,
     Forward,
@@ -165,7 +167,7 @@ impl PathPopup {
                 None => typed_target(&self.text, current, home),
             };
             self.close();
-            return Some(PopupEvent::Go { path, select, new_tab: keys.ctrl_enter });
+            return Some(use_target(path, select, keys.ctrl_enter));
         }
 
         let mut event = None;
@@ -268,7 +270,7 @@ impl PathPopup {
                             }
                             if response.clicked() {
                                 let (path, select) = entry_target(entry);
-                                event = Some(PopupEvent::Go { path, select, new_tab: false });
+                                event = Some(use_target(path, select, false));
                             }
                         }
                     });
@@ -278,7 +280,7 @@ impl PathPopup {
         if modal.should_close() {
             self.close();
         }
-        if matches!(event, Some(PopupEvent::Go { .. })) {
+        if matches!(event, Some(PopupEvent::Go { .. } | PopupEvent::Open(_))) {
             self.close();
         }
         event
@@ -416,6 +418,16 @@ pub fn complete(folder: &str, entry: &Entry) -> String {
     format!("{folder}{}{separator}", entry.name)
 }
 
+/// What using a target does: a file (a folder with a name to select) opens in
+/// its app, like Enter in the list; with Ctrl+Enter its folder opens in a new
+/// tab with it selected. A folder just opens.
+fn use_target(path: PathBuf, select: Option<String>, new_tab: bool) -> PopupEvent {
+    match select {
+        Some(name) if !new_tab => PopupEvent::Open(path.join(name)),
+        select => PopupEvent::Go { path, select, new_tab },
+    }
+}
+
 /// Where using `entry` goes: a folder opens; a file opens its folder with
 /// the file selected.
 pub fn entry_target(entry: &Entry) -> (PathBuf, Option<String>) {
@@ -502,7 +514,7 @@ mod tests {
         step(&ctx, &mut popup, &dir, vec![]);
         step(&ctx, &mut popup, &dir, vec![text("a.")]);
         let used = step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::NONE)]);
-        assert_eq!(used, go(dir.clone(), Some("a.txt"), false));
+        assert_eq!(used, Some(PopupEvent::Open(dir.join("a.txt"))), "a file opens in its app");
         popup.open();
         step(&ctx, &mut popup, &dir, vec![]);
         step(&ctx, &mut popup, &dir, vec![text("nothing-like-it")]);
@@ -524,6 +536,32 @@ mod tests {
     }
 
     #[test]
+    fn a_typed_file_opens_and_ctrl_enter_shows_it_in_a_new_tab() {
+        let (ctx, mut popup, dir) = opened("popup-file");
+        step(&ctx, &mut popup, &dir, vec![text(&format!("{}/b.txt", dir.display()))]);
+        let used = step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert_eq!(used, Some(PopupEvent::Open(dir.join("b.txt"))));
+        popup.open();
+        step(&ctx, &mut popup, &dir, vec![]);
+        step(&ctx, &mut popup, &dir, vec![text("b.t")]);
+        let used = step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::COMMAND)]);
+        assert_eq!(used, go(dir.clone(), Some("b.txt"), true), "its folder in a new tab, selected");
+        assert!(!popup.is_open());
+    }
+
+    #[test]
+    fn a_click_on_a_file_row_opens_it() {
+        let (ctx, mut popup, dir) = opened("popup-click-file");
+        step(&ctx, &mut popup, &dir, vec![]);
+        let row = ctx.read_response(row_id(1)).expect("drawn").rect.center(); // sub/, a.txt, b.txt
+        assert_eq!(
+            click(&ctx, row, |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false)),
+            Some(PopupEvent::Open(dir.join("a.txt")))
+        );
+        assert!(!popup.is_open());
+    }
+
+    #[test]
     fn down_picks_a_row_and_enter_uses_it() {
         let (ctx, mut popup, dir) = opened("popup-down");
         step(&ctx, &mut popup, &dir, vec![text("t")]); // a.txt, b.txt contain "t"
@@ -531,7 +569,7 @@ mod tests {
         step(&ctx, &mut popup, &dir, vec![key(Key::ArrowDown, Modifiers::NONE)]);
         step(&ctx, &mut popup, &dir, vec![key(Key::ArrowUp, Modifiers::NONE)]);
         let used = step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::NONE)]);
-        assert_eq!(used, go(dir.clone(), Some("a.txt"), false), "a file opens its folder, selected");
+        assert_eq!(used, Some(PopupEvent::Open(dir.join("a.txt"))), "a file opens in its app");
     }
 
     #[test]
