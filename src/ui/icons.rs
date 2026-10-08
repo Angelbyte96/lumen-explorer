@@ -72,6 +72,14 @@ pub fn folder(ui: &mut egui::Ui) -> egui::Response {
     response
 }
 
+/// A plain file icon, for the status bar count.
+pub fn file(ui: &mut egui::Ui) -> egui::Response {
+    let side = ui.text_style_height(&egui::TextStyle::Body);
+    let (rect, response) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
+    paint(ui.painter(), rect, IconKind::File);
+    response
+}
+
 /// A magnifying glass, for the filter bar (the fonts have none).
 pub fn magnifier(ui: &mut egui::Ui) -> egui::Response {
     let side = ui.text_style_height(&egui::TextStyle::Body);

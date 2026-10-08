@@ -223,6 +223,11 @@ impl View {
         Some(self.entries[self.rows[row]].name.clone())
     }
 
+    /// Folders among the rows shown.
+    pub fn folder_count(&self) -> usize {
+        self.rows.iter().filter(|&&i| self.entries[i].is_dir).count()
+    }
+
     pub fn hidden_count(&self) -> usize {
         self.entries.iter().filter(|e| e.hidden).count()
     }
@@ -1185,6 +1190,8 @@ impl eframe::App for LumenApp {
                         .as_ref()
                         .map(|r| ui::status_bar::progress_text(r.job.mode, &r.job.progress)),
                     notice: self.notice.as_deref(),
+                    folder_count: self.tab.view.folder_count(),
+                    selected: self.tab.view.selected,
                     counting: self.counting.as_ref().map(|c| {
                         let name = file_name(&c.path).unwrap_or_default();
                         ui::status_bar::counting_text(&name, &c.progress)
@@ -1804,6 +1811,18 @@ mod tests {
 
     fn row_names(v: &View) -> Vec<&str> {
         v.rows.iter().map(|&i| v.entries[i].name.as_str()).collect()
+    }
+
+    #[test]
+    fn folder_count_follows_the_rows_shown() {
+        let mut v = loaded_view();
+        assert_eq!(v.folder_count(), 1, "only src: .git is hidden");
+        v.toggle_hidden();
+        assert_eq!(v.folder_count(), 2);
+        for c in "a.".chars() {
+            v.push_filter(c);
+        }
+        assert_eq!(v.folder_count(), 0, "the filter left only a.txt");
     }
 
     #[test]

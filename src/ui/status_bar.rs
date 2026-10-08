@@ -19,11 +19,15 @@ pub struct Status<'a> {
     pub notice: Option<&'a str>,
     /// Alt+R count in progress, already formatted.
     pub counting: Option<String>,
+    /// Folders among the rows shown.
+    pub folder_count: usize,
+    /// Selected row, as an index into the rows shown.
+    pub selected: Option<usize>,
 }
 
 pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
     ui.horizontal(|ui| {
-        filter_bar(ui, status.filter);
+        filter_bar(ui, status.filter, status.item_count);
         ui.separator();
         ui.label(count_text(status.item_count, !status.filter.is_empty()));
         if status.hidden_count > 0 && !status.show_hidden {
@@ -58,14 +62,22 @@ pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
             ui.separator();
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(position_text(status.selected, status.item_count))
+                .on_hover_text("Selected row / rows shown");
+            crate::ui::icons::file(ui);
+            ui.add_space(8.0);
+            ui.label(status.folder_count.to_string()).on_hover_text("Folders shown");
+            crate::ui::icons::folder(ui);
+        });
     });
 }
 
 /// Always-visible filter at the bottom left. It is drawn, not a text field:
 /// typing anywhere in the list feeds it, so it never has to take focus.
-fn filter_bar(ui: &mut egui::Ui, filter: &str) {
+fn filter_bar(ui: &mut egui::Ui, filter: &str, items: usize) {
     let text = if filter.is_empty() {
-        egui::RichText::new("Type to filter · Space to preview").weak()
+        egui::RichText::new(filter_placeholder(items)).weak()
     } else {
         egui::RichText::new(filter).strong()
     };
@@ -79,6 +91,17 @@ fn filter_bar(ui: &mut egui::Ui, filter: &str) {
             crate::ui::icons::magnifier(ui);
             ui.add(egui::Label::new(text).selectable(false));
         });
+}
+
+/// What the empty filter bar says: "Filter 10 files…".
+pub fn filter_placeholder(items: usize) -> String {
+    let noun = if items == 1 { "file" } else { "files" };
+    format!("Filter {items} {noun}…")
+}
+
+/// "9/10": the selected row, counted from 1, of the rows shown.
+pub fn position_text(selected: Option<usize>, rows: usize) -> String {
+    format!("{}/{rows}", selected.map_or(0, |i| i + 1))
 }
 
 /// "12 items", or how many rows the filter left.
@@ -123,6 +146,20 @@ mod tests {
     fn counting_reads_the_folder_and_running_totals() {
         let t = Totals { folders: 3, files: 1, bytes: 0, unreadable: 0 };
         assert_eq!(counting_text("sub", &t), "Calculating “sub”… 3 folders · 1 file");
+    }
+
+    #[test]
+    fn the_empty_filter_says_how_many_files_it_filters() {
+        assert_eq!(filter_placeholder(10), "Filter 10 files…");
+        assert_eq!(filter_placeholder(1), "Filter 1 file…");
+        assert_eq!(filter_placeholder(0), "Filter 0 files…");
+    }
+
+    #[test]
+    fn position_counts_the_selected_row_from_one() {
+        assert_eq!(position_text(Some(8), 10), "9/10");
+        assert_eq!(position_text(Some(0), 1), "1/1");
+        assert_eq!(position_text(None, 0), "0/0");
     }
 
     #[test]
