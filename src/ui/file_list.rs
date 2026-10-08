@@ -34,20 +34,43 @@ impl RenameEdit {
     }
 }
 
-/// Draws `view`'s rows; `scroll` brings the selection into view.
+/// Highest list zoom level (Ctrl+wheel, Ctrl+Plus); 0 is the normal size.
+pub const MAX_ZOOM: u8 = 4;
+
+/// Icon side at each zoom level, in text heights: only icons and rows grow,
+/// the text keeps its size (like Dolphin's details view).
+const ZOOM_FACTORS: [f32; MAX_ZOOM as usize + 1] = [1.0, 1.5, 2.0, 3.0, 4.0];
+
+/// The icon side for `zoom` when a line of text is `text_height` tall.
+pub fn icon_side(zoom: u8, text_height: f32) -> f32 {
+    text_height * ZOOM_FACTORS[usize::from(zoom.min(MAX_ZOOM))]
+}
+
+/// A row is its icon plus a little air.
+pub fn row_height(zoom: u8, text_height: f32) -> f32 {
+    icon_side(zoom, text_height) + 4.0
+}
+
+/// Draws `view`'s rows, icons and rows sized by `zoom`; `scroll` brings the
+/// selection into view.
 pub fn show(
     ui: &mut egui::Ui,
     view: &View,
+    zoom: u8,
     scroll: Option<Scroll>,
     mut edit: Option<&mut RenameEdit>,
 ) -> Option<ListEvent> {
     let View { entries, rows, totals, selected, sort, .. } = view;
     let (selected, sort) = (*selected, *sort);
-    let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+    let text_height = ui.text_style_height(&egui::TextStyle::Body);
+    let header_height = row_height(0, text_height);
+    let (icon, row_height) = (icon_side(zoom, text_height), row_height(zoom, text_height));
     let mut event = None;
 
     let mut table = TableBuilder::new(ui)
         .striped(true)
+        // Text sits in the middle of rows made taller by the zoom.
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .sense(egui::Sense::click())
         .column(Column::remainder().at_least(200.0).clip(true))
         .column(Column::exact(110.0).clip(true))
@@ -64,7 +87,7 @@ pub fn show(
     }
 
     table
-        .header(row_height, |mut header| {
+        .header(header_height, |mut header| {
             for (label, column) in COLUMNS {
                 header.col(|ui| {
                     if sort_header(ui, label, column, sort) {
@@ -82,7 +105,7 @@ pub fn show(
                     // Cells stack top-down: keep the icon and the name on one line,
                     // or the name lands below the row and gets clipped out of view.
                     ui.horizontal(|ui| {
-                        icons::show(ui, entry);
+                        icons::show(ui, entry, icon);
                         if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
                             if let Some(submit) = rename_field(ui, edit) {
                                 event = Some(ListEvent::RenameEnded(submit));
@@ -254,6 +277,17 @@ mod tests {
     }
 
     #[test]
+    fn zoom_grows_icons_and_rows_from_the_normal_size_up_to_a_limit() {
+        let text = 16.0;
+        assert_eq!(icon_side(0, text), text, "level 0 looks as before");
+        assert_eq!(row_height(0, text), text + 4.0);
+        let sides: Vec<f32> = (0..=MAX_ZOOM).map(|z| icon_side(z, text)).collect();
+        assert!(sides.windows(2).all(|w| w[0] < w[1]), "each level is bigger: {sides:?}");
+        assert_eq!(icon_side(MAX_ZOOM, text), 4.0 * text);
+        assert_eq!(icon_side(MAX_ZOOM + 3, text), icon_side(MAX_ZOOM, text), "never past the limit");
+    }
+
+    #[test]
     fn rename_field_sits_inside_its_row() {
         let ctx = egui::Context::default();
         let entries = vec![entry("angel.jpg.jpg"), entry("other.txt")];
@@ -264,7 +298,7 @@ mod tests {
         for _ in 0..2 {
             ctx.run_ui(egui::RawInput::default(), |ui| {
                 row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
-                show(ui, &view, None, Some(&mut edit));
+                show(ui, &view, 0, None, Some(&mut edit));
             })
             .drop_without_applying_deltas();
         }

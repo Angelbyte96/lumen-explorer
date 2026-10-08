@@ -36,11 +36,13 @@ cargo test                     # unit tests (fixtures live in ~/pruebas-explorad
 | Ctrl+C / Ctrl+X | Copy / cut the selected entry |
 | Ctrl+V | Paste into the current folder |
 | Alt+R | Count the selected folder: its size and how many folders and files it holds, all the way down (runs in the background; symlinks are not followed and other disks are not entered). Folders show `--` until counted; the result stays while you are in this folder |
+| Ctrl+Plus / Ctrl+Minus, Ctrl+wheel | Bigger / smaller icons and rows in the list (5 sizes); the text, side panel and toolbar keep their size |
+| Ctrl+0 | Icons and rows back to the normal size |
 | Esc | Clear the filter; with an empty filter, stop the Alt+R count, then cancel the copy or move in progress (holding it stops at the first thing it undid) |
 
 Each tab keeps its own folder, history, filter and selection; a tab is reloaded when you come back to it.
 
-The side panel on the left (☰ shows or hides it) lists your **Bookmarks** (right-click one to remove it), **Places** (home, Desktop, Downloads, Documents, Music, Pictures and Videos as named on your system, plus the Trash), **Storage** (mounted disks with a bar showing how full they are) and **Recents** (the last 10 folders you visited in Lumen). Nothing inside the Trash can be trashed again.
+The side panel on the left (☰ shows or hides it) lists your **Bookmarks** (right-click one to remove it), **Places** (home, Desktop, Downloads, Documents, Music, Pictures and Videos as named on your system, plus the Trash), **Storage** (mounted disks with a bar showing how full they are; hover a disk for its free space) and **Recents** (the last 10 folders you visited in Lumen). Nothing inside the Trash can be trashed again.
 
 The toolbar has back, forward and up buttons, the bookmark star and the current path as crumbs (`angelbyte › Descargas`): click a crumb to go there. Inside your home folder the crumbs start at it; elsewhere they start at `/`.
 
@@ -54,7 +56,7 @@ The preview panel follows the selection: a folder shows its contents, text and c
 
 The open folder reloads by itself when something changes on disk, keeping the selection and the sort order.
 
-Settings are kept in `~/.config/lumen/config` (or `$XDG_CONFIG_HOME/lumen/config`): bookmarks, sort order, Ctrl+H, whether the side panel and the preview are open, and the window size. They are written as soon as they change (the window size when Lumen closes). It is a plain `key = value` file; lines Lumen does not understand are ignored. If the file exists but cannot be read, Lumen says so and saves nothing that session, so the file is never overwritten. With two Lumen windows open, each one writes only what it changed, so neither loses the other's bookmarks. Open tabs are not restored yet.
+Settings are kept in `~/.config/lumen/config` (or `$XDG_CONFIG_HOME/lumen/config`): bookmarks, sort order, Ctrl+H, whether the side panel and the preview are open, the list zoom and the window size. They are written as soon as they change (the window size when Lumen closes). It is a plain `key = value` file; lines Lumen does not understand are ignored. If the file exists but cannot be read, Lumen says so and saves nothing that session, so the file is never overwritten. With two Lumen windows open, each one writes only what it changed, so neither loses the other's bookmarks. Open tabs are not restored yet.
 
 The status bar shows the filter on the left ("Filter 9 files…" while empty), how long the last listing took, and on the right the folders shown and the selected row out of the rows shown ("1/9").
 Listing always runs on a background thread, so the window never freezes.
