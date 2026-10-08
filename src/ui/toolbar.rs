@@ -26,6 +26,8 @@ pub struct Nav<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolbarEvent {
+    /// The ☰ button: show or hide the side panel.
+    ToggleSidebar,
     Back,
     Forward,
     Up,
@@ -72,6 +74,11 @@ pub fn crumbs(path: &Path, home: Option<&Path>) -> Vec<Crumb> {
 pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>, path_bar: &mut PathBar) -> Option<ToolbarEvent> {
     let mut event = None;
     ui.horizontal(|ui| {
+        let toggle = egui::Button::new(egui::RichText::new(crate::ui::sidebar::TOGGLE).size(16.0)).frame(false);
+        if ui.add(toggle).on_hover_text("Show or hide the side panel").clicked() {
+            event = Some(ToolbarEvent::ToggleSidebar);
+        }
+        ui.separator();
         let buttons = [
             (BACK, nav.can_back, "Back (Alt+Left)", ToolbarEvent::Back),
             (FORWARD, nav.can_forward, "Forward (Alt+Right)", ToolbarEvent::Forward),

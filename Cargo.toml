@@ -22,6 +22,10 @@ notify = "8"
 # Only PNG and JPEG decoders, for the preview panel.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
+# statvfs, for free space on disks in the side panel.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [profile.release]
 opt-level = "z"     # optimize for size
 lto = true          # link-time optimization across all crates
