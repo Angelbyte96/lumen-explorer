@@ -58,5 +58,5 @@ The open folder reloads by itself when something changes on disk, keeping the se
 
 Settings are kept in `~/.config/lumen/config` (or `$XDG_CONFIG_HOME/lumen/config`): bookmarks, sort order, Ctrl+H, whether the side panel and the preview are open, the list zoom and the window size. They are written as soon as they change (the window size when Lumen closes). It is a plain `key = value` file; lines Lumen does not understand are ignored. If the file exists but cannot be read, Lumen says so and saves nothing that session, so the file is never overwritten. With two Lumen windows open, each one writes only what it changed, so neither loses the other's bookmarks. Open tabs are not restored yet.
 
-The status bar shows the filter on the left ("Filter 9 files…" while empty), how long the last listing took, and on the right the folders shown and the selected row out of the rows shown ("1/9").
+The status bar shows the filter on the left ("Filter 9 files…" while empty, with a text cursor where typing goes), how long the last listing took, and on the right the folders shown and the selected row out of the rows shown ("1/9").
 Listing always runs on a background thread, so the window never freezes.
