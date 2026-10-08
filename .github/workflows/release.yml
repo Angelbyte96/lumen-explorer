@@ -1,0 +1,42 @@
+# Publish a GitHub Release with the Windows .exe when a version tag is pushed:
+#   git tag v0.1.0 && git push origin v0.1.0
+# The tag must match the version in Cargo.toml. Releases are public.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release and upload the .exe
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version (expected v$version)"
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --locked
+      - name: Build release
+        run: cargo build --release --locked
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          exe="lumen-$GITHUB_REF_NAME-windows-x86_64.exe"
+          cp target/release/lumen.exe "$exe"
+          gh release create "$GITHUB_REF_NAME" "$exe" \
+            --title "Lumen $GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag
