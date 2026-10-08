@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b4c7e"/>
+      <stop offset="1" stop-color="#14243d"/>
+    </linearGradient>
+    <linearGradient id="folder" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffc857"/>
+      <stop offset="1" stop-color="#e89a2c"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#fff6d5" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#fff6d5" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- Background tile -->
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#bg)"/>
+  <!-- Folder: back with tab, then front -->
+  <path d="M48 84 a12 12 0 0 1 12 -12 h40 l16 16 h80 a12 12 0 0 1 12 12 v96 a12 12 0 0 1 -12 12 h-136 a12 12 0 0 1 -12 -12 z" fill="#c97a1c"/>
+  <rect x="48" y="104" width="160" height="100" rx="12" fill="url(#folder)"/>
+  <!-- Light: a glow and a four-point spark above the folder -->
+  <circle cx="178" cy="78" r="44" fill="url(#glow)"/>
+  <path d="M178 46 Q183 73 210 78 Q183 83 178 110 Q173 83 146 78 Q173 73 178 46 z" fill="#ffffff"/>
+</svg>
