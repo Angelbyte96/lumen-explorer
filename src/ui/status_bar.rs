@@ -60,10 +60,6 @@ pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
             ui.separator();
             ui.label(notice);
         }
-        if let Some(error) = status.error {
-            ui.separator();
-            ui.colored_label(ui.visuals().error_fg_color, error);
-        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(position_text(status.selected, status.item_count))
                 .on_hover_text("Selected row / rows shown");
@@ -71,6 +67,16 @@ pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
             ui.add_space(8.0);
             ui.label(status.folder_count.to_string()).on_hover_text("Folders shown");
             crate::ui::icons::folder(ui);
+            // Laid out after the counters so it gets only the space left between
+            // them and the rest of the bar; cut short, the full text is on hover.
+            if let Some(error) = status.error {
+                ui.add_space(8.0);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.separator();
+                    let text = egui::RichText::new(error).color(ui.visuals().error_fg_color);
+                    ui.add(egui::Label::new(text).truncate()).on_hover_text(error);
+                });
+            }
         });
     });
 }
@@ -190,6 +196,64 @@ mod tests {
         assert!(cursor.top() <= text.top() + 1.0 && cursor.bottom() >= text.bottom() - 1.0, "as tall as the text");
         assert_eq!(painted_bar("", true).1, None, "no cursor while nothing is typed");
         assert_eq!(painted_bar("f6", false).1, None, "no cursor while the path box or a rename takes the keys");
+    }
+
+    const LONG_ERROR: &str = "Cannot rename C:\\Users\\someone\\Documents\\a very long folder name\\report.txt: \
+        The filename, directory name, or volume label syntax is incorrect. (os error 123)";
+
+    /// Text shapes painted by the bar in a narrow window, after `frames` frames
+    /// with the pointer at `pointer`.
+    fn painted_narrow(pointer: Option<egui::Pos2>) -> Vec<(String, egui::Rect, bool)> {
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|s| s.interaction.tooltip_delay = 0.0);
+        let status = Status {
+            filter: "",
+            caret: false,
+            item_count: 9,
+            hidden_count: 0,
+            show_hidden: false,
+            loading: false,
+            last_elapsed: None,
+            error: Some(LONG_ERROR),
+            job: None,
+            notice: None,
+            counting: None,
+            folder_count: 2,
+            selected: None,
+        };
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 200.0));
+        let mut shapes = Vec::new();
+        for frame in 0..4 {
+            let mut input = egui::RawInput { screen_rect: Some(screen), time: Some(frame as f64), ..Default::default() };
+            if let Some(pos) = pointer {
+                input.events.push(egui::Event::PointerMoved(pos));
+            }
+            let mut output = ctx.run_ui(input, |ui| show(ui, &status));
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => {
+                    Some((t.galley.text().to_owned(), t.galley.rect.translate(t.pos.to_vec2()), t.galley.elided))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_error_is_shortened_to_fit_and_shows_in_full_on_hover() {
+        let texts = painted_narrow(None);
+        let (_, error, elided) = texts.iter().find(|(t, ..)| t.starts_with("Cannot rename")).expect("error painted");
+        let (_, position, _) = texts.iter().find(|(t, ..)| t == "0/9").expect("position painted");
+        assert!(*elided, "shortened with an ellipsis");
+        assert!(error.right() <= position.left(), "leaves the counters visible: {error:?} vs {position:?}");
+        assert!(!texts.iter().any(|(t, _, elided)| t == LONG_ERROR && !elided), "no tooltip without hover");
+
+        let hovered = painted_narrow(Some(error.center()));
+        assert!(hovered.iter().any(|(t, _, elided)| t == LONG_ERROR && !elided), "hover shows the whole error");
     }
 
     #[test]
