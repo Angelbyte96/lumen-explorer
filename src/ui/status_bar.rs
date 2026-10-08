@@ -68,13 +68,13 @@ pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
             ui.label(status.folder_count.to_string()).on_hover_text("Folders shown");
             crate::ui::icons::folder(ui);
             // Laid out after the counters so it gets only the space left between
-            // them and the rest of the bar; cut short, the full text is on hover.
+            // them and the rest of the bar; a cut-short label shows its full text on hover.
             if let Some(error) = status.error {
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.separator();
                     let text = egui::RichText::new(error).color(ui.visuals().error_fg_color);
-                    ui.add(egui::Label::new(text).truncate()).on_hover_text(error);
+                    ui.add(egui::Label::new(text).truncate());
                 });
             }
         });
@@ -253,7 +253,8 @@ mod tests {
         assert!(!texts.iter().any(|(t, _, elided)| t == LONG_ERROR && !elided), "no tooltip without hover");
 
         let hovered = painted_narrow(Some(error.center()));
-        assert!(hovered.iter().any(|(t, _, elided)| t == LONG_ERROR && !elided), "hover shows the whole error");
+        let full = hovered.iter().filter(|(t, _, elided)| t == LONG_ERROR && !elided).count();
+        assert_eq!(full, 1, "hover shows the whole error, once");
     }
 
     #[test]
