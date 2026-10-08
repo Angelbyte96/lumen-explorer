@@ -5,6 +5,7 @@ pub mod path_bar;
 pub mod preview;
 pub mod sidebar;
 pub mod status_bar;
+pub mod tabs;
 pub mod toolbar;
 
 #[cfg(test)]
@@ -27,6 +28,8 @@ mod tests {
             super::sidebar::TOGGLE,
             super::sidebar::DISK,
             super::sidebar::TRASH,
+            super::tabs::NEW,
+            super::tabs::CLOSE,
             super::file_list::SORT_ASCENDING,
             super::file_list::SORT_DESCENDING,
             // Punctuation in messages: “name”, Calculating…, Copying 3/10 — 45%, 1 · 2, 640 × 360.

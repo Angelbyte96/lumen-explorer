@@ -22,6 +22,9 @@ cargo test                     # unit tests (fixtures live in ~/pruebas-explorad
 | Enter (or double click) | Enter folder / open file with the default app |
 | Backspace | Erase the last filter character, or go to the parent folder when the filter is empty (holding it stops once the filter is empty) |
 | Ctrl+L | Type a path instead of the crumbs (Enter to go, Esc to cancel; `~` is your home); clicking the empty part of the crumb bar does the same |
+| Ctrl+T | Open the current folder in a new tab (also the + in the tab bar) |
+| Ctrl+W | Close the tab (also its ×); the last tab stays open |
+| Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
 | Ctrl+D | Bookmark the current folder, or remove its bookmark (same as the ☆ button) |
 | Ctrl+H | Show / hide hidden files |
 | Alt+← / Alt+→ | Back / forward through visited folders |
@@ -34,6 +37,8 @@ cargo test                     # unit tests (fixtures live in ~/pruebas-explorad
 | Ctrl+V | Paste into the current folder |
 | Alt+R | Count the selected folder: its size and how many folders and files it holds, all the way down (runs in the background; symlinks are not followed and other disks are not entered). Folders show `--` until counted; the result stays while you are in this folder |
 | Esc | Clear the filter; with an empty filter, stop the Alt+R count, then cancel the copy or move in progress (holding it stops at the first thing it undid) |
+
+Each tab keeps its own folder, history, filter and selection; a tab is reloaded when you come back to it.
 
 The side panel on the left (☰ shows or hides it) lists your **Bookmarks** (right-click one to remove it), **Places** (home, Desktop, Downloads, Documents, Music, Pictures and Videos as named on your system, plus the Trash), **Storage** (mounted disks with a bar showing how full they are) and **Recents** (the last 10 folders you visited in Lumen). Nothing inside the Trash can be trashed again.
 

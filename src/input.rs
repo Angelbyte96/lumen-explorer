@@ -34,6 +34,13 @@ pub enum Action {
     Paste,
     /// Alt+R: count the selected folder's size, folders and files.
     Count,
+    /// Ctrl+T: open the current folder in a new tab.
+    NewTab,
+    /// Ctrl+W: close the tab on screen (not the last one).
+    CloseTab,
+    /// Ctrl+Tab / Ctrl+Shift+Tab: the next / previous tab, wrapping around.
+    NextTab,
+    PrevTab,
     /// Ctrl+D: bookmark the current folder, or remove its bookmark.
     ToggleBookmark,
     /// Escape: clears the filter, else stops a running count, else the copy or move.
@@ -97,6 +104,19 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
         }
         if i.consume_key(Modifiers::COMMAND, Key::D) {
             actions.push(Action::ToggleBookmark);
+        }
+        if i.consume_key(Modifiers::COMMAND, Key::T) {
+            actions.push(Action::NewTab);
+        }
+        if i.consume_key(Modifiers::COMMAND, Key::W) {
+            actions.push(Action::CloseTab);
+        }
+        // With Shift first: matching ignores an extra Shift.
+        if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Tab) {
+            actions.push(Action::PrevTab);
+        }
+        if i.consume_key(Modifiers::COMMAND, Key::Tab) {
+            actions.push(Action::NextTab);
         }
         if i.consume_key(Modifiers::ALT, Key::ArrowLeft) {
             actions.push(Action::Back);
@@ -265,6 +285,15 @@ mod tests {
             Event::Text("d".into()),
         ];
         assert_eq!(actions_for(events), [Action::ToggleBookmark]);
+    }
+
+    #[test]
+    fn ctrl_t_w_and_tab_manage_tabs() {
+        let with = |m: Modifiers, k: Key| actions_for(vec![Event::ModifiersChanged(m), key(k, m)]);
+        assert_eq!(with(Modifiers::COMMAND, Key::T), [Action::NewTab]);
+        assert_eq!(with(Modifiers::COMMAND, Key::W), [Action::CloseTab]);
+        assert_eq!(with(Modifiers::COMMAND, Key::Tab), [Action::NextTab]);
+        assert_eq!(with(Modifiers::COMMAND | Modifiers::SHIFT, Key::Tab), [Action::PrevTab]);
     }
 
     #[test]
