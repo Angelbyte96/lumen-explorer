@@ -1,0 +1,26 @@
+# Build and test Lumen on Windows, and keep the .exe as a download.
+# Actions tab -> a run of "Windows build" -> Artifacts -> lumen-windows.
+name: Windows build
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --locked
+      - name: Build release
+        run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumen-windows
+          path: target/release/lumen.exe
+          if-no-files-found: error

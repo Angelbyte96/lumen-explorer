@@ -1,3 +1,7 @@
+// Release builds on Windows are GUI apps: no console window next to Lumen.
+// Debug builds keep it, for LUMEN_LOG and panics.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod config;
 mod format;

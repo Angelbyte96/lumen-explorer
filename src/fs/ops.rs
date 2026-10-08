@@ -258,6 +258,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn trashing_a_symlink_keeps_its_target() {
         let dir = fresh_fixture("trash-symlink");
         std::fs::write(dir.join("real.txt"), "R").unwrap();
@@ -284,6 +285,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn keeping_a_non_utf8_name_as_shown_is_a_no_op() {
         use std::os::unix::ffi::OsStrExt;
         let dir = fresh_fixture("rename-latin1");
