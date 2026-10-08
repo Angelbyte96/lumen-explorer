@@ -9,6 +9,7 @@ use crate::app::{Scroll, Sort, SortColumn, View};
 use crate::format::{format_size, format_time};
 use crate::fs::Entry;
 use crate::fs::count::Totals;
+use crate::ui::icons;
 
 pub enum ListEvent {
     Select(usize),
@@ -78,21 +79,18 @@ pub fn show(
                 let entry = &entries[rows[i]];
                 row.set_selected(selected == Some(i));
                 row.col(|ui| {
-                    let icon = if entry.is_dir { "🗀" } else { "🗋" };
-                    if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
-                        // Cells stack top-down: keep the icon and the field on one line,
-                        // or the field lands below the row and gets clipped out of view.
-                        ui.horizontal(|ui| {
-                            ui.label(icon);
+                    // Cells stack top-down: keep the icon and the name on one line,
+                    // or the name lands below the row and gets clipped out of view.
+                    ui.horizontal(|ui| {
+                        icons::show(ui, entry);
+                        if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
                             if let Some(submit) = rename_field(ui, edit) {
                                 event = Some(ListEvent::RenameEnded(submit));
                             }
-                        });
-                        return;
-                    }
-                    let text = egui::RichText::new(format!("{icon} {}", entry.name));
-                    let text = if entry.hidden { text.weak() } else { text };
-                    ui.add(egui::Label::new(text).selectable(false).truncate());
+                            return;
+                        }
+                        name_label(ui, entry);
+                    });
                 });
                 row.col(|ui| {
                     ui.add(egui::Label::new(entry.kind()).selectable(false).truncate());
@@ -111,6 +109,13 @@ pub fn show(
             });
         });
     event
+}
+
+/// The entry's name, dimmed when hidden, cut with "…" when too long.
+pub fn name_label(ui: &mut egui::Ui, entry: &Entry) {
+    let text = egui::RichText::new(&entry.name);
+    let text = if entry.hidden { text.weak() } else { text };
+    ui.add(egui::Label::new(text).selectable(false).truncate());
 }
 
 /// Header labels and the column each one sorts, in display order.

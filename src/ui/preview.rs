@@ -12,7 +12,8 @@ use crate::app::{Sort, visible_rows};
 use crate::format::{format_size, format_time};
 use crate::fs::Entry;
 use crate::fs::count::Totals;
-use crate::ui::file_list::{COLUMNS, count_cells, count_cols};
+use crate::ui::file_list::{COLUMNS, count_cells, count_cols, name_label};
+use crate::ui::icons;
 use crate::fs::preview::Content;
 
 /// The preview of one entry, as shown in the panel.
@@ -55,8 +56,10 @@ pub fn show(
     sort: Sort,
 ) {
     ui.add_space(6.0);
-    let icon = if entry.is_dir { "🗀" } else { "🗋" };
-    ui.add(egui::Label::new(egui::RichText::new(format!("{icon} {}", entry.name)).strong()).truncate());
+    ui.horizontal(|ui| {
+        icons::show(ui, entry);
+        ui.add(egui::Label::new(egui::RichText::new(&entry.name).strong()).truncate());
+    });
     ui.weak(details(entry, totals, pane.content.as_ref()));
     ui.separator();
 
@@ -154,10 +157,10 @@ fn folder(ui: &mut egui::Ui, entries: &[Entry], show_hidden: bool, sort: Sort) {
             body.rows(row_height, rows.len(), |mut row| {
                 let entry = &entries[rows[row.index()]];
                 row.col(|ui| {
-                    let icon = if entry.is_dir { "🗀" } else { "🗋" };
-                    let text = egui::RichText::new(format!("{icon} {}", entry.name));
-                    let text = if entry.hidden { text.weak() } else { text };
-                    ui.add(egui::Label::new(text).selectable(false).truncate());
+                    ui.horizontal(|ui| {
+                        icons::show(ui, entry);
+                        name_label(ui, entry);
+                    });
                 });
                 row.col(|ui| {
                     ui.add(egui::Label::new(entry.kind()).selectable(false).truncate());
