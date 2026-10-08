@@ -148,6 +148,7 @@ pub struct Mount {
 
 /// Disks worth listing from `/proc/self/mounts`: real devices (`/dev/...`),
 /// not snap loop images, `/boot` or a second mount of the same device.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn parse_mounts(text: &str) -> Vec<Mount> {
     let mut seen = Vec::new();
     let mut mounts = Vec::new();
@@ -169,6 +170,74 @@ pub fn parse_mounts(text: &str) -> Vec<Mount> {
         mounts.push(Mount { label, path });
     }
     mounts
+}
+
+/// Disks for the side panel: mounted devices on Linux, drive letters on Windows.
+#[cfg(not(windows))]
+pub fn disks() -> Vec<Mount> {
+    parse_mounts(&std::fs::read_to_string("/proc/self/mounts").unwrap_or_default())
+}
+
+/// Local and removable drives with a volume in them. Network and CD drives are
+/// left out: reading them can stall, and the panel is refreshed every few seconds.
+#[cfg(windows)]
+pub fn disks() -> Vec<Mount> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
+    const DRIVE_REMOVABLE: u32 = 2;
+    const DRIVE_FIXED: u32 = 3;
+    // SAFETY: no arguments; returns a bitmask.
+    let mask = unsafe { GetLogicalDrives() };
+    let mut mounts = Vec::new();
+    for letter in drive_letters(mask) {
+        let root = format!("{letter}:\\");
+        let wide = wide(&root);
+        // SAFETY: `wide` is a NUL-terminated UTF-16 string that outlives the call.
+        let kind = unsafe { GetDriveTypeW(wide.as_ptr()) };
+        if kind != DRIVE_FIXED && kind != DRIVE_REMOVABLE {
+            continue;
+        }
+        let mut name = [0u16; 261];
+        // SAFETY: `name` is a writable buffer of the length passed; the other
+        // out-parameters are optional and null.
+        let ok = unsafe {
+            GetVolumeInformationW(
+                wide.as_ptr(),
+                name.as_mut_ptr(),
+                name.len() as u32,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        // Fails for an empty card reader slot: nothing to open there.
+        if ok == 0 {
+            continue;
+        }
+        let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+        let volume = String::from_utf16_lossy(&name[..len]);
+        mounts.push(Mount { label: drive_label(letter, &volume), path: PathBuf::from(root) });
+    }
+    mounts
+}
+
+#[cfg(windows)]
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+/// Drive letters set in a `GetLogicalDrives` mask, A: being bit 0.
+pub fn drive_letters(mask: u32) -> Vec<char> {
+    ('A'..='Z').zip(0..26).filter(|&(_, bit)| mask & (1 << bit) != 0).map(|(letter, _)| letter).collect()
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+/// "Windows (C:)", or "Local Disk (D:)" for a drive without a volume name.
+pub fn drive_label(letter: char, volume: &str) -> String {
+    let name = if volume.trim().is_empty() { "Local Disk" } else { volume.trim() };
+    format!("{name} ({letter}:)")
 }
 
 /// The kernel writes spaces, tabs, newlines and backslashes in mount points
@@ -220,7 +289,18 @@ pub fn usage(path: &Path) -> Option<Usage> {
     Some(Usage { total: stats.f_blocks as u64 * unit, free: stats.f_bavail as u64 * unit })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn usage(path: &Path) -> Option<Usage> {
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let root = wide(&path.to_string_lossy());
+    let (mut free, mut total) = (0u64, 0u64);
+    // SAFETY: `root` is a NUL-terminated UTF-16 string; the out-parameters are
+    // valid u64s, and the unused one is null.
+    let ok = unsafe { GetDiskFreeSpaceExW(root.as_ptr(), &mut free, &mut total, std::ptr::null_mut()) };
+    (ok != 0).then_some(Usage { total, free })
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn usage(_path: &Path) -> Option<Usage> {
     None
 }
@@ -336,6 +416,22 @@ tmpfs /run tmpfs rw 0 0
                 ("home", Path::new("/home")),
             ]
         );
+    }
+
+    #[test]
+    fn drive_letters_follow_the_logical_drives_mask() {
+        assert_eq!(drive_letters(0), Vec::<char>::new());
+        // Bit 0 is A:, bit 2 is C:, bit 3 is D:, bit 25 is Z:.
+        assert_eq!(drive_letters(0b1101), ['A', 'C', 'D']);
+        assert_eq!(drive_letters(1 << 25), ['Z']);
+        assert_eq!(drive_letters(u32::MAX), ('A'..='Z').collect::<Vec<_>>(), "bits past Z are ignored");
+    }
+
+    #[test]
+    fn drives_are_labelled_like_file_explorer() {
+        assert_eq!(drive_label('C', "Windows"), "Windows (C:)");
+        assert_eq!(drive_label('D', ""), "Local Disk (D:)");
+        assert_eq!(drive_label('E', "  "), "Local Disk (E:)", "a blank volume name counts as none");
     }
 
     #[test]

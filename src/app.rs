@@ -675,10 +675,9 @@ impl LumenApp {
         if self.disks.0.is_some_and(|at| at.elapsed() < DISKS_INTERVAL) {
             return;
         }
-        let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
         self.disks = (
             Some(Instant::now()),
-            places::parse_mounts(&mounts)
+            places::disks()
                 .into_iter()
                 .map(|m| {
                     let usage = places::usage(&m.path);
