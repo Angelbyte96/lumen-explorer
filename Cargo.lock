@@ -1268,6 +1268,7 @@ dependencies = [
  "eframe",
  "egui_extras",
  "image",
+ "libc",
  "notify",
  "open",
  "trash",

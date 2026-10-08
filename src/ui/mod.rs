@@ -3,6 +3,7 @@ pub mod file_list;
 pub mod icons;
 pub mod path_bar;
 pub mod preview;
+pub mod sidebar;
 pub mod status_bar;
 pub mod toolbar;
 
@@ -23,6 +24,9 @@ mod tests {
             super::toolbar::BOOKMARKED,
             super::toolbar::NOT_BOOKMARKED,
             super::toolbar::SEPARATOR,
+            super::sidebar::TOGGLE,
+            super::sidebar::DISK,
+            super::sidebar::TRASH,
             super::file_list::SORT_ASCENDING,
             super::file_list::SORT_DESCENDING,
             // Punctuation in messages: “name”, Calculating…, Copying 3/10 — 45%, 1 · 2, 640 × 360.

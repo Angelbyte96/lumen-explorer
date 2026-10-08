@@ -35,6 +35,8 @@ cargo test                     # unit tests (fixtures live in ~/pruebas-explorad
 | Alt+R | Count the selected folder: its size and how many folders and files it holds, all the way down (runs in the background; symlinks are not followed and other disks are not entered). Folders show `--` until counted; the result stays while you are in this folder |
 | Esc | Clear the filter; with an empty filter, stop the Alt+R count, then cancel the copy or move in progress (holding it stops at the first thing it undid) |
 
+The side panel on the left (☰ shows or hides it) lists your **Bookmarks** (right-click one to remove it), **Places** (home, Desktop, Downloads, Documents, Music, Pictures and Videos as named on your system, plus the Trash), **Storage** (mounted disks with a bar showing how full they are) and **Recents** (the last 10 folders you visited in Lumen). Nothing inside the Trash can be trashed again.
+
 The toolbar has back, forward and up buttons, the bookmark star and the current path as crumbs (`angelbyte › Descargas`): click a crumb to go there. Inside your home folder the crumbs start at it; elsewhere they start at `/`.
 
 The list and the folder preview show Name, Type, Date Modified, Folders, Files and Size. Click a header to sort by that column; click it again to reverse. Folders always stay on top; counted folders sort by their totals.

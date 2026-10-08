@@ -11,10 +11,11 @@ use crate::fs::count::{Count, Totals};
 use crate::fs::watch::Watcher;
 use crate::fs::{self, Entry, Lister, Listing};
 use crate::input::{self, Action, Confirm};
-use crate::places::Bookmarks;
+use crate::places::{self, Bookmarks, Mount, Place, Recents, Usage};
 use crate::fs::ops::Renamed;
 use crate::fs::preview::Previewer;
 use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
+use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::ui::toolbar::{Nav, ToolbarEvent};
 use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_bar::PathBar, preview::PreviewPane, status_bar::Status};
 
@@ -304,6 +305,9 @@ pub enum NavKind {
     Refresh,
 }
 
+/// How often the side panel reads the mounted disks again.
+const DISKS_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Wait between the first change on disk and the reload. Later changes in that
 /// window ride along, so a long copy reloads a few times a second, not per file.
 pub const REFRESH_DELAY: Duration = Duration::from_millis(200);
@@ -464,6 +468,14 @@ pub struct LumenApp {
     /// Copy or move running in the background; one at a time.
     job: Option<Running>,
     bookmarks: Bookmarks,
+    recents: Recents,
+    /// Home, Downloads... and the trash, found once at startup.
+    places: Vec<Place>,
+    /// Where trashed files live; nothing in it may be trashed again.
+    trash: Option<PathBuf>,
+    /// Mounted disks with their usage, and when they were read.
+    disks: (Option<Instant>, Vec<(Mount, Option<Usage>)>),
+    sidebar_open: bool,
     /// Folder size and counts being computed (Alt+R); one at a time.
     counting: Option<Count>,
     /// Informational line in the status bar ("1 item copied").
@@ -509,6 +521,11 @@ impl LumenApp {
             job: None,
             counting: None,
             bookmarks: Bookmarks::default(),
+            recents: Recents::default(),
+            places: Vec::new(),
+            trash: None,
+            disks: (None, Vec::new()),
+            sidebar_open: true,
             notice: None,
             watcher: Watcher::new({
                 let ctx = ctx.clone();
@@ -520,8 +537,49 @@ impl LumenApp {
             previewer: Previewer::new(),
             preview: None,
         };
+        if let Some(home) = fs::home_dir() {
+            let data_home = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()).map(PathBuf::from);
+            let trash = places::trash_dir(&home, data_home.as_deref());
+            let config_home = std::env::var_os("XDG_CONFIG_HOME")
+                .filter(|v| !v.is_empty())
+                .map_or_else(|| home.join(".config"), PathBuf::from);
+            let user_dirs = std::fs::read_to_string(config_home.join("user-dirs.dirs")).ok();
+            let trash_place = cfg!(unix).then_some(trash.as_path());
+            app.places = places::places(&home, user_dirs.as_deref(), trash_place);
+            app.trash = cfg!(unix).then_some(trash);
+        }
         app.navigate(ctx, start, None);
         app
+    }
+
+    /// Disks for the side panel, read again every few seconds so a plugged-in
+    /// USB stick shows up. Reading them is quick: local devices only.
+    fn refresh_disks(&mut self) {
+        if self.disks.0.is_some_and(|at| at.elapsed() < DISKS_INTERVAL) {
+            return;
+        }
+        let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+        self.disks = (
+            Some(Instant::now()),
+            places::parse_mounts(&mounts)
+                .into_iter()
+                .map(|m| {
+                    let usage = places::usage(&m.path);
+                    (m, usage)
+                })
+                .collect(),
+        );
+    }
+
+    fn handle_sidebar(&mut self, ctx: &egui::Context, event: SidebarEvent) {
+        match event {
+            SidebarEvent::Open(path) => self.navigate(ctx, path, None),
+            SidebarEvent::RemoveBookmark(path) => {
+                self.bookmarks.toggle(&path);
+                let name = file_name(&path).unwrap_or_else(|| path.display().to_string());
+                self.notice = Some(format!("Removed “{name}” from bookmarks"));
+            }
+        }
     }
 
     fn navigate(&mut self, ctx: &egui::Context, path: PathBuf, select: Option<String>) {
@@ -583,6 +641,11 @@ impl LumenApp {
 
     fn ask_trash(&mut self) {
         let Some(entry) = self.view.selected_entry() else { return };
+        // Trashing it again would lose the record that lets it be restored.
+        if self.trash.as_deref().is_some_and(|trash| places::in_trash(&entry.path, trash)) {
+            self.view.error = Some("This is already in the trash".into());
+            return;
+        }
         self.dialog = Some(Dialog::Trash {
             path: entry.path.clone(),
             name: entry.name.clone(),
@@ -739,6 +802,7 @@ impl LumenApp {
 
     fn handle_toolbar(&mut self, ctx: &egui::Context, event: ToolbarEvent) {
         match event {
+            ToolbarEvent::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
             ToolbarEvent::Back => self.go_history(ctx, NavKind::Back),
             ToolbarEvent::Forward => self.go_history(ctx, NavKind::Forward),
             // Unlike Backspace, the button means "up" whatever the filter holds.
@@ -830,6 +894,44 @@ impl LumenApp {
         }
     }
 
+    /// Shows a finished listing and settles what depended on it.
+    fn apply(&mut self, listing: Listing) {
+        self.shown_id = listing.id;
+        let select = self.select_after_load.take();
+        let from = self.view.current.clone();
+        let to = listing.result.is_ok().then(|| listing.path.clone());
+        if self.pending_nav == NavKind::Refresh {
+            self.view.apply_refresh(listing);
+        } else {
+            self.view.apply_listing(listing, select.as_deref());
+        }
+        self.history.settle(self.pending_nav, &from, to.as_deref());
+        if to.is_some() {
+            self.watcher.watch(&self.view.current);
+            if self.pending_nav != NavKind::Refresh {
+                self.recents.visit(&self.view.current);
+            }
+        } else if self.pending_nav == NavKind::Refresh {
+            // The open folder is gone; watch it afresh if it comes back.
+            self.watcher.forget();
+        }
+        if let Some(err) = self.error_after_load.take() {
+            self.view.error = Some(err);
+        }
+        // The edited entry may be gone (another folder, a reload).
+        if let Some(edit) = &self.rename
+            && !self.view.entries.iter().any(|e| e.path == edit.path)
+        {
+            self.rename = None;
+        }
+        // A faster navigation may have superseded the reload: check the entry.
+        if let Some(created) = self.rename_after_load.take()
+            && self.view.selected_entry().is_some_and(|e| e.path == created)
+        {
+            self.start_rename();
+        }
+    }
+
     /// Reloads the open folder a moment after it changed on disk.
     fn refresh_if_changed(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
@@ -910,37 +1012,7 @@ impl eframe::App for LumenApp {
         let ctx = ui.ctx().clone();
 
         if let Some(listing) = self.lister.poll() {
-            self.shown_id = listing.id;
-            let select = self.select_after_load.take();
-            let from = self.view.current.clone();
-            let to = listing.result.is_ok().then(|| listing.path.clone());
-            if self.pending_nav == NavKind::Refresh {
-                self.view.apply_refresh(listing);
-            } else {
-                self.view.apply_listing(listing, select.as_deref());
-            }
-            self.history.settle(self.pending_nav, &from, to.as_deref());
-            if to.is_some() {
-                self.watcher.watch(&self.view.current);
-            } else if self.pending_nav == NavKind::Refresh {
-                // The open folder is gone; watch it afresh if it comes back.
-                self.watcher.forget();
-            }
-            if let Some(err) = self.error_after_load.take() {
-                self.view.error = Some(err);
-            }
-            // The edited entry may be gone (another folder, a reload).
-            if let Some(edit) = &self.rename
-                && !self.view.entries.iter().any(|e| e.path == edit.path)
-            {
-                self.rename = None;
-            }
-            // A faster navigation may have superseded the reload: check the entry.
-            if let Some(created) = self.rename_after_load.take()
-                && self.view.selected_entry().is_some_and(|e| e.path == created)
-            {
-                self.start_rename();
-            }
+            self.apply(listing);
         }
 
         self.refresh_if_changed(&ctx);
@@ -1003,6 +1075,27 @@ impl eframe::App for LumenApp {
                 },
             );
         });
+
+        if self.sidebar_open {
+            self.refresh_disks();
+            ctx.request_repaint_after(DISKS_INTERVAL);
+            egui::Panel::left("sidebar")
+                .resizable(true)
+                .default_size(200.0)
+                .size_range(140.0..=360.0)
+                .show(ui, |ui| {
+                    let sidebar = Sidebar {
+                        current: &self.view.current,
+                        bookmarks: self.bookmarks.paths(),
+                        places: &self.places,
+                        disks: &self.disks.1,
+                        recents: self.recents.paths(),
+                    };
+                    if let Some(event) = ui::sidebar::show(ui, &sidebar) {
+                        self.handle_sidebar(&ctx, event);
+                    }
+                });
+        }
 
         self.sync_preview(&ctx);
         if self.preview_open {
@@ -1203,6 +1296,63 @@ mod tests {
         assert!(!app.job.as_ref().unwrap().job.cancel_requested(), "the copy goes on");
         app.handle_action(&ctx, Action::Cancel);
         assert!(app.job.as_ref().unwrap().job.cancel_requested());
+    }
+
+    fn listing_of(dir: &Path) -> Listing {
+        let entries = fs::lister::read_entries(dir).unwrap();
+        Listing { id: 0, path: dir.to_path_buf(), result: Ok(entries), elapsed: Duration::ZERO }
+    }
+
+    #[test]
+    fn visited_folders_become_recents_but_refreshes_and_failures_do_not() {
+        let (_ctx, mut app, dir) = app_in("app-recents");
+        app.apply(listing_of(&dir.join("sub")));
+        assert_eq!(app.recents.paths(), [dir.join("sub")]);
+        app.pending_nav = NavKind::Back;
+        app.apply(listing_of(&dir));
+        assert_eq!(app.recents.paths(), [dir.clone(), dir.join("sub")]);
+        app.pending_nav = NavKind::Refresh;
+        app.apply(listing_of(&dir.join("sub")));
+        assert_eq!(app.recents.paths()[0], dir, "a refresh is not a visit");
+        app.pending_nav = NavKind::New;
+        let failed = Listing { id: 0, path: dir.join("gone"), result: Err(ListError::NotFound(dir.join("gone"))), elapsed: Duration::ZERO };
+        app.apply(failed);
+        assert_eq!(app.recents.paths().len(), 2);
+    }
+
+    #[test]
+    fn nothing_inside_the_trash_can_be_trashed_again() {
+        let (_ctx, mut app, dir) = app_in("app-trash-guard");
+        app.trash = Some(dir.clone());
+        app.ask_trash();
+        assert!(app.dialog.is_none(), "no confirmation is offered");
+        assert_eq!(app.view.error.as_deref(), Some("This is already in the trash"));
+        assert!(dir.join("sub").exists());
+        app.trash = Some(dir.join("elsewhere"));
+        app.view.error = None;
+        app.ask_trash();
+        assert!(app.dialog.is_some(), "outside the trash Delete still asks");
+    }
+
+    #[test]
+    fn the_menu_button_shows_and_hides_the_side_panel() {
+        let (ctx, mut app, _) = app_in("app-sidebar-toggle");
+        assert!(app.sidebar_open, "open by default");
+        app.handle_toolbar(&ctx, ToolbarEvent::ToggleSidebar);
+        assert!(!app.sidebar_open);
+        app.handle_toolbar(&ctx, ToolbarEvent::ToggleSidebar);
+        assert!(app.sidebar_open);
+    }
+
+    #[test]
+    fn side_panel_items_open_and_bookmarks_can_be_removed() {
+        let (ctx, mut app, dir) = app_in("app-sidebar");
+        app.handle_sidebar(&ctx, SidebarEvent::Open(dir.join("sub")));
+        assert_eq!(app.lister.last_requested(), Some(dir.join("sub")));
+        app.bookmarks.toggle(&dir.join("sub"));
+        app.handle_sidebar(&ctx, SidebarEvent::RemoveBookmark(dir.join("sub")));
+        assert!(app.bookmarks.paths().is_empty());
+        assert_eq!(app.notice.as_deref(), Some("Removed “sub” from bookmarks"));
     }
 
     #[test]

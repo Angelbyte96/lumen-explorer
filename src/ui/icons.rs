@@ -64,6 +64,14 @@ pub fn show(ui: &mut egui::Ui, entry: &Entry) -> egui::Response {
     response
 }
 
+/// A folder icon, for rows that are not entries (the side panel).
+pub fn folder(ui: &mut egui::Ui) -> egui::Response {
+    let side = ui.text_style_height(&egui::TextStyle::Body);
+    let (rect, response) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
+    paint(ui.painter(), rect, IconKind::Folder);
+    response
+}
+
 /// A magnifying glass, for the filter bar (the fonts have none).
 pub fn magnifier(ui: &mut egui::Ui) -> egui::Response {
     let side = ui.text_style_height(&egui::TextStyle::Body);
@@ -86,7 +94,7 @@ const FOLD: Color32 = Color32::from_rgb(0xB8, 0xBC, 0xC2);
 fn paint(painter: &egui::Painter, rect: Rect, kind: IconKind) {
     let rect = rect.shrink(rect.width() * 0.08);
     if kind == IconKind::Folder {
-        folder(painter, rect);
+        paint_folder(painter, rect);
         return;
     }
     page(painter, rect);
@@ -170,7 +178,7 @@ fn page(painter: &egui::Painter, rect: Rect) {
 }
 
 /// A folder: a tab on top of a wider body.
-fn folder(painter: &egui::Painter, rect: Rect) {
+fn paint_folder(painter: &egui::Painter, rect: Rect) {
     let h = rect.height();
     let top = rect.top() + h * 0.15;
     let bottom = rect.bottom() - h * 0.1;
