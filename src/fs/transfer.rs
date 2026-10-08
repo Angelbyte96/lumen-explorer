@@ -498,8 +498,10 @@ mod tests {
     fn a_folder_cannot_be_pasted_into_itself() {
         let dir = fresh_fixture("xfer-plan-self");
         std::fs::create_dir_all(dir.join("box/inner")).unwrap();
+        #[cfg(unix)]
         std::os::unix::fs::symlink(dir.join("box/inner"), dir.join("alias")).unwrap();
-        for dest in ["box", "box/inner", "alias"] {
+        let dests: &[&str] = if cfg!(unix) { &["box", "box/inner", "alias"] } else { &["box", "box/inner"] };
+        for &dest in dests {
             for mode in [Mode::Copy, Mode::Move] {
                 let err = plan(&dir.join("box"), &dir.join(dest), mode).unwrap_err();
                 assert_eq!(err, "Cannot paste “box” into itself", "dest {dest}, {mode:?}");
@@ -517,27 +519,37 @@ mod tests {
         assert!(err.contains("ghost"), "error names the item: {err}");
     }
 
-    /// src/{a.txt, sub/b.bin, sub/run.sh (executable), link -> a.txt}
+    /// Files in `sample_tree`: the symlink counts as one, and only Unix has it.
+    const SAMPLE_FILES: u64 = if cfg!(unix) { 4 } else { 3 };
+
+    /// src/{a.txt, sub/b.bin, sub/run.sh (executable), link -> a.txt}.
+    /// On Windows there is no exec bit and no symlink (they need admin rights).
     fn sample_tree(dir: &Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let src = dir.join("src");
         std::fs::create_dir_all(src.join("sub")).unwrap();
         std::fs::write(src.join("a.txt"), "hello").unwrap();
         std::fs::write(src.join("sub/b.bin"), vec![7u8; 300_000]).unwrap();
         std::fs::write(src.join("sub/run.sh"), "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(src.join("sub/run.sh"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-        std::os::unix::fs::symlink("a.txt", src.join("link")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let exec = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(src.join("sub/run.sh"), exec).unwrap();
+            std::os::unix::fs::symlink("a.txt", src.join("link")).unwrap();
+        }
         src
     }
 
     fn assert_same_tree(target: &Path) {
-        use std::os::unix::fs::PermissionsExt;
         assert_eq!(read(&target.join("a.txt")), "hello");
         assert_eq!(std::fs::read(target.join("sub/b.bin")).unwrap(), vec![7u8; 300_000]);
-        let mode = std::fs::metadata(target.join("sub/run.sh")).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o755, "permissions are copied");
-        assert_eq!(std::fs::read_link(target.join("link")).unwrap(), Path::new("a.txt"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(target.join("sub/run.sh")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "permissions are copied");
+            assert_eq!(std::fs::read_link(target.join("link")).unwrap(), Path::new("a.txt"));
+        }
     }
 
     #[test]
@@ -550,7 +562,7 @@ mod tests {
         assert_same_tree(&dir.join("dst"));
         assert_same_tree(&src);
         let last = seen.last().expect("progress was reported");
-        assert_eq!((last.files_done, last.files_total), (4, 4));
+        assert_eq!((last.files_done, last.files_total), (SAMPLE_FILES, SAMPLE_FILES));
         assert_eq!((last.bytes_done, last.bytes_total), (300_015, 300_015));
         assert!(seen.windows(2).all(|w| w[0].bytes_done <= w[1].bytes_done));
     }
@@ -694,7 +706,7 @@ mod tests {
         assert_eq!(job.mode, Mode::Copy);
         assert_eq!(wait(&mut job, &woke), Ok(Outcome::Done));
         assert_same_tree(&dir.join("dst"));
-        assert_eq!((job.progress.files_done, job.progress.files_total), (4, 4));
+        assert_eq!((job.progress.files_done, job.progress.files_total), (SAMPLE_FILES, SAMPLE_FILES));
         assert_eq!(job.progress.percent(), 100);
     }
 
@@ -738,6 +750,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn same_folder_through_a_symlinked_path() {
         let dir = fresh_fixture("xfer-same-link");
         std::fs::create_dir(dir.join("real")).unwrap();
@@ -751,6 +764,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn replacing_a_link_to_the_source_keeps_the_source() {
         let dir = fresh_fixture("xfer-replace-link");
         std::fs::create_dir(dir.join("q")).unwrap();
@@ -764,6 +778,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn non_utf8_copy_name_keeps_the_extension() {
         use std::os::unix::ffi::OsStrExt;
         let name = copy_name(OsStr::from_bytes(b"caf\xe9.txt"), 1, false);
