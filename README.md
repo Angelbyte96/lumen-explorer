@@ -31,9 +31,10 @@ cargo test                     # unit tests (fixtures live in ~/pruebas-explorad
 | Ctrl+Shift+N | Create "New Folder" here and rename it |
 | Ctrl+C / Ctrl+X | Copy / cut the selected entry |
 | Ctrl+V | Paste into the current folder |
-| Esc | Clear the filter; with an empty filter, cancel the copy or move in progress (holding it never does both) |
+| Alt+R | Count the selected folder: its size and how many folders and files it holds, all the way down (runs in the background; symlinks are not followed and other disks are not entered). Folders show `--` until counted; the result stays while you are in this folder |
+| Esc | Clear the filter; with an empty filter, stop the Alt+R count, then cancel the copy or move in progress (holding it stops at the first thing it undid) |
 
-Click the Name, Size or Modified header to sort by that column; click it again to reverse. Folders always stay on top.
+The list and the folder preview show Name, Type, Date Modified, Folders, Files and Size. Click a header to sort by that column; click it again to reverse. Folders always stay on top; counted folders sort by their totals.
 
 Lumen never deletes permanently: Delete moves entries to the system trash, and renaming or pasting onto an existing name asks first and sends the old entry to the trash.
 

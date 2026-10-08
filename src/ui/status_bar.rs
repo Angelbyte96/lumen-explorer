@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use eframe::egui;
 
+use crate::fs::count::Totals;
 use crate::fs::transfer::{Mode, Progress};
 
 pub struct Status<'a> {
@@ -16,6 +17,8 @@ pub struct Status<'a> {
     /// Progress of the running copy or move, already formatted.
     pub job: Option<String>,
     pub notice: Option<&'a str>,
+    /// Alt+R count in progress, already formatted.
+    pub counting: Option<String>,
 }
 
 pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
@@ -39,6 +42,12 @@ pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
             ui.separator();
             ui.spinner();
             ui.label(job);
+            ui.weak("Esc to cancel");
+        }
+        if let Some(counting) = &status.counting {
+            ui.separator();
+            ui.spinner();
+            ui.label(counting);
             ui.weak("Esc to cancel");
         }
         if let Some(notice) = status.notice {
@@ -82,6 +91,12 @@ pub fn count_text(items: usize, filtering: bool) -> String {
     }
 }
 
+/// "Calculating “sub”… 3 folders · 120 files" while Alt+R runs.
+pub fn counting_text(name: &str, totals: &Totals) -> String {
+    use crate::ui::preview::plural;
+    format!("Calculating “{name}”… {} · {}", plural(totals.folders, "folder"), plural(totals.files, "file"))
+}
+
 /// "Copying 3/10 — 45%": files done of total, then share of bytes.
 pub fn progress_text(mode: Mode, progress: &Progress) -> String {
     let verb = match mode {
@@ -102,6 +117,12 @@ mod tests {
         assert_eq!(count_text(3, true), "3 matches");
         assert_eq!(count_text(1, true), "1 match");
         assert_eq!(count_text(0, true), "No matches");
+    }
+
+    #[test]
+    fn counting_reads_the_folder_and_running_totals() {
+        let t = Totals { folders: 3, files: 1, bytes: 0, unreadable: 0 };
+        assert_eq!(counting_text("sub", &t), "Calculating “sub”… 3 folders · 1 file");
     }
 
     #[test]

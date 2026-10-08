@@ -32,7 +32,9 @@ pub enum Action {
     Cut,
     /// Paste the clipboard into the current folder (Ctrl+V).
     Paste,
-    /// Escape: clears the filter, else stops the running copy or move.
+    /// Alt+R: count the selected folder's size, folders and files.
+    Count,
+    /// Escape: clears the filter, else stops a running count, else the copy or move.
     Cancel,
     /// Escape held down (key repeat).
     CancelHeld,
@@ -96,6 +98,9 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
         }
         if i.consume_key(Modifiers::ALT, Key::ArrowRight) {
             actions.push(Action::Forward);
+        }
+        if i.consume_key(Modifiers::ALT, Key::R) {
+            actions.push(Action::Count);
         }
         let plain = [
             (Key::ArrowDown, Action::Move(1)),
@@ -233,6 +238,18 @@ mod tests {
         let shift_delete =
             vec![Event::ModifiersChanged(Modifiers::SHIFT), key(Key::Delete, Modifiers::SHIFT)];
         assert_eq!(actions_for(shift_delete), []);
+    }
+
+    #[test]
+    fn alt_r_counts_and_types_nothing() {
+        let actions = actions_for(vec![
+            Event::ModifiersChanged(Modifiers::ALT),
+            key(Key::R, Modifiers::ALT),
+            Event::Text("r".into()),
+        ]);
+        assert_eq!(actions, [Action::Count]);
+        let actions = actions_for(vec![key(Key::R, Modifiers::NONE), Event::Text("r".into())]);
+        assert_eq!(actions, [Action::TypeChar('r')], "a plain r is a filter letter");
     }
 
     #[test]

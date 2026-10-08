@@ -1,5 +1,6 @@
 //! Filesystem layer. Knows nothing about the UI so it can be tested and ported on its own.
 
+pub mod count;
 pub mod entry;
 pub mod lister;
 pub mod ops;

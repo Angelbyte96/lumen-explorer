@@ -1,11 +1,13 @@
 //! Application state and the per-frame UI loop.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use crate::fs::count::{Count, Totals};
 use crate::fs::watch::Watcher;
 use crate::fs::{self, Entry, Lister, Listing};
 use crate::input::{self, Action, Confirm};
@@ -28,8 +30,11 @@ pub enum Scroll {
 pub enum SortColumn {
     #[default]
     Name,
-    Size,
+    Type,
     Modified,
+    Folders,
+    Files,
+    Size,
 }
 
 /// Column order of the list. Folders always stay above files.
@@ -68,6 +73,9 @@ pub struct View {
     pub scroll: Option<Scroll>,
     /// What was typed in the filter bar; rows must contain it, ignoring case.
     filter: String,
+    /// Folder totals computed with Alt+R, by entry name. Kept while the folder
+    /// stays on screen, dropped when another folder is shown.
+    pub totals: HashMap<String, Totals>,
 }
 
 impl View {
@@ -80,6 +88,7 @@ impl View {
             Ok(entries) => {
                 if listing.path != self.current {
                     self.filter.clear();
+                    self.totals.clear();
                 }
                 self.current = listing.path;
                 self.entries = entries;
@@ -135,6 +144,15 @@ impl View {
         self.sort = self.sort.clicked(column);
         self.rebuild_rows(keep.as_deref());
         self.scroll = Some(Scroll::Instant);
+    }
+
+    /// Stores a finished count; a list sorted by a count column moves the row.
+    pub fn set_totals(&mut self, name: String, totals: Totals) {
+        self.totals.insert(name, totals);
+        if matches!(self.sort.column, SortColumn::Folders | SortColumn::Files | SortColumn::Size) {
+            let keep = self.selected_entry().map(|e| e.name.clone());
+            self.rebuild_rows(keep.as_deref());
+        }
     }
 
     pub fn filter(&self) -> &str {
@@ -206,7 +224,7 @@ impl View {
     }
 
     fn rebuild_rows(&mut self, keep_name: Option<&str>) {
-        self.rows = visible_rows(&self.entries, self.show_hidden, &self.filter, self.sort);
+        self.rows = visible_rows(&self.entries, &self.totals, self.show_hidden, &self.filter, self.sort);
         self.selected = keep_name
             .and_then(|name| self.row_of_name(name))
             .or((!self.rows.is_empty()).then_some(0));
@@ -219,7 +237,13 @@ impl View {
 
 /// Indices into `entries` that pass the hidden-files and text filters, in
 /// display order. Shared by the list and the folder preview.
-pub fn visible_rows(entries: &[Entry], show_hidden: bool, filter: &str, sort: Sort) -> Vec<usize> {
+pub fn visible_rows(
+    entries: &[Entry],
+    totals: &HashMap<String, Totals>,
+    show_hidden: bool,
+    filter: &str,
+    sort: Sort,
+) -> Vec<usize> {
     let needle = filter.to_lowercase();
     let mut rows: Vec<usize> = (0..entries.len())
         .filter(|&i| {
@@ -227,20 +251,38 @@ pub fn visible_rows(entries: &[Entry], show_hidden: bool, filter: &str, sort: So
             (show_hidden || !e.hidden) && (needle.is_empty() || e.name.to_lowercase().contains(&needle))
         })
         .collect();
-    rows.sort_by(|&a, &b| compare(entries, sort, a, b));
+    // Kinds are built once, not on every comparison.
+    let kinds: Vec<String> = match sort.column {
+        SortColumn::Type => entries.iter().map(Entry::kind).collect(),
+        _ => Vec::new(),
+    };
+    rows.sort_by(|&a, &b| compare(entries, totals, &kinds, sort, a, b));
     rows
 }
 
 /// Orders two indices into `entries`. The lister already delivers entries
 /// folders-first and by case-insensitive name, so the index itself is the name
 /// order: it sorts the Name column and breaks ties without allocating.
-fn compare(entries: &[Entry], sort: Sort, a: usize, b: usize) -> Ordering {
+fn compare(
+    entries: &[Entry],
+    totals: &HashMap<String, Totals>,
+    kinds: &[String],
+    sort: Sort,
+    a: usize,
+    b: usize,
+) -> Ordering {
     let (ea, eb) = (&entries[a], &entries[b]);
+    let counted = |e: &Entry, field: fn(&Totals) -> u64| totals.get(&e.name).map(field);
+    // A counted folder's size is its contents; `None` (not counted, unreadable
+    // metadata) sorts before any value.
+    let size = |e: &Entry| e.size.or_else(|| counted(e, |t| t.bytes));
     let by_column = match sort.column {
         SortColumn::Name => a.cmp(&b),
-        // `None` (folders, unreadable metadata) sorts before any value.
-        SortColumn::Size => ea.size.cmp(&eb.size),
+        SortColumn::Type => kinds[a].cmp(&kinds[b]),
         SortColumn::Modified => ea.modified.cmp(&eb.modified),
+        SortColumn::Folders => counted(ea, |t| t.folders).cmp(&counted(eb, |t| t.folders)),
+        SortColumn::Files => counted(ea, |t| t.files).cmp(&counted(eb, |t| t.files)),
+        SortColumn::Size => size(ea).cmp(&size(eb)),
     };
     let by_column = if sort.descending { by_column.reverse() } else { by_column };
     eb.is_dir
@@ -419,6 +461,8 @@ pub struct LumenApp {
     clipboard: Option<Clip>,
     /// Copy or move running in the background; one at a time.
     job: Option<Running>,
+    /// Folder size and counts being computed (Alt+R); one at a time.
+    counting: Option<Count>,
     /// Informational line in the status bar ("1 item copied").
     notice: Option<String>,
     /// Watches the folder on screen; changes schedule a refresh.
@@ -426,8 +470,9 @@ pub struct LumenApp {
     refresh: RefreshTimer,
     /// Side panel toggled with Space.
     preview_open: bool,
-    /// The Backspace or Esc being held started on a non-empty filter.
-    held_on_filter: bool,
+    /// The Backspace or Esc being held started by undoing something softer
+    /// (filter text, a count), so the hold must not run on into the next thing.
+    hold_absorbed: bool,
     previewer: Previewer,
     /// What the panel shows: the selected entry, once its preview loads.
     preview: Option<PreviewPane>,
@@ -459,6 +504,7 @@ impl LumenApp {
             error_after_load: None,
             clipboard: None,
             job: None,
+            counting: None,
             notice: None,
             watcher: Watcher::new({
                 let ctx = ctx.clone();
@@ -466,7 +512,7 @@ impl LumenApp {
             }),
             refresh: RefreshTimer::default(),
             preview_open: false,
-            held_on_filter: false,
+            hold_absorbed: false,
             previewer: Previewer::new(),
             preview: None,
         };
@@ -485,6 +531,10 @@ impl LumenApp {
         path: PathBuf,
         select: Option<String>,
     ) {
+        // Its result would only be dropped: totals belong to the folder on screen.
+        if path != self.view.current {
+            self.cancel_count();
+        }
         self.pending_nav = kind;
         self.select_after_load = select;
         let ctx = ctx.clone();
@@ -672,6 +722,52 @@ impl LumenApp {
         }
     }
 
+    /// Alt+R: counts what the selected folder holds, in the background.
+    fn count_selected(&mut self, ctx: &egui::Context) {
+        let Some(entry) = self.view.selected_entry().filter(|e| e.is_dir) else { return };
+        let path = entry.path.clone();
+        // Only the newest count matters; the old one would be dropped unread.
+        self.cancel_count();
+        self.notice = None;
+        let ctx = ctx.clone();
+        self.counting = Some(Count::start(path, move || ctx.request_repaint()));
+    }
+
+    /// Stops the running count. `false` when there was none.
+    fn cancel_count(&mut self) -> bool {
+        let Some(count) = self.counting.take() else { return false };
+        count.cancel();
+        true
+    }
+
+    fn poll_count(&mut self) {
+        if let Some(result) = self.counting.as_mut().and_then(|c| c.poll())
+            && let Some(count) = self.counting.take()
+        {
+            self.finish_count(count, result);
+        }
+    }
+
+    /// Stores a finished count if its folder is still on screen.
+    fn finish_count(&mut self, count: Count, result: Result<Option<Totals>, String>) {
+        if count.path.parent() != Some(self.view.current.as_path()) {
+            return;
+        }
+        let Some(name) = file_name(&count.path) else { return };
+        match result {
+            Ok(Some(totals)) => {
+                if totals.unreadable > 0 {
+                    let n = totals.unreadable;
+                    let folders = if n == 1 { "folder" } else { "folders" };
+                    self.notice = Some(format!("“{name}”: {n} {folders} could not be read"));
+                }
+                self.view.set_totals(name, totals);
+            }
+            Ok(None) => {}
+            Err(err) => self.view.error = Some(err),
+        }
+    }
+
     fn cancel_job(&self) {
         if let Some(running) = &self.job {
             running.job.cancel();
@@ -728,14 +824,14 @@ impl LumenApp {
             Action::ToggleHidden => self.view.toggle_hidden(),
             Action::Activate => self.activate_selected(ctx),
             Action::GoParent => {
-                self.held_on_filter = self.view.pop_filter();
-                if !self.held_on_filter {
+                self.hold_absorbed = self.view.pop_filter();
+                if !self.hold_absorbed {
                     self.go_parent(ctx);
                 }
             }
             // A hold that started on the filter only erases; going up takes a new press.
             Action::GoParentHeld => {
-                if self.held_on_filter {
+                if self.hold_absorbed {
                     self.view.pop_filter();
                 } else {
                     self.go_parent(ctx);
@@ -755,15 +851,21 @@ impl LumenApp {
             Action::Copy => self.set_clipboard(Mode::Copy),
             Action::Cut => self.set_clipboard(Mode::Move),
             Action::Paste => self.paste(ctx),
+            Action::Count => self.count_selected(ctx),
             // Clearing a filter is the cheaper surprise than cancelling a copy.
+            // A count is cheaper to lose than a copy, too.
             Action::Cancel => {
-                self.held_on_filter = self.view.clear_filter();
-                if !self.held_on_filter {
+                self.hold_absorbed = self.view.clear_filter();
+                if !self.hold_absorbed && self.cancel_count() {
+                    self.notice = Some("Calculation cancelled".into());
+                    self.hold_absorbed = true;
+                }
+                if !self.hold_absorbed {
                     self.cancel_job();
                 }
             }
             Action::CancelHeld => {
-                if !self.held_on_filter {
+                if !self.hold_absorbed {
                     self.cancel_job();
                 }
             }
@@ -810,6 +912,7 @@ impl eframe::App for LumenApp {
         }
 
         self.refresh_if_changed(&ctx);
+        self.poll_count();
 
         if let Some(result) = self.job.as_mut().and_then(|r| r.job.poll())
             && let Some(running) = self.job.take()
@@ -854,6 +957,10 @@ impl eframe::App for LumenApp {
                         .as_ref()
                         .map(|r| ui::status_bar::progress_text(r.job.mode, &r.job.progress)),
                     notice: self.notice.as_deref(),
+                    counting: self.counting.as_ref().map(|c| {
+                        let name = file_name(&c.path).unwrap_or_default();
+                        ui::status_bar::counting_text(&name, &c.progress)
+                    }),
                 },
             );
         });
@@ -867,7 +974,14 @@ impl eframe::App for LumenApp {
                 .size_range(200.0..=width * 0.75)
                 .show(ui, |ui| match (&mut self.preview, self.view.selected_entry()) {
                     (Some(pane), Some(entry)) => {
-                        ui::preview::show(ui, entry, pane, self.view.show_hidden, self.view.sort);
+                        ui::preview::show(
+                            ui,
+                            entry,
+                            self.view.totals.get(&entry.name),
+                            pane,
+                            self.view.show_hidden,
+                            self.view.sort,
+                        );
                     }
                     _ => {
                         ui.weak("Nothing selected");
@@ -877,15 +991,7 @@ impl eframe::App for LumenApp {
 
         egui::CentralPanel::default_margins().show(ui, |ui| {
             let scroll = self.view.scroll.take();
-            let event = ui::file_list::show(
-                ui,
-                &self.view.entries,
-                &self.view.rows,
-                self.view.selected,
-                scroll,
-                self.view.sort,
-                self.rename.as_mut(),
-            );
+            let event = ui::file_list::show(ui, &self.view, scroll, self.rename.as_mut());
             match event {
                 Some(ListEvent::Select(i)) => self.view.selected = Some(i),
                 Some(ListEvent::Activate(i)) => {
@@ -1058,6 +1164,89 @@ mod tests {
         assert!(!app.job.as_ref().unwrap().job.cancel_requested(), "the copy goes on");
         app.handle_action(&ctx, Action::Cancel);
         assert!(app.job.as_ref().unwrap().job.cancel_requested());
+    }
+
+    /// Lets the running count finish, as the next frames would.
+    fn wait_count(app: &mut LumenApp) {
+        for _ in 0..500 {
+            app.poll_count();
+            if app.counting.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("count did not finish");
+    }
+
+    #[test]
+    fn alt_r_counts_the_selected_folder_in_the_background() {
+        let (ctx, mut app, dir) = app_in("app-count");
+        std::fs::write(dir.join("sub/c.txt"), "12345").unwrap();
+        std::fs::create_dir(dir.join("sub/inner")).unwrap();
+        assert_eq!(app.view.selected_entry().unwrap().name, "sub");
+        app.handle_action(&ctx, Action::Count);
+        assert_eq!(app.counting.as_ref().map(|c| c.path.clone()), Some(dir.join("sub")));
+        wait_count(&mut app);
+        let expected = Totals { folders: 1, files: 1, bytes: 5, unreadable: 0 };
+        assert_eq!(app.view.totals.get("sub"), Some(&expected));
+        assert_eq!(app.notice, None);
+    }
+
+    #[test]
+    fn alt_r_on_a_file_does_nothing() {
+        let (ctx, mut app, _) = app_in("app-count-file");
+        app.handle_action(&ctx, Action::Move(1));
+        assert_eq!(app.view.selected_entry().unwrap().name, "a.txt");
+        app.handle_action(&ctx, Action::Count);
+        assert!(app.counting.is_none());
+        assert!(app.view.totals.is_empty());
+    }
+
+    #[test]
+    fn escape_clears_the_filter_then_cancels_the_count_then_the_copy() {
+        let (ctx, mut app, dir) = app_in("app-count-escape");
+        app.clipboard = Some(Clip { path: dir.join("a.txt"), mode: Mode::Copy });
+        app.paste(&ctx);
+        app.handle_action(&ctx, Action::Count);
+        app.handle_action(&ctx, Action::TypeChar('s'));
+        app.handle_action(&ctx, Action::Cancel);
+        assert_eq!(app.view.filter(), "");
+        assert!(app.counting.is_some(), "the count goes on");
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.counting.is_none(), "the count stops");
+        assert_eq!(app.notice.as_deref(), Some("Calculation cancelled"));
+        assert!(!app.job.as_ref().unwrap().job.cancel_requested(), "the copy goes on");
+        app.handle_action(&ctx, Action::CancelHeld);
+        assert!(!app.job.as_ref().unwrap().job.cancel_requested(), "holding Esc stops at the count");
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.job.as_ref().unwrap().job.cancel_requested(), "a new press cancels the copy");
+    }
+
+    #[test]
+    fn leaving_the_folder_stops_the_count() {
+        let (ctx, mut app, _) = app_in("app-count-leave");
+        app.handle_action(&ctx, Action::Count);
+        app.handle_action(&ctx, Action::GoParent);
+        assert!(app.counting.is_none());
+    }
+
+    #[test]
+    fn a_count_for_a_folder_no_longer_shown_is_dropped() {
+        let (_ctx, mut app, dir) = app_in("app-count-stale");
+        let count = Count::start(dir.join("elsewhere/sub"), || {});
+        app.finish_count(count, Ok(Some(Totals { files: 3, ..Totals::default() })));
+        assert!(app.view.totals.is_empty());
+    }
+
+    #[test]
+    fn a_count_reports_unreadable_folders_and_errors() {
+        let (_ctx, mut app, dir) = app_in("app-count-errors");
+        let partial = Totals { folders: 4, files: 1, bytes: 9, unreadable: 2 };
+        app.finish_count(Count::start(dir.join("sub"), || {}), Ok(Some(partial)));
+        assert_eq!(app.view.totals.get("sub"), Some(&partial));
+        assert_eq!(app.notice.as_deref(), Some("“sub”: 2 folders could not be read"));
+        app.finish_count(Count::start(dir.join("sub"), || {}), Err("Cannot read sub: gone".into()));
+        assert_eq!(app.view.error.as_deref(), Some("Cannot read sub: gone"));
     }
 
     /// Lets the preview worker finish, as the next frames would.
@@ -1261,12 +1450,65 @@ mod tests {
     fn visible_rows_sort_and_hide_like_the_list_for_any_entries() {
         let v = sortable_view();
         let size_desc = Sort { column: SortColumn::Size, descending: true };
-        let rows = visible_rows(&v.entries, false, "", size_desc);
+        let rows = visible_rows(&v.entries, &HashMap::new(), false, "", size_desc);
         let names: Vec<&str> = rows.iter().map(|&i| v.entries[i].name.as_str()).collect();
         assert_eq!(names, ["a_dir", "b_dir", "a.txt", "b.txt", "d.txt", "c.txt"]);
         let entries = vec![entry(".git", true), entry("src", true), entry("a.txt", false)];
-        assert_eq!(visible_rows(&entries, false, "", Sort::default()), [1, 2]);
-        assert_eq!(visible_rows(&entries, true, "", Sort::default()), [0, 1, 2]);
+        assert_eq!(visible_rows(&entries, &HashMap::new(), false, "", Sort::default()), [1, 2]);
+        assert_eq!(visible_rows(&entries, &HashMap::new(), true, "", Sort::default()), [0, 1, 2]);
+    }
+
+    fn totals(bytes: u64, folders: u64, files: u64) -> Totals {
+        Totals { folders, files, bytes, unreadable: 0 }
+    }
+
+    #[test]
+    fn counted_folders_sort_by_their_totals() {
+        let mut v = sortable_view();
+        v.totals.insert("a_dir".into(), totals(500, 1, 9));
+        v.totals.insert("b_dir".into(), totals(20, 3, 2));
+        let by = |column| visible_rows(&v.entries, &v.totals, false, "", Sort { column, descending: false });
+        let names = |rows: Vec<usize>| -> Vec<String> { rows.iter().map(|&i| v.entries[i].name.clone()).collect() };
+        assert_eq!(names(by(SortColumn::Size))[..2], ["b_dir", "a_dir"]);
+        assert_eq!(names(by(SortColumn::Folders))[..2], ["a_dir", "b_dir"]);
+        assert_eq!(names(by(SortColumn::Files))[..2], ["b_dir", "a_dir"]);
+        // Files have no counts: they tie and keep name order.
+        assert_eq!(names(by(SortColumn::Files))[2..], ["a.txt", "b.txt", "c.txt", "d.txt"]);
+    }
+
+    #[test]
+    fn type_sorts_by_kind_then_name() {
+        let mut v = View::default();
+        let entries = vec![entry("z_dir", true), file("a.txt", None, None), file("b.md", None, None), file("z.md", None, None)];
+        v.apply_listing(ok_listing("/t", entries), None);
+        v.sort_by(SortColumn::Type);
+        assert_eq!(row_names(&v), ["z_dir", "b.md", "z.md", "a.txt"]);
+    }
+
+    #[test]
+    fn a_new_count_moves_its_row_when_sorted_by_a_count_column_and_keeps_the_selection() {
+        let mut v = sortable_view();
+        v.sort_by(SortColumn::Size);
+        v.sort_by(SortColumn::Size); // descending
+        v.selected = Some(0);
+        assert_eq!(v.selected_entry().unwrap().name, "a_dir");
+        v.set_totals("b_dir".into(), totals(100, 0, 1));
+        assert_eq!(row_names(&v)[..2], ["b_dir", "a_dir"]);
+        assert_eq!(v.selected_entry().unwrap().name, "a_dir", "selection follows the entry");
+        assert_eq!(v.totals.get("b_dir"), Some(&totals(100, 0, 1)));
+    }
+
+    #[test]
+    fn totals_survive_a_refresh_but_not_another_folder() {
+        let mut v = sortable_view();
+        v.set_totals("a_dir".into(), totals(1, 0, 1));
+        let again = v.entries.clone();
+        v.apply_refresh(ok_listing("/s", again.clone()));
+        assert!(v.totals.contains_key("a_dir"));
+        v.apply_listing(ok_listing("/s", again.clone()), None);
+        assert!(v.totals.contains_key("a_dir"), "reloading the same folder keeps them");
+        v.apply_listing(ok_listing("/other", again), None);
+        assert!(v.totals.is_empty());
     }
 
     #[test]

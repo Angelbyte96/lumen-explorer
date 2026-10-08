@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use eframe::egui::{self, text::CCursorRange};
 use egui_extras::{Column, TableBuilder};
 
-use crate::app::{Scroll, Sort, SortColumn};
+use crate::app::{Scroll, Sort, SortColumn, View};
 use crate::format::{format_size, format_time};
 use crate::fs::Entry;
+use crate::fs::count::Totals;
 
 pub enum ListEvent {
     Select(usize),
@@ -32,16 +33,15 @@ impl RenameEdit {
     }
 }
 
-/// `rows` holds indices into `entries` in display order; `selected` indexes `rows`.
+/// Draws `view`'s rows; `scroll` brings the selection into view.
 pub fn show(
     ui: &mut egui::Ui,
-    entries: &[Entry],
-    rows: &[usize],
-    selected: Option<usize>,
+    view: &View,
     scroll: Option<Scroll>,
-    sort: Sort,
     mut edit: Option<&mut RenameEdit>,
 ) -> Option<ListEvent> {
+    let View { entries, rows, totals, selected, sort, .. } = view;
+    let (selected, sort) = (*selected, *sort);
     let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
     let mut event = None;
 
@@ -49,8 +49,11 @@ pub fn show(
         .striped(true)
         .sense(egui::Sense::click())
         .column(Column::remainder().at_least(200.0).clip(true))
-        .column(Column::exact(90.0))
-        .column(Column::exact(140.0));
+        .column(Column::exact(110.0).clip(true))
+        .column(Column::exact(130.0))
+        .column(Column::exact(60.0))
+        .column(Column::exact(60.0))
+        .column(Column::exact(80.0));
     if let Some(scroll) = scroll
         && let Some(sel) = selected
     {
@@ -61,11 +64,7 @@ pub fn show(
 
     table
         .header(row_height, |mut header| {
-            for (label, column) in [
-                ("Name", SortColumn::Name),
-                ("Size", SortColumn::Size),
-                ("Modified", SortColumn::Modified),
-            ] {
+            for (label, column) in COLUMNS {
                 header.col(|ui| {
                     if sort_header(ui, label, column, sort) {
                         event = Some(ListEvent::Sort(column));
@@ -96,13 +95,13 @@ pub fn show(
                     ui.add(egui::Label::new(text).selectable(false).truncate());
                 });
                 row.col(|ui| {
-                    let size = entry.size.map(format_size).unwrap_or_default();
-                    ui.add(egui::Label::new(size).selectable(false));
+                    ui.add(egui::Label::new(entry.kind()).selectable(false).truncate());
                 });
                 row.col(|ui| {
                     let date = entry.modified.map(format_time).unwrap_or_default();
                     ui.add(egui::Label::new(date).selectable(false));
                 });
+                count_cols(&mut row, &count_cells(entry, totals.get(&entry.name)));
                 let response = row.response();
                 if response.double_clicked() {
                     event = Some(ListEvent::Activate(i));
@@ -112,6 +111,41 @@ pub fn show(
             });
         });
     event
+}
+
+/// Header labels and the column each one sorts, in display order.
+pub const COLUMNS: [(&str, SortColumn); 6] = [
+    ("Name", SortColumn::Name),
+    ("Type", SortColumn::Type),
+    ("Date Modified", SortColumn::Modified),
+    ("Folders", SortColumn::Folders),
+    ("Files", SortColumn::Files),
+    ("Size", SortColumn::Size),
+];
+
+/// Shown where a value is not known (yet): folders until Alt+R counts them.
+pub const UNKNOWN: &str = "--";
+
+/// Folders, Files and Size cells of a row. Files have no counts; folders
+/// show `--` until `totals` arrive.
+pub fn count_cells(entry: &Entry, totals: Option<&Totals>) -> [String; 3] {
+    let unknown = || UNKNOWN.to_owned();
+    match (entry.is_dir, totals) {
+        (true, Some(t)) => [t.folders.to_string(), t.files.to_string(), format_size(t.bytes)],
+        (true, None) => [unknown(), unknown(), unknown()],
+        (false, _) => [unknown(), unknown(), entry.size.map(format_size).unwrap_or_else(unknown)],
+    }
+}
+
+/// Draws the Folders, Files and Size cells; numbers are right-aligned.
+pub fn count_cols(row: &mut egui_extras::TableRow<'_, '_>, cells: &[String; 3]) {
+    for cell in cells {
+        row.col(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(cell.as_str()).selectable(false));
+            });
+        });
+    }
 }
 
 /// Id of the rename field, so the app can tell when it lost focus silently.
@@ -195,15 +229,28 @@ mod tests {
     }
 
     #[test]
+    fn count_cells_show_dashes_until_a_folder_is_counted() {
+        assert_eq!(count_cells(&entry("a.txt"), None), ["--", "--", "1 B"]);
+        let unknown = Entry { size: None, ..entry("b.txt") };
+        assert_eq!(count_cells(&unknown, None), ["--", "--", "--"]);
+        let dir = Entry { is_dir: true, size: None, ..entry("src") };
+        assert_eq!(count_cells(&dir, None), ["--", "--", "--"]);
+        let totals = Totals { folders: 2, files: 9, bytes: 2306867, unreadable: 0 };
+        assert_eq!(count_cells(&dir, Some(&totals)), ["2", "9", "2.2 MB"]);
+    }
+
+    #[test]
     fn rename_field_sits_inside_its_row() {
         let ctx = egui::Context::default();
-        let entries = [entry("angel.jpg.jpg"), entry("other.txt")];
+        let entries = vec![entry("angel.jpg.jpg"), entry("other.txt")];
         let mut edit = RenameEdit::new(entries[0].path.clone(), &entries[0].name, false);
+        let mut view = View::default();
+        (view.entries, view.rows, view.selected) = (entries, vec![0, 1], Some(0));
         let mut row_height = 0.0;
         for _ in 0..2 {
             ctx.run_ui(egui::RawInput::default(), |ui| {
                 row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
-                show(ui, &entries, &[0, 1], Some(0), None, Sort::default(), Some(&mut edit));
+                show(ui, &view, None, Some(&mut edit));
             })
             .drop_without_applying_deltas();
         }
