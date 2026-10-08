@@ -1401,13 +1401,23 @@ impl eframe::App for LumenApp {
     }
 }
 
-/// Folder to open at startup: first CLI argument, else the working directory, else home.
+/// Folder to open at startup: first CLI argument, else the working directory
+/// (Linux) or home (Windows).
 pub fn start_dir(arg: Option<String>) -> PathBuf {
-    let cwd = std::env::current_dir().ok();
-    let base = cwd.clone().or_else(fs::home_dir).unwrap_or_else(|| PathBuf::from("/"));
+    // Windows hands a GUI app whatever working directory its launcher had
+    // (often C:\Windows\System32), not one the user chose.
+    start_dir_from(arg, std::env::current_dir().ok(), fs::home_dir(), !cfg!(windows))
+}
+
+fn start_dir_from(arg: Option<String>, cwd: Option<PathBuf>, home: Option<PathBuf>, use_cwd: bool) -> PathBuf {
+    let root = || PathBuf::from("/");
     match arg {
-        Some(arg) => fs::resolve_input_path(&arg, &base, fs::home_dir().as_deref()),
-        None => base,
+        Some(arg) => {
+            let base = cwd.or_else(|| home.clone()).unwrap_or_else(root);
+            fs::resolve_input_path(&arg, &base, home.as_deref())
+        }
+        None if use_cwd => cwd.or(home).unwrap_or_else(root),
+        None => home.or(cwd).unwrap_or_else(root),
     }
 }
 
@@ -1418,6 +1428,28 @@ mod tests {
     use crate::fs::preview::Content;
     use std::path::Path;
     use std::time::Instant;
+
+    #[test]
+    fn without_an_argument_windows_starts_in_home_and_linux_where_it_was_launched() {
+        let cwd = Some(PathBuf::from("/srv/work"));
+        let home = Some(PathBuf::from("/home/u"));
+        assert_eq!(start_dir_from(None, cwd.clone(), home.clone(), true), PathBuf::from("/srv/work"));
+        assert_eq!(start_dir_from(None, cwd.clone(), home.clone(), false), PathBuf::from("/home/u"));
+        // Each falls back on the other, then on the root.
+        assert_eq!(start_dir_from(None, None, home.clone(), true), PathBuf::from("/home/u"));
+        assert_eq!(start_dir_from(None, cwd.clone(), None, false), PathBuf::from("/srv/work"));
+        assert_eq!(start_dir_from(None, None, None, false), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn a_folder_argument_is_resolved_against_the_working_directory() {
+        let cwd = Some(PathBuf::from("/srv/work"));
+        let home = Some(PathBuf::from("/home/u"));
+        for use_cwd in [true, false] {
+            let got = start_dir_from(Some("docs".into()), cwd.clone(), home.clone(), use_cwd);
+            assert_eq!(got, Path::new("/srv/work").join("docs"));
+        }
+    }
 
     #[test]
     fn cut_and_paste_into_the_same_folder_says_why_nothing_happened() {
