@@ -34,6 +34,8 @@ pub enum Action {
     Paste,
     /// Alt+R: count the selected folder's size, folders and files.
     Count,
+    /// Ctrl+D: bookmark the current folder, or remove its bookmark.
+    ToggleBookmark,
     /// Escape: clears the filter, else stops a running count, else the copy or move.
     Cancel,
     /// Escape held down (key repeat).
@@ -92,6 +94,9 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
         }
         if i.consume_key(Modifiers::COMMAND, Key::H) {
             actions.push(Action::ToggleHidden);
+        }
+        if i.consume_key(Modifiers::COMMAND, Key::D) {
+            actions.push(Action::ToggleBookmark);
         }
         if i.consume_key(Modifiers::ALT, Key::ArrowLeft) {
             actions.push(Action::Back);
@@ -250,6 +255,16 @@ mod tests {
         assert_eq!(actions, [Action::Count]);
         let actions = actions_for(vec![key(Key::R, Modifiers::NONE), Event::Text("r".into())]);
         assert_eq!(actions, [Action::TypeChar('r')], "a plain r is a filter letter");
+    }
+
+    #[test]
+    fn ctrl_d_toggles_the_bookmark_and_types_nothing() {
+        let events = vec![
+            Event::ModifiersChanged(Modifiers::COMMAND),
+            key(Key::D, Modifiers::COMMAND),
+            Event::Text("d".into()),
+        ];
+        assert_eq!(actions_for(events), [Action::ToggleBookmark]);
     }
 
     #[test]

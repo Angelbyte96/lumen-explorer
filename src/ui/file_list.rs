@@ -128,6 +128,10 @@ pub const COLUMNS: [(&str, SortColumn); 6] = [
     ("Size", SortColumn::Size),
 ];
 
+/// Marks the sorted column's direction.
+pub const SORT_ASCENDING: &str = "⏶";
+pub const SORT_DESCENDING: &str = "⏷";
+
 /// Shown where a value is not known (yet): folders until Alt+R counts them.
 pub const UNKNOWN: &str = "--";
 
@@ -186,10 +190,10 @@ fn rename_field(ui: &mut egui::Ui, edit: &mut RenameEdit) -> Option<bool> {
 fn sort_header(ui: &mut egui::Ui, label: &str, column: SortColumn, sort: Sort) -> bool {
     let arrow = match (sort.column == column, sort.descending) {
         (false, _) => "",
-        (true, false) => " ⬆",
-        (true, true) => " ⬇",
+        (true, false) => SORT_ASCENDING,
+        (true, true) => SORT_DESCENDING,
     };
-    let text = egui::RichText::new(format!("{label}{arrow}")).strong();
+    let text = egui::RichText::new(format!("{label} {arrow}")).strong();
     ui.add(egui::Button::new(text).frame(false)).clicked()
 }
 

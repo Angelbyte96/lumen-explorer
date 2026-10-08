@@ -1,5 +1,6 @@
-//! Editable path bar. Shows the current folder; Ctrl+L focuses it with the text
-//! selected, Enter navigates, Escape restores the current path.
+//! Editable path field. Hidden behind the toolbar's crumbs until Ctrl+L (or a
+//! click on the crumb bar) focuses it with the text selected; Enter navigates,
+//! Escape or a click elsewhere goes back to the crumbs.
 
 use std::path::Path;
 
@@ -16,9 +17,18 @@ impl PathBar {
         self.focus_requested = true;
     }
 
+    /// Whether the field is shown instead of the crumbs.
+    pub fn is_editing(&self, ctx: &egui::Context) -> bool {
+        self.focus_requested || ctx.memory(|m| m.has_focus(Self::id()))
+    }
+
+    fn id() -> egui::Id {
+        egui::Id::new("lumen_path_bar")
+    }
+
     /// Draws the bar. Returns the typed text when the user presses Enter.
     pub fn show(&mut self, ui: &mut egui::Ui, current: &Path) -> Option<String> {
-        let id = egui::Id::new("lumen_path_bar");
+        let id = Self::id();
         let has_focus = ui.memory(|m| m.has_focus(id));
         if !has_focus && !self.focus_requested {
             // Not being edited: always mirror the folder actually shown.
