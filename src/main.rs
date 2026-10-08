@@ -7,6 +7,7 @@ mod config;
 mod format;
 mod fs;
 mod input;
+mod menu;
 mod places;
 mod ui;
 

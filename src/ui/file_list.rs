@@ -18,6 +18,8 @@ pub enum ListEvent {
     Toggle(usize),
     /// Shift+click: select the range up to the row.
     Extend(usize),
+    /// Right click on the row: its menu.
+    Menu(usize),
     Activate(usize),
     Sort(SortColumn),
     /// The in-place rename ended: `true` with Enter, `false` with Escape or a click elsewhere.
@@ -133,7 +135,9 @@ pub fn show(
                 });
                 count_cols(&mut row, &count_cells(entry, totals.get(&entry.name)));
                 let response = row.response();
-                if response.double_clicked() {
+                if response.secondary_clicked() {
+                    event = Some(ListEvent::Menu(i));
+                } else if response.double_clicked() {
                     event = Some(ListEvent::Activate(i));
                 } else if response.clicked() {
                     let m = response.ctx.input(|input| input.modifiers);

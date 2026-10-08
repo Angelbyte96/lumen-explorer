@@ -1,0 +1,485 @@
+//! The right-click menu, as data: what it offers for the selection or for the
+//! folder's empty space, and how the search box and the keys walk it. Drawn by
+//! `ui::context_menu`; File Pilot style, submenus open in place, indented.
+
+use std::collections::HashSet;
+
+use crate::app::{Sort, SortColumn};
+use crate::fs::Entry;
+use crate::ui::file_list::{COLUMNS, SORT_ASCENDING, SORT_DESCENDING};
+use crate::ui::path_popup::word_ranges;
+
+/// What a menu item does once picked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    Open,
+    OpenInNewTab,
+    Cut,
+    Copy,
+    CopyPath,
+    Paste,
+    Rename,
+    Trash,
+    /// Bookmark the selected folder, or remove its bookmark.
+    ToggleBookmark,
+    Count,
+    NewFolder,
+    Sort(SortColumn),
+    Refresh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Kind {
+    Run(Command),
+    Sub(Vec<Item>),
+    Separator,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Item {
+    pub label: String,
+    pub shortcut: Option<&'static str>,
+    pub enabled: bool,
+    pub kind: Kind,
+}
+
+impl Item {
+    pub fn run(label: impl Into<String>, shortcut: Option<&'static str>, enabled: bool, command: Command) -> Self {
+        Self { label: label.into(), shortcut, enabled, kind: Kind::Run(command) }
+    }
+
+    pub fn sub(label: impl Into<String>, items: Vec<Item>) -> Self {
+        let enabled = items.iter().any(|item| item.enabled);
+        Self { label: label.into(), shortcut: None, enabled, kind: Kind::Sub(items) }
+    }
+
+    pub fn separator() -> Self {
+        Self { label: String::new(), shortcut: None, enabled: false, kind: Kind::Separator }
+    }
+}
+
+/// A line of the open menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Row {
+    /// Indices from the top level down to this item.
+    pub at: Vec<usize>,
+    /// What the line says: while searching, with its submenus before it
+    /// ("Sort by › Name") so they can be searched too.
+    pub label: String,
+    /// Bytes of `label` matching the typed words.
+    pub marks: Vec<std::ops::Range<usize>>,
+    pub depth: usize,
+}
+
+/// Arrow keys and Enter, as the menu reads them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    Up,
+    Down,
+    /// Opens the submenu under the cursor.
+    Right,
+    /// Closes the submenu the cursor is in (or on).
+    Left,
+    Enter,
+}
+
+/// The open menu: its items, the search text and the line under the cursor.
+pub struct Menu {
+    pub items: Vec<Item>,
+    pub query: String,
+    /// Submenus open in place, by `Row::at`.
+    expanded: HashSet<Vec<usize>>,
+    /// Index into `rows()`. While searching and none is picked, the first
+    /// enabled row counts as picked, like the path box.
+    cursor: Option<usize>,
+}
+
+pub const SEARCH_SEPARATOR: &str = " › ";
+
+impl Menu {
+    pub fn new(items: Vec<Item>) -> Self {
+        Self { items, query: String::new(), expanded: HashSet::new(), cursor: None }
+    }
+
+    pub fn item(&self, at: &[usize]) -> &Item {
+        let (first, rest) = at.split_first().expect("a row has a place");
+        rest.iter().fold(&self.items[*first], |item, &i| match &item.kind {
+            Kind::Sub(sub) => &sub[i],
+            _ => unreachable!("only submenus have children"),
+        })
+    }
+
+    fn searching(&self) -> bool {
+        !self.query.trim().is_empty()
+    }
+
+    /// The lines shown: the items with their open submenus, or, while
+    /// searching, every runnable item matching all the typed words.
+    pub fn rows(&self) -> Vec<Row> {
+        let mut rows = Vec::new();
+        self.walk(&self.items, &mut Vec::new(), "", &mut rows);
+        rows
+    }
+
+    fn walk(&self, items: &[Item], at: &mut Vec<usize>, parents: &str, rows: &mut Vec<Row>) {
+        for (i, item) in items.iter().enumerate() {
+            at.push(i);
+            if self.searching() {
+                let label = format!("{parents}{}", item.label);
+                match &item.kind {
+                    Kind::Run(_) => {
+                        if let Some(marks) = word_ranges(&label, &self.query) {
+                            rows.push(Row { at: at.clone(), label, marks, depth: 0 });
+                        }
+                    }
+                    Kind::Sub(sub) => self.walk(sub, at, &format!("{label}{SEARCH_SEPARATOR}"), rows),
+                    Kind::Separator => {}
+                }
+            } else {
+                rows.push(Row { at: at.clone(), label: item.label.clone(), marks: Vec::new(), depth: at.len() - 1 });
+                if let Kind::Sub(sub) = &item.kind
+                    && self.expanded.contains(at)
+                {
+                    self.walk(sub, at, parents, rows);
+                }
+            }
+            at.pop();
+        }
+    }
+
+    /// The row under the cursor, if any.
+    pub fn cursor(&self) -> Option<usize> {
+        let rows = self.rows();
+        match self.cursor {
+            Some(row) => (row < rows.len()).then_some(row),
+            None if self.searching() => rows.iter().position(|row| self.item(&row.at).enabled),
+            None => None,
+        }
+    }
+
+    /// The search text changed: the cursor goes back to the first match.
+    pub fn set_query(&mut self, query: String) {
+        self.query = query;
+        self.cursor = None;
+    }
+
+    /// Moves, opens or closes; Enter on a runnable item returns its command.
+    pub fn key(&mut self, key: Key) -> Option<Command> {
+        let rows = self.rows();
+        let line = |row: usize| self.item(&rows[row].at).kind != Kind::Separator;
+        let cursor = self.cursor();
+        match key {
+            Key::Down => {
+                let from = cursor.map_or(0, |c| c + 1);
+                if let Some(row) = (from..rows.len()).find(|&row| line(row)) {
+                    self.cursor = Some(row);
+                }
+            }
+            Key::Up => {
+                if let Some(row) = cursor.and_then(|c| (0..c).rfind(|&row| line(row))) {
+                    self.cursor = Some(row);
+                }
+            }
+            Key::Right => {
+                if let Some(row) = cursor.filter(|_| !self.searching()) {
+                    self.expand(&rows[row].at);
+                }
+            }
+            Key::Left => {
+                let row = cursor.filter(|_| !self.searching())?;
+                let at = &rows[row].at;
+                let target = if self.expanded.contains(at) { at.clone() } else { at[..at.len() - 1].to_vec() };
+                if target.is_empty() {
+                    return None;
+                }
+                self.collapse(&target);
+                self.cursor = self.rows().iter().position(|row| row.at == target);
+            }
+            Key::Enter => return cursor.and_then(|row| self.pick(row)),
+        }
+        None
+    }
+
+    /// A click on row `row`: runs it, or opens / closes a submenu.
+    pub fn click(&mut self, row: usize) -> Option<Command> {
+        let at = self.rows().get(row)?.at.clone();
+        self.cursor = Some(row);
+        if matches!(self.item(&at).kind, Kind::Sub(_)) && self.expanded.contains(&at) {
+            self.collapse(&at);
+            return None;
+        }
+        self.pick(row)
+    }
+
+    /// Runs row `row`, or opens it when it is a submenu.
+    fn pick(&mut self, row: usize) -> Option<Command> {
+        let at = self.rows().get(row)?.at.clone();
+        let item = self.item(&at);
+        match &item.kind {
+            Kind::Run(command) if item.enabled => Some(command.clone()),
+            Kind::Sub(_) if !self.searching() => {
+                self.expand(&at);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn expand(&mut self, at: &[usize]) {
+        if matches!(self.item(at).kind, Kind::Sub(_)) {
+            self.expanded.insert(at.to_vec());
+        }
+    }
+
+    /// Closes the submenu at `at` and every one inside it.
+    fn collapse(&mut self, at: &[usize]) {
+        self.expanded.retain(|open| !open.starts_with(at));
+    }
+}
+
+/// The menu for the selected entries (`selection`, never empty).
+/// `bookmarked`: the single selected folder is a bookmark.
+pub fn entry_menu(selection: &[&Entry], bookmarked: bool) -> Vec<Item> {
+    let single = selection.len() == 1;
+    let folder = single && selection[0].is_dir;
+    let mut items = vec![Item::run("Open", Some("Enter"), single, Command::Open)];
+    if folder {
+        items.push(Item::run("Open in New Tab", None, true, Command::OpenInNewTab));
+    }
+    items.extend([
+        Item::separator(),
+        Item::run("Cut", Some("Ctrl+X"), true, Command::Cut),
+        Item::run("Copy", Some("Ctrl+C"), true, Command::Copy),
+        Item::run("Copy Path", None, true, Command::CopyPath),
+        Item::separator(),
+        Item::run("Rename", Some("F2"), single, Command::Rename),
+        Item::run("Move to Trash", Some("Delete"), true, Command::Trash),
+    ]);
+    if folder {
+        let bookmark = if bookmarked { "Remove from Bookmarks" } else { "Add to Bookmarks" };
+        items.extend([
+            Item::separator(),
+            Item::run(bookmark, None, true, Command::ToggleBookmark),
+            Item::run("Calculate Size", Some("Alt+R"), true, Command::Count),
+        ]);
+    }
+    items
+}
+
+/// The menu for the folder's empty space. `can_paste`: the clipboard holds something.
+pub fn background_menu(can_paste: bool, sort: Sort) -> Vec<Item> {
+    let columns = COLUMNS
+        .iter()
+        .map(|&(label, column)| {
+            let label = match (sort.column == column, sort.descending) {
+                (false, _) => label.to_owned(),
+                (true, false) => format!("{label} {SORT_ASCENDING}"),
+                (true, true) => format!("{label} {SORT_DESCENDING}"),
+            };
+            Item::run(label, None, true, Command::Sort(column))
+        })
+        .collect();
+    vec![
+        Item::run("Paste", Some("Ctrl+V"), can_paste, Command::Paste),
+        Item::sub("New", vec![Item::run("Folder", Some("Ctrl+Shift+N"), true, Command::NewFolder)]),
+        Item::separator(),
+        Item::sub("Sort by", columns),
+        Item::run("Refresh", None, true, Command::Refresh),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(label: &str, command: Command) -> Item {
+        Item::run(label, None, true, command)
+    }
+
+    /// Open, a separator, "Sort by" (Name, Size) and a disabled Paste.
+    fn sample() -> Menu {
+        Menu::new(vec![
+            run("Open", Command::Open),
+            Item::separator(),
+            Item::sub("Sort by", vec![run("Name", Command::Sort(SortColumn::Name)), run("Size", Command::Sort(SortColumn::Size))]),
+            Item::run("Paste", Some("Ctrl+V"), false, Command::Paste),
+        ])
+    }
+
+    fn labels(menu: &Menu) -> Vec<String> {
+        menu.rows().into_iter().map(|row| format!("{}{}", "  ".repeat(row.depth), row.label)).collect()
+    }
+
+    #[test]
+    fn submenus_start_closed_and_open_in_place_indented() {
+        let mut menu = sample();
+        assert_eq!(labels(&menu), ["Open", "", "Sort by", "Paste"]);
+        assert_eq!(menu.cursor(), None, "nothing picked until a key or a search");
+        menu.click(2);
+        assert_eq!(labels(&menu), ["Open", "", "Sort by", "  Name", "  Size", "Paste"]);
+        menu.click(2);
+        assert_eq!(labels(&menu), ["Open", "", "Sort by", "Paste"], "a second click closes it");
+    }
+
+    #[test]
+    fn the_keys_skip_separators_open_submenus_and_run_items() {
+        let mut menu = sample();
+        assert_eq!(menu.key(Key::Down), None);
+        assert_eq!(menu.cursor(), Some(0));
+        menu.key(Key::Down);
+        assert_eq!(menu.cursor(), Some(2), "over the separator");
+        menu.key(Key::Right);
+        menu.key(Key::Down);
+        assert_eq!(menu.rows()[menu.cursor().unwrap()].label, "Name");
+        menu.key(Key::Down);
+        assert_eq!(menu.key(Key::Enter), Some(Command::Sort(SortColumn::Size)));
+        menu.key(Key::Left);
+        assert_eq!(labels(&menu), ["Open", "", "Sort by", "Paste"], "Left closes the submenu it is in");
+        assert_eq!(menu.rows()[menu.cursor().unwrap()].label, "Sort by", "and goes back to it");
+        assert_eq!(menu.key(Key::Enter), None, "Enter on a submenu opens it");
+        assert_eq!(labels(&menu).len(), 6);
+        for _ in 0..10 {
+            menu.key(Key::Down);
+        }
+        assert_eq!(menu.rows()[menu.cursor().unwrap()].label, "Paste", "stops at the end");
+        menu.key(Key::Up);
+        menu.key(Key::Up);
+        menu.key(Key::Up);
+        menu.key(Key::Up);
+        assert_eq!(menu.cursor(), Some(0), "stops at the top");
+    }
+
+    #[test]
+    fn disabled_items_never_run() {
+        let mut menu = sample();
+        assert_eq!(menu.click(3), None);
+        for _ in 0..3 {
+            menu.key(Key::Down);
+        }
+        assert_eq!(menu.rows()[menu.cursor().unwrap()].label, "Paste");
+        assert_eq!(menu.key(Key::Enter), None);
+    }
+
+    #[test]
+    fn a_search_lists_matching_items_of_every_level_with_their_submenu() {
+        let mut menu = sample();
+        menu.set_query("size".into());
+        assert_eq!(labels(&menu), ["Sort by › Size"]);
+        assert_eq!(menu.rows()[0].marks, vec![12..16]);
+        assert_eq!(menu.cursor(), Some(0), "the first match is picked");
+        assert_eq!(menu.key(Key::Enter), Some(Command::Sort(SortColumn::Size)));
+        menu.set_query("sort n".into());
+        assert_eq!(labels(&menu), ["Sort by › Name"], "words in any order, submenu names count");
+        menu.set_query("pa".into());
+        assert_eq!(labels(&menu), ["Paste"]);
+        assert_eq!(menu.cursor(), None, "a disabled match is listed but not picked");
+        menu.set_query("zzz".into());
+        assert_eq!(labels(&menu), Vec::<String>::new());
+        assert_eq!(menu.key(Key::Enter), None);
+    }
+
+    fn entry(name: &str, is_dir: bool) -> Entry {
+        Entry { name: name.into(), path: format!("/x/{name}").into(), is_dir, size: None, modified: None, hidden: false }
+    }
+
+    /// Label and whether it is enabled, sub-items indented; separators as "-".
+    fn outline(items: &[Item]) -> Vec<String> {
+        let mut out = Vec::new();
+        fn walk(items: &[Item], depth: usize, out: &mut Vec<String>) {
+            for item in items {
+                let off = if item.enabled || item.kind == Kind::Separator { "" } else { " (off)" };
+                let shortcut = item.shortcut.map(|s| format!(" [{s}]")).unwrap_or_default();
+                let label = if item.kind == Kind::Separator { "-" } else { &item.label };
+                out.push(format!("{}{label}{shortcut}{off}", "  ".repeat(depth)));
+                if let Kind::Sub(sub) = &item.kind {
+                    walk(sub, depth + 1, out);
+                }
+            }
+        }
+        walk(items, 0, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_file_offers_open_clipboard_rename_and_trash() {
+        let file = entry("a.txt", false);
+        assert_eq!(
+            outline(&entry_menu(&[&file], false)),
+            [
+                "Open [Enter]",
+                "-",
+                "Cut [Ctrl+X]",
+                "Copy [Ctrl+C]",
+                "Copy Path",
+                "-",
+                "Rename [F2]",
+                "Move to Trash [Delete]",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_folder_adds_new_tab_bookmark_and_size() {
+        let dir = entry("src", true);
+        assert_eq!(
+            outline(&entry_menu(&[&dir], false)),
+            [
+                "Open [Enter]",
+                "Open in New Tab",
+                "-",
+                "Cut [Ctrl+X]",
+                "Copy [Ctrl+C]",
+                "Copy Path",
+                "-",
+                "Rename [F2]",
+                "Move to Trash [Delete]",
+                "-",
+                "Add to Bookmarks",
+                "Calculate Size [Alt+R]",
+            ]
+        );
+        assert!(outline(&entry_menu(&[&dir], true)).contains(&"Remove from Bookmarks".to_owned()));
+    }
+
+    #[test]
+    fn several_entries_keep_only_what_works_on_all() {
+        let (dir, file) = (entry("src", true), entry("a.txt", false));
+        assert_eq!(
+            outline(&entry_menu(&[&dir, &file], false)),
+            [
+                "Open [Enter] (off)",
+                "-",
+                "Cut [Ctrl+X]",
+                "Copy [Ctrl+C]",
+                "Copy Path",
+                "-",
+                "Rename [F2] (off)",
+                "Move to Trash [Delete]",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_empty_space_offers_paste_new_sort_and_refresh() {
+        let sort = Sort { column: SortColumn::Size, descending: true };
+        assert_eq!(
+            outline(&background_menu(true, sort)),
+            [
+                "Paste [Ctrl+V]",
+                "New",
+                "  Folder [Ctrl+Shift+N]",
+                "-",
+                "Sort by",
+                "  Name",
+                "  Type",
+                "  Date Modified",
+                "  Folders",
+                "  Files",
+                &format!("  Size {SORT_DESCENDING}"),
+                "Refresh",
+            ]
+        );
+        assert_eq!(outline(&background_menu(false, Sort::default()))[0], "Paste [Ctrl+V] (off)");
+        assert_eq!(outline(&background_menu(false, Sort::default()))[5], format!("  Name {SORT_ASCENDING}"));
+    }
+}
