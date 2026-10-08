@@ -1,7 +1,7 @@
 //! Application state and the per-frame UI loop.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -290,7 +290,6 @@ impl View {
 
     /// What an operation acts on, in display order: the picked rows shown, or
     /// the cursor row when none is.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the file operations do not take it yet"))]
     pub fn selection(&self) -> Vec<&Entry> {
         let picked: Vec<&Entry> = (0..self.rows.len())
             .filter(|&row| self.is_picked(row))
@@ -305,12 +304,23 @@ impl View {
             .map(|&idx| &self.entries[idx])
     }
 
-    /// Entry to select once the selected one is gone: the row below, or the
-    /// row above when it was the last one.
+    /// Entry to select once the selection is gone: the first row left below
+    /// it, or the nearest one above when none is.
     pub fn name_after_removal(&self) -> Option<String> {
-        let sel = self.selected?;
-        let row = if sel + 1 < self.rows.len() { sel + 1 } else { sel.checked_sub(1)? };
+        let gone = |row: usize| if self.picked_count() > 0 { self.is_picked(row) } else { Some(row) == self.selected };
+        let last = (0..self.rows.len()).rfind(|&row| gone(row))?;
+        let row = (last + 1..self.rows.len())
+            .find(|&row| !gone(row))
+            .or_else(|| (0..last).rfind(|&row| !gone(row)))?;
         Some(self.entries[self.rows[row]].name.clone())
+    }
+
+    /// The selected entry when exactly one is (rename, count).
+    pub fn single(&self) -> Option<&Entry> {
+        match self.selection().as_slice() {
+            [one] => Some(one),
+            _ => None,
+        }
     }
 
     /// Folders among the rows shown.
@@ -498,7 +508,8 @@ fn came_from(current: &Path, target: &Path) -> Option<String> {
 
 /// A destructive operation waiting for the user's Enter or Escape.
 enum Dialog {
-    Trash { path: PathBuf, name: String, select: Option<String> },
+    /// The selected entries; `select` is the row to land on once they are gone.
+    Trash { paths: Vec<PathBuf>, select: Option<String> },
     /// Renaming onto an existing name; the edit resumes if the user says no.
     Replace(RenameEdit),
     /// Pasting onto an existing name.
@@ -508,7 +519,10 @@ enum Dialog {
 impl Dialog {
     fn message(&self) -> String {
         match self {
-            Self::Trash { name, .. } => format!("Move “{name}” to the trash?"),
+            Self::Trash { paths, .. } => match paths.as_slice() {
+                [one] => format!("Move “{}” to the trash?", file_name(one).unwrap_or_default()),
+                many => format!("Move {} items to the trash?", many.len()),
+            },
             Self::Replace(edit) => format!(
                 "“{}” already exists. Replace it? The existing one goes to the trash.",
                 edit.text
@@ -526,17 +540,45 @@ impl Dialog {
             Self::Replace(_) | Self::Paste { .. } => "Replace",
         }
     }
+
+    /// The other answer (Escape): a paste goes on without this item.
+    fn no_label(&self) -> &'static str {
+        match self {
+            Self::Paste { .. } => "Skip",
+            Self::Trash { .. } | Self::Replace(_) => "Cancel",
+        }
+    }
 }
 
 fn file_name(path: &Path) -> Option<String> {
     path.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
-/// Lumen's own clipboard (not the system one): one entry, copied or cut.
+/// Lumen's own clipboard (not the system one): the entries copied or cut.
 #[derive(Clone)]
 struct Clip {
-    path: PathBuf,
+    paths: Vec<PathBuf>,
     mode: Mode,
+}
+
+/// A paste of the clipboard: its entries go one at a time, each as a [`Job`]
+/// or a question about a taken name.
+struct Batch {
+    mode: Mode,
+    /// Entries not started yet, in order.
+    queue: VecDeque<PathBuf>,
+    total: usize,
+    /// Where the last finished entry landed, to select it at the end.
+    landed: Option<PathBuf>,
+    /// Entries already in this folder (a cut pasted where it lives).
+    in_place: Vec<PathBuf>,
+}
+
+impl Batch {
+    /// Which entry is running, counted from 1, when there is more than one.
+    fn item(&self) -> Option<(usize, usize)> {
+        (self.total > 1).then(|| (self.total - self.queue.len(), self.total))
+    }
 }
 
 /// A paste in progress and where it lands.
@@ -605,6 +647,8 @@ pub struct LumenApp {
     clipboard: Option<Clip>,
     /// Copy or move running in the background; one at a time.
     job: Option<Running>,
+    /// The paste that job belongs to, with the entries still to go.
+    batch: Option<Batch>,
     bookmarks: Bookmarks,
     recents: Recents,
     /// Home, Downloads... and the trash, found once at startup.
@@ -660,6 +704,7 @@ impl LumenApp {
             dialog: None,
             rename: None,
             clipboard: None,
+            batch: None,
             job: None,
             counting: None,
             bookmarks: Bookmarks::default(),
@@ -850,21 +895,35 @@ impl LumenApp {
     }
 
     fn ask_trash(&mut self) {
-        let Some(entry) = self.tab.view.selected_entry() else { return };
+        let paths: Vec<PathBuf> = self.tab.view.selection().iter().map(|e| e.path.clone()).collect();
+        if paths.is_empty() {
+            return;
+        }
         // Trashing it again would lose the record that lets it be restored.
-        if self.trash.as_deref().is_some_and(|trash| places::in_trash(&entry.path, trash)) {
+        if let Some(trash) = self.trash.as_deref()
+            && paths.iter().any(|path| places::in_trash(path, trash))
+        {
             self.tab.view.error = Some("This is already in the trash".into());
             return;
         }
-        self.dialog = Some(Dialog::Trash {
-            path: entry.path.clone(),
-            name: entry.name.clone(),
-            select: self.tab.view.name_after_removal(),
-        });
+        self.dialog = Some(Dialog::Trash { paths, select: self.tab.view.name_after_removal() });
+    }
+
+    /// Trashes `paths` in order, stopping at the first failure; the list then
+    /// lands on the entry that failed.
+    fn trash_all(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, select: Option<String>) {
+        for path in paths {
+            if let Err(err) = fs::ops::trash(&path) {
+                self.tab.error_after_load = Some(err);
+                self.reload(ctx, file_name(&path));
+                return;
+            }
+        }
+        self.reload(ctx, select);
     }
 
     fn start_rename(&mut self) {
-        let Some(entry) = self.tab.view.selected_entry() else { return };
+        let Some(entry) = self.tab.view.single() else { return };
         self.rename = Some(RenameEdit::new(entry.path.clone(), &entry.name, entry.is_dir));
     }
 
@@ -900,34 +959,90 @@ impl LumenApp {
     }
 
     fn set_clipboard(&mut self, mode: Mode) {
-        let Some(entry) = self.tab.view.selected_entry() else { return };
-        self.clipboard = Some(Clip { path: entry.path.clone(), mode });
+        let paths: Vec<PathBuf> = self.tab.view.selection().iter().map(|e| e.path.clone()).collect();
+        if paths.is_empty() {
+            return;
+        }
+        let items = if paths.len() == 1 { "1 item".to_owned() } else { format!("{} items", paths.len()) };
         self.notice = Some(match mode {
-            Mode::Copy => "1 item copied".into(),
-            Mode::Move => "1 item cut".into(),
+            Mode::Copy => format!("{items} copied"),
+            Mode::Move => format!("{items} cut"),
         });
+        self.clipboard = Some(Clip { paths, mode });
     }
 
     fn paste(&mut self, ctx: &egui::Context) {
-        if self.job.is_some() {
+        if self.job.is_some() || self.batch.is_some() {
             self.tab.view.error = Some("Another operation is still running".into());
             return;
         }
-        let Some(Clip { path, mode }) = self.clipboard.clone() else {
+        let Some(Clip { paths, mode }) = self.clipboard.clone() else {
             self.notice = Some("Nothing to paste: Ctrl+C or Ctrl+X first".into());
             return;
         };
-        match transfer::plan(&path, &self.tab.view.current, mode) {
-            Ok(Plan::Ready(target)) => self.start_job(ctx, path, target, mode, false),
-            Ok(Plan::Nothing) => {
-                let name = file_name(&path).unwrap_or_default();
-                self.notice = Some(format!("“{name}” is already in this folder"));
+        self.notice = None;
+        self.tab.view.error = None;
+        let total = paths.len();
+        self.batch = Some(Batch { mode, queue: paths.into(), total, landed: None, in_place: Vec::new() });
+        self.next_paste(ctx);
+    }
+
+    /// Starts the batch's next entry, asks about a taken name, or ends the
+    /// batch when no entry is left.
+    fn next_paste(&mut self, ctx: &egui::Context) {
+        loop {
+            let Some(batch) = self.batch.as_mut() else { return };
+            let Some(source) = batch.queue.pop_front() else {
+                self.end_paste(ctx);
+                return;
+            };
+            let mode = batch.mode;
+            match transfer::plan(&source, &self.tab.view.current, mode) {
+                Ok(Plan::Ready(target)) => return self.start_job(ctx, source, target, mode, false),
+                Ok(Plan::Nothing) => batch.in_place.push(source),
+                Ok(Plan::TargetExists(target)) => {
+                    self.dialog = Some(Dialog::Paste { source, target, mode });
+                    return;
+                }
+                Err(err) => {
+                    batch.queue.clear();
+                    self.tab.error_after_load = Some(err);
+                }
             }
-            Ok(Plan::TargetExists(target)) => {
-                self.dialog = Some(Dialog::Paste { source: path, target, mode });
-            }
-            Err(err) => self.tab.view.error = Some(err),
         }
+    }
+
+    /// The batch is over (done, cancelled or failed): what was cut and has
+    /// moved leaves the clipboard, and the folder is listed again.
+    fn end_paste(&mut self, ctx: &egui::Context) {
+        let Some(batch) = self.batch.take() else { return };
+        if batch.mode == Mode::Move
+            && let Some(clip) = self.clipboard.as_mut()
+        {
+            clip.paths.retain(|path| fs::ops::exists(path));
+            if clip.paths.is_empty() {
+                self.clipboard = None;
+            }
+        }
+        if batch.in_place.len() == batch.total {
+            self.notice = Some(match batch.in_place.as_slice() {
+                [one] => format!("“{}” is already in this folder", file_name(one).unwrap_or_default()),
+                _ => "These items are already in this folder".into(),
+            });
+        }
+        // A navigation started meanwhile shows fresh contents anyway; reloading
+        // here would supersede it. A pending refresh may be replaced.
+        if self.tab.lister.is_pending(self.tab.shown_id) && self.tab.pending_nav != NavKind::Refresh {
+            if let Some(err) = self.tab.error_after_load.take() {
+                self.tab.view.error = Some(err);
+            }
+            return;
+        }
+        let select = match batch.landed {
+            Some(target) if target.parent() == Some(self.tab.view.current.as_path()) => file_name(&target),
+            _ => self.tab.view.selected_entry().map(|e| e.name.clone()),
+        };
+        self.reload(ctx, select);
     }
 
     fn start_job(
@@ -938,8 +1053,6 @@ impl LumenApp {
         mode: Mode,
         replace: bool,
     ) {
-        self.notice = None;
-        self.tab.view.error = None;
         let ctx = ctx.clone();
         let job = Job::start(source, target.clone(), mode, replace, move || ctx.request_repaint());
         self.job = Some(Running { job, target });
@@ -947,51 +1060,46 @@ impl LumenApp {
 
     fn finish_job(&mut self, ctx: &egui::Context, running: Running, result: Result<Outcome, String>) {
         let mode = running.job.mode;
-        match result {
+        let stop = match result {
             Ok(Outcome::Done) => {
-                // The cut entry has moved; pasting it again would find nothing.
-                if mode == Mode::Move {
-                    self.clipboard = None;
+                if let Some(batch) = self.batch.as_mut() {
+                    batch.landed = Some(running.target);
                 }
+                false
             }
             Ok(Outcome::Cancelled) => {
                 self.notice = Some(match mode {
                     Mode::Copy => "Copy cancelled".into(),
                     Mode::Move => "Move cancelled".into(),
                 });
+                true
             }
-            Err(err) => self.tab.error_after_load = Some(err),
-        }
-        // A navigation started meanwhile shows fresh contents anyway; reloading
-        // here would supersede it. A pending refresh may be replaced.
-        if self.tab.lister.is_pending(self.tab.shown_id) && self.tab.pending_nav != NavKind::Refresh {
-            return;
-        }
-        let select = if running.target.parent() == Some(self.tab.view.current.as_path()) {
-            file_name(&running.target)
-        } else {
-            self.tab.view.selected_entry().map(|e| e.name.clone())
+            Err(err) => {
+                self.tab.error_after_load = Some(err);
+                true
+            }
         };
-        self.reload(ctx, select);
+        if stop && let Some(batch) = self.batch.as_mut() {
+            batch.queue.clear();
+        }
+        self.next_paste(ctx);
     }
 
     fn answer_dialog(&mut self, ctx: &egui::Context, answer: Confirm) {
         let Some(dialog) = self.dialog.take() else { return };
         if answer == Confirm::No {
-            if let Dialog::Replace(mut edit) = dialog {
-                edit.focus = true;
-                self.rename = Some(edit);
+            match dialog {
+                Dialog::Replace(mut edit) => {
+                    edit.focus = true;
+                    self.rename = Some(edit);
+                }
+                Dialog::Paste { .. } => self.next_paste(ctx),
+                Dialog::Trash { .. } => {}
             }
             return;
         }
         match dialog {
-            Dialog::Trash { path, name, select } => match fs::ops::trash(&path) {
-                Ok(()) => self.reload(ctx, select),
-                Err(err) => {
-                    self.tab.error_after_load = Some(err);
-                    self.reload(ctx, Some(name));
-                }
-            },
+            Dialog::Trash { paths, select } => self.trash_all(ctx, paths, select),
             Dialog::Replace(edit) => self.finish_rename(ctx, edit, true),
             Dialog::Paste { source, target, mode } => {
                 self.start_job(ctx, source, target, mode, true);
@@ -1108,7 +1216,7 @@ impl LumenApp {
 
     /// Alt+R: counts what the selected folder holds, in the background.
     fn count_selected(&mut self, ctx: &egui::Context) {
-        let Some(entry) = self.tab.view.selected_entry().filter(|e| e.is_dir) else { return };
+        let Some(entry) = self.tab.view.single().filter(|e| e.is_dir) else { return };
         let path = entry.path.clone();
         // Only the newest count matters; the old one would be dropped unread.
         self.cancel_count();
@@ -1152,9 +1260,13 @@ impl LumenApp {
         }
     }
 
-    fn cancel_job(&self) {
+    /// Stops the running copy or move and the entries queued after it.
+    fn cancel_job(&mut self) {
         if let Some(running) = &self.job {
             running.job.cancel();
+            if let Some(batch) = self.batch.as_mut() {
+                batch.queue.clear();
+            }
         }
     }
 
@@ -1381,7 +1493,10 @@ impl eframe::App for LumenApp {
                     job: self
                         .job
                         .as_ref()
-                        .map(|r| ui::status_bar::progress_text(r.job.mode, &r.job.progress)),
+                        .map(|r| {
+                            let item = self.batch.as_ref().and_then(Batch::item);
+                            ui::status_bar::progress_text(r.job.mode, &r.job.progress, item)
+                        }),
                     notice: self.notice.as_deref(),
                     folder_count: self.tab.view.folder_count(),
                     selected: self.tab.view.selected,
@@ -1478,7 +1593,7 @@ impl eframe::App for LumenApp {
         }
 
         if let Some(dialog) = &self.dialog
-            && let Some(answer) = ui::confirm::show(&ctx, &dialog.message(), dialog.yes_label())
+            && let Some(answer) = ui::confirm::show(&ctx, &dialog.message(), dialog.yes_label(), dialog.no_label())
         {
             self.answer_dialog(&ctx, answer);
         }
@@ -1550,7 +1665,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "A").unwrap();
         let ctx = egui::Context::default();
         let mut app = LumenApp::new(&ctx, dir.clone(), false);
-        app.clipboard = Some(Clip { path: dir.join("a.txt"), mode: Mode::Move });
+        app.clipboard = Some(Clip { paths: vec![dir.join("a.txt")], mode: Mode::Move });
         app.paste(&ctx);
         assert_eq!(app.notice.as_deref(), Some("“a.txt” is already in this folder"));
         assert!(app.job.is_none());
@@ -1645,7 +1760,7 @@ mod tests {
     #[test]
     fn holding_escape_clears_the_filter_without_cancelling_the_copy() {
         let (ctx, mut app, dir) = app_in("app-escape-held");
-        app.clipboard = Some(Clip { path: dir.join("a.txt"), mode: Mode::Copy });
+        app.clipboard = Some(Clip { paths: vec![dir.join("a.txt")], mode: Mode::Copy });
         app.paste(&ctx);
         app.handle_action(&ctx, Action::TypeChar('b'));
         app.handle_action(&ctx, Action::Cancel);
@@ -1659,7 +1774,7 @@ mod tests {
     #[test]
     fn holding_escape_with_no_filter_still_cancels_the_copy() {
         let (ctx, mut app, dir) = app_in("app-escape-held-cancel");
-        app.clipboard = Some(Clip { path: dir.join("a.txt"), mode: Mode::Copy });
+        app.clipboard = Some(Clip { paths: vec![dir.join("a.txt")], mode: Mode::Copy });
         app.paste(&ctx);
         app.handle_action(&ctx, Action::CancelHeld);
         assert!(app.job.as_ref().unwrap().job.cancel_requested());
@@ -1668,7 +1783,7 @@ mod tests {
     #[test]
     fn escape_clears_the_filter_first_and_then_cancels_a_copy() {
         let (ctx, mut app, dir) = app_in("app-escape");
-        app.clipboard = Some(Clip { path: dir.join("a.txt"), mode: Mode::Copy });
+        app.clipboard = Some(Clip { paths: vec![dir.join("a.txt")], mode: Mode::Copy });
         app.paste(&ctx);
         app.handle_action(&ctx, Action::TypeChar('b'));
         app.handle_action(&ctx, Action::Cancel);
@@ -1678,10 +1793,179 @@ mod tests {
         assert!(app.job.as_ref().unwrap().job.cancel_requested());
     }
 
+    /// Runs the paste in progress until it ends or stops at a question.
+    fn wait_paste(ctx: &egui::Context, app: &mut LumenApp) {
+        for _ in 0..500 {
+            if let Some(result) = app.job.as_mut().and_then(|r| r.job.poll()) {
+                let running = app.job.take().unwrap();
+                app.finish_job(ctx, running, result);
+            }
+            if app.dialog.is_some() || (app.job.is_none() && app.batch.is_none()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("paste did not finish");
+    }
+
+    /// A click on the first of `names`, then Ctrl+click on the rest.
+    fn pick(app: &mut LumenApp, names: &[&str]) {
+        let view = &mut app.tab.view;
+        let row = |view: &View, name: &str| view.row_of_name(name).expect("listed");
+        view.select_row(row(view, names[0]));
+        for name in &names[1..] {
+            view.toggle_pick(row(view, name));
+        }
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn copying_several_entries_pastes_them_one_after_another() {
+        let (ctx, mut app, dir) = app_in("app-batch-copy");
+        pick(&mut app, &["a.txt", "b.txt"]);
+        app.handle_action(&ctx, Action::Copy);
+        assert_eq!(app.notice.as_deref(), Some("2 items copied"));
+        app.handle_action(&ctx, Action::Paste);
+        wait_paste(&ctx, &mut app);
+        assert_eq!(names_in(&dir), ["a (copy).txt", "a.txt", "b (copy).txt", "b.txt", "sub"]);
+        assert_eq!(std::fs::read_to_string(dir.join("b (copy).txt")).unwrap(), "B");
+        assert!(app.clipboard.is_some(), "a copy can be pasted again");
+        assert_eq!(app.tab.view.error, None);
+    }
+
+    #[test]
+    fn cutting_several_entries_moves_them_all_and_empties_the_clipboard() {
+        let (ctx, mut app, dir) = app_in("app-batch-move");
+        pick(&mut app, &["a.txt", "b.txt"]);
+        app.handle_action(&ctx, Action::Cut);
+        assert_eq!(app.notice.as_deref(), Some("2 items cut"));
+        app.navigate(&ctx, dir.join("sub"), None);
+        land(&mut app);
+        app.handle_action(&ctx, Action::Paste);
+        wait_paste(&ctx, &mut app);
+        assert_eq!(names_in(&dir), ["sub"]);
+        assert_eq!(names_in(&dir.join("sub")), ["a.txt", "b.txt"]);
+        assert!(app.clipboard.is_none(), "nothing left to move");
+    }
+
+    #[test]
+    fn a_taken_name_asks_for_that_item_and_skip_goes_on_with_the_rest() {
+        let (ctx, mut app, dir) = app_in("app-batch-skip");
+        std::fs::write(dir.join("sub/a.txt"), "OLD").unwrap();
+        pick(&mut app, &["a.txt", "b.txt"]);
+        app.handle_action(&ctx, Action::Cut);
+        app.navigate(&ctx, dir.join("sub"), None);
+        land(&mut app);
+        app.handle_action(&ctx, Action::Paste);
+        wait_paste(&ctx, &mut app);
+        let dialog = app.dialog.as_ref().expect("asks about a.txt");
+        assert_eq!(dialog.message(), "“a.txt” already exists here. Replace it? The existing one goes to the trash.");
+        assert_eq!((dialog.yes_label(), dialog.no_label()), ("Replace", "Skip"));
+        app.answer_dialog(&ctx, Confirm::No);
+        wait_paste(&ctx, &mut app);
+        assert!(app.dialog.is_none());
+        assert_eq!(names_in(&dir.join("sub")), ["a.txt", "b.txt"]);
+        assert_eq!(std::fs::read_to_string(dir.join("sub/a.txt")).unwrap(), "OLD", "skipped");
+        assert_eq!(names_in(&dir), ["a.txt", "sub"]);
+        assert_eq!(crate::fs::ops::tests::trashed_names_from(&dir.join("sub")), Vec::<String>::new());
+        let Some(Clip { paths, .. }) = &app.clipboard else { panic!("the skipped one stays cut") };
+        assert_eq!(paths, &[dir.join("a.txt")]);
+    }
+
+    #[test]
+    fn a_taken_name_replaced_sends_the_old_one_to_the_trash() {
+        let (ctx, mut app, dir) = app_in("app-batch-replace");
+        let sub = dir.join("sub");
+        std::fs::write(sub.join("a.txt"), "OLD").unwrap();
+        pick(&mut app, &["a.txt", "b.txt"]);
+        app.handle_action(&ctx, Action::Copy);
+        app.navigate(&ctx, sub.clone(), None);
+        land(&mut app);
+        app.handle_action(&ctx, Action::Paste);
+        wait_paste(&ctx, &mut app);
+        app.answer_dialog(&ctx, Confirm::Yes);
+        wait_paste(&ctx, &mut app);
+        assert_eq!(std::fs::read_to_string(sub.join("a.txt")).unwrap(), "A");
+        assert_eq!(names_in(&sub), ["a.txt", "b.txt"]);
+        assert_eq!(crate::fs::ops::tests::trashed_names_from(&sub), crate::fs::ops::tests::as_trashed(&["a.txt"]));
+        crate::fs::ops::tests::purge_trashed_from(&sub);
+    }
+
+    #[test]
+    fn escape_stops_the_whole_paste_not_just_the_current_item() {
+        let (ctx, mut app, dir) = app_in("app-batch-cancel");
+        pick(&mut app, &["a.txt", "b.txt"]);
+        app.handle_action(&ctx, Action::Copy);
+        app.handle_action(&ctx, Action::Paste);
+        app.handle_action(&ctx, Action::Cancel);
+        app.handle_action(&ctx, Action::Cancel);
+        wait_paste(&ctx, &mut app);
+        assert!(!dir.join("b (copy).txt").exists(), "the second item never starts");
+        assert!(app.batch.is_none());
+    }
+
+    #[test]
+    fn pasting_while_a_paste_waits_for_an_answer_is_refused() {
+        let (ctx, mut app, dir) = app_in("app-batch-busy");
+        std::fs::write(dir.join("sub/a.txt"), "OLD").unwrap();
+        app.clipboard = Some(Clip { paths: vec![dir.join("a.txt")], mode: Mode::Copy });
+        app.navigate(&ctx, dir.join("sub"), None);
+        land(&mut app);
+        app.paste(&ctx);
+        assert!(app.dialog.is_some());
+        app.dialog = None; // as if a second Ctrl+V got past the modal
+        app.paste(&ctx);
+        assert_eq!(app.tab.view.error.as_deref(), Some("Another operation is still running"));
+    }
+
+    #[test]
+    fn delete_with_several_picked_asks_once_and_trashes_them_all() {
+        let (ctx, mut app, dir) = app_in("app-batch-trash");
+        pick(&mut app, &["a.txt", "b.txt"]);
+        app.handle_action(&ctx, Action::Trash);
+        let dialog = app.dialog.as_ref().expect("asks first");
+        assert_eq!(dialog.message(), "Move 2 items to the trash?");
+        assert_eq!((dialog.yes_label(), dialog.no_label()), ("Move to Trash", "Cancel"));
+        app.answer_dialog(&ctx, Confirm::Yes);
+        assert_eq!(names_in(&dir), ["sub"]);
+        assert_eq!(crate::fs::ops::tests::trashed_names_from(&dir), crate::fs::ops::tests::as_trashed(&["a.txt", "b.txt"]));
+        crate::fs::ops::tests::purge_trashed_from(&dir);
+    }
+
+    #[test]
+    fn delete_of_one_entry_still_names_it_and_no_keeps_it() {
+        let (ctx, mut app, dir) = app_in("app-trash-one");
+        pick(&mut app, &["b.txt"]);
+        app.handle_action(&ctx, Action::Trash);
+        assert_eq!(app.dialog.as_ref().unwrap().message(), "Move “b.txt” to the trash?");
+        app.answer_dialog(&ctx, Confirm::No);
+        assert_eq!(names_in(&dir), ["a.txt", "b.txt", "sub"]);
+    }
+
+    #[test]
+    fn rename_and_count_do_nothing_with_several_picked() {
+        let (ctx, mut app, _dir) = app_in("app-batch-single");
+        pick(&mut app, &["a.txt", "sub"]);
+        app.handle_action(&ctx, Action::Rename);
+        app.handle_action(&ctx, Action::Count);
+        assert!(app.rename.is_none() && app.counting.is_none());
+        pick(&mut app, &["sub"]);
+        app.handle_action(&ctx, Action::Rename);
+        assert_eq!(app.rename.as_ref().unwrap().text, "sub", "one picked row is the selection");
+    }
+
     #[test]
     fn escape_drops_the_multi_selection_after_the_filter_and_before_the_copy() {
         let (ctx, mut app, dir) = app_in("app-escape-picks");
-        app.clipboard = Some(Clip { path: dir.join("a.txt"), mode: Mode::Copy });
+        app.clipboard = Some(Clip { paths: vec![dir.join("a.txt")], mode: Mode::Copy });
         app.paste(&ctx);
         app.handle_action(&ctx, Action::SelectAll);
         app.handle_action(&ctx, Action::TypeChar('t'));
@@ -2132,7 +2416,7 @@ mod tests {
     #[test]
     fn escape_clears_the_filter_then_cancels_the_count_then_the_copy() {
         let (ctx, mut app, dir) = app_in("app-count-escape");
-        app.clipboard = Some(Clip { path: dir.join("a.txt"), mode: Mode::Copy });
+        app.clipboard = Some(Clip { paths: vec![dir.join("a.txt")], mode: Mode::Copy });
         app.paste(&ctx);
         app.handle_action(&ctx, Action::Count);
         app.handle_action(&ctx, Action::TypeChar('s'));
@@ -2836,6 +3120,19 @@ mod tests {
         assert_eq!(v.name_after_removal().as_deref(), Some("b.txt"));
         v.selected = Some(0);
         assert_eq!(v.name_after_removal().as_deref(), Some("a.txt"));
+    }
+
+    #[test]
+    fn after_removing_several_rows_the_first_row_left_below_them_is_selected() {
+        let mut v = loaded_view(); // src, a.txt, b.txt
+        v.select_row(0);
+        v.toggle_pick(1);
+        assert_eq!(v.name_after_removal().as_deref(), Some("b.txt"));
+        v.select_row(1);
+        v.extend_by(1);
+        assert_eq!(v.name_after_removal().as_deref(), Some("src"), "none below: the nearest above");
+        v.select_all();
+        assert_eq!(v.name_after_removal(), None);
     }
 
     #[test]
