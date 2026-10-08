@@ -42,7 +42,44 @@ pub(crate) fn same_entry(a: &Path, b: &Path) -> bool {
     }
 }
 
-#[cfg(not(unix))]
+/// Same volume and file index, read without following a link (like
+/// `symlink_metadata` on Unix).
+#[cfg(windows)]
+pub(crate) fn same_entry(a: &Path, b: &Path) -> bool {
+    match (file_id(a), file_id(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn file_id(path: &Path) -> Option<(u32, u32, u32)> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+    };
+    // No access rights: enough to read the identity, and folders open too.
+    let file = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()?;
+    // SAFETY: the handle stays open while `file` lives; `info` is a properly
+    // sized out-parameter filled on success.
+    let info = unsafe {
+        let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+        if GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) == 0 {
+            return None;
+        }
+        info
+    };
+    Some((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn same_entry(_: &Path, _: &Path) -> bool {
     false
 }
@@ -243,6 +280,31 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "A");
         assert_eq!(trashed_names_from(&dir), as_trashed(&["b.txt"]), "old b.txt is recoverable");
         purge_trashed_from(&dir);
+    }
+
+    #[test]
+    fn same_entry_tells_one_entry_through_two_paths_from_two_entries() {
+        let dir = fresh_fixture("same-entry");
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), "A").unwrap();
+        std::fs::write(dir.join("b.txt"), "B").unwrap();
+        assert!(same_entry(&dir.join("a.txt"), &dir.join("sub").join("..").join("a.txt")));
+        assert!(same_entry(&dir.join("sub"), &dir.join("sub")), "folders too");
+        assert!(!same_entry(&dir.join("a.txt"), &dir.join("b.txt")));
+        assert!(!same_entry(&dir.join("a.txt"), &dir.join("ghost.txt")), "a missing entry is never the same");
+    }
+
+    /// NTFS ignores case: "A.txt" already exists, and it is "a.txt" itself.
+    #[cfg(windows)]
+    #[test]
+    fn a_case_only_rename_keeps_the_file_and_trashes_nothing() {
+        let dir = fresh_fixture("rename-case");
+        std::fs::write(dir.join("a.txt"), "body").unwrap();
+        assert_eq!(rename(&dir.join("a.txt"), "A.txt", false), Ok(Renamed::To(dir.join("A.txt"))));
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["A.txt"], "the new case is on disk");
+        assert_eq!(std::fs::read_to_string(dir.join("A.txt")).unwrap(), "body");
+        assert!(trashed_names_from(&dir).is_empty(), "nothing went to the Recycle Bin");
     }
 
     #[test]
