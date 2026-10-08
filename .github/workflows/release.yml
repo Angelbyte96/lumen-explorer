@@ -18,13 +18,10 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false # later steps get the token only where needed
       - name: Check the tag matches Cargo.toml
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
-          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version (expected v$version)"
-            exit 1
-          fi
+        run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"
       - uses: dtolnay/rust-toolchain@stable
       - name: Test
         run: cargo test --locked
