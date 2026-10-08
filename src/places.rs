@@ -178,7 +178,10 @@ fn unescape_mount(field: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        let octal = bytes.get(i + 1..i + 4).filter(|d| bytes[i] == b'\\' && d.iter().all(|b| (b'0'..=b'7').contains(b)));
+        // Three octal digits, the first at most 3 so the value fits a byte.
+        let octal = bytes.get(i + 1..i + 4).filter(|d| {
+            bytes[i] == b'\\' && (b'0'..=b'3').contains(&d[0]) && d.iter().all(|b| (b'0'..=b'7').contains(b))
+        });
         match octal {
             Some(d) => {
                 out.push((d[0] - b'0') * 64 + (d[1] - b'0') * 8 + (d[2] - b'0'));
@@ -331,6 +334,13 @@ tmpfs /run tmpfs rw 0 0
                 ("home", Path::new("/home")),
             ]
         );
+    }
+
+    #[test]
+    fn mount_escapes_decode_and_odd_ones_stay_as_written() {
+        assert_eq!(unescape_mount("/a\\040b\\011c\\012d\\134e"), "/a b\tc\nd\\e");
+        assert_eq!(unescape_mount("/a\\04"), "/a\\04", "too short to be an escape");
+        assert_eq!(unescape_mount("/x\\777"), "/x\\777", "above one byte: not an escape");
     }
 
     #[cfg(unix)]
