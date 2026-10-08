@@ -349,18 +349,30 @@ pub fn split_input(text: &str) -> (&str, &str) {
 }
 
 /// Indices of the entries to list for `typed`: names holding every typed word
-/// (see [`word_ranges`]), those starting with the first word first, each group
-/// in folder order. Hidden entries only when shown, or when typed with a dot.
+/// (see [`word_ranges`]); the name typed in full first, then those starting
+/// with the first word, each group in folder order. Hidden entries only when
+/// shown, or when typed with a dot.
 pub fn matches(entries: &[Entry], typed: &str, show_hidden: bool) -> Vec<usize> {
     let first = typed.split_whitespace().next().unwrap_or("").to_lowercase();
     let hidden_ok = show_hidden || first.starts_with('.');
-    let (starting, rest): (Vec<usize>, Vec<usize>) = entries
+    let mut rows: Vec<usize> = entries
         .iter()
         .enumerate()
         .filter(|(_, e)| (hidden_ok || !e.hidden) && word_ranges(&e.name, typed).is_some())
         .map(|(i, _)| i)
-        .partition(|&i| entries[i].name.to_lowercase().starts_with(&first));
-    starting.into_iter().chain(rest).collect()
+        .collect();
+    rows.sort_by_key(|&i| {
+        let name = &entries[i].name;
+        (!is_exact(name, typed), !name.to_lowercase().starts_with(&first))
+    });
+    rows
+}
+
+/// Whether `name` is exactly what was typed, ignoring case and the spaces
+/// around it. Nothing typed is no name.
+pub fn is_exact(name: &str, typed: &str) -> bool {
+    let typed = typed.trim();
+    !typed.is_empty() && name.to_lowercase() == typed.to_lowercase()
 }
 
 /// Where each typed word is in `name`, as byte ranges sorted by position,
@@ -666,6 +678,13 @@ mod tests {
         assert_eq!(names(matches(&entries, "tareas revision", false)), ["revision tareas.pdf"]);
         assert_eq!(names(matches(&entries, "tar", false)), ["tareas.txt", "revision tareas.pdf"], "starting with it first");
         assert_eq!(names(matches(&entries, "des gas", false)), ["Descargas"]);
+    }
+
+    #[test]
+    fn an_exact_name_comes_first() {
+        let entries = [e("f6-config", true), e("verify-f6", true), e("F6", false)];
+        let names = |idx: Vec<usize>| idx.into_iter().map(|i| entries[i].name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(matches(&entries, "f6", false)), ["F6", "f6-config", "verify-f6"]);
     }
 
     #[test]
