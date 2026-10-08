@@ -32,25 +32,41 @@ pub fn open_with_default_app(path: &Path) -> Result<(), String> {
         unsafe { AssocIsDangerous(ext.as_ptr()) != 0 }
     });
     let file = wide(path.as_os_str());
-    let verb = wide("open".as_ref());
     // SAFETY: an all-zero SHELLEXECUTEINFOW is valid (null pointers and handles).
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
     info.fMask = if skip_zone_check(dangerous) { SEE_MASK_NOZONECHECKS } else { 0 };
-    info.lpVerb = verb.as_ptr();
+    // No verb: the file's default action, as a double-click runs.
     info.lpFile = file.as_ptr();
     info.nShow = SW_SHOWNORMAL;
-    // SAFETY: `info` is sized and filled above; `file` and `verb` outlive the call.
+    // SAFETY: `info` is sized and filled above; `file` outlives the call.
     if unsafe { ShellExecuteExW(&mut info) } == 0 {
-        let err = std::io::Error::last_os_error();
-        return Err(format!("Cannot open {}: {err}", path.display()));
+        let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if let Some(message) = open_failure(code, path) {
+            return Err(message);
+        }
     }
     Ok(())
+}
+
+/// The message for a failed open, or `None` when the user cancelled Windows'
+/// security prompt (ERROR_CANCELLED): File Explorer says nothing then either.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn open_failure(code: i32, path: &Path) -> Option<String> {
+    const ERROR_CANCELLED: i32 = 1223;
+    (code != ERROR_CANCELLED)
+        .then(|| format!("Cannot open {}: {}", path.display(), std::io::Error::from_raw_os_error(code)))
 }
 
 /// ".png" for "photo.png": what Windows looks up to judge a file type.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn assoc_key(path: &Path) -> Option<String> {
+    // Win32 drops a trailing dot or space ("setup.exe." runs setup.exe) and a
+    // colon names a stream: judging those by their extension would be wrong.
+    let name = path.file_name()?.to_string_lossy();
+    if name.ends_with(['.', ' ']) || name.contains(':') {
+        return None;
+    }
     path.extension().map(|ext| format!(".{}", ext.to_string_lossy()))
 }
 
@@ -359,6 +375,24 @@ pub(crate) mod tests {
         assert_eq!(assoc_key(Path::new("archive.tar.gz")), Some(".gz".into()));
         assert_eq!(assoc_key(Path::new("Makefile")), None, "no extension");
         assert_eq!(assoc_key(Path::new(".bashrc")), None, "a leading dot is a name, not an extension");
+    }
+
+    #[test]
+    fn a_name_windows_would_rewrite_keeps_the_zone_check() {
+        assert_eq!(assoc_key(Path::new("setup.exe.")), None, "Win32 strips the dot: it runs setup.exe");
+        assert_eq!(assoc_key(Path::new("setup.exe ")), None, "Win32 strips the space");
+        assert_eq!(assoc_key(Path::new("file.")), None, "no extension keeps the check");
+        assert_eq!(assoc_key(Path::new("file.exe:x.png")), None, "a stream path keeps the check");
+        assert_eq!(assoc_key(Path::new("photo.png")), Some(".png".into()));
+    }
+
+    #[test]
+    fn a_cancelled_security_prompt_is_not_an_error() {
+        assert_eq!(open_failure(1223, Path::new("a.bat")), None, "ERROR_CANCELLED: the user said no");
+        assert_eq!(
+            open_failure(2, Path::new("a.bat")),
+            Some(format!("Cannot open a.bat: {}", std::io::Error::from_raw_os_error(2))),
+        );
     }
 
     #[test]
