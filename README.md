@@ -41,6 +41,21 @@ rustup target add x86_64-pc-windows-gnu
 cargo check --target x86_64-pc-windows-gnu --all-targets
 ```
 
+## Releases
+
+Artifacts expire and need a GitHub login; a release is a public, permanent
+download. To publish one, set `version` in `Cargo.toml`, commit, then push a
+matching tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The "Release" workflow tests on Windows, builds `lumen-v0.1.0-windows-x86_64.exe`
+and creates the GitHub Release with it and notes generated from the commits.
+A tag that does not match `Cargo.toml` fails without publishing anything.
+
 ## Keyboard shortcuts
 
 | Key | Action |
