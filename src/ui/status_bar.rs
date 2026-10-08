@@ -77,8 +77,8 @@ pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
 
 /// Always-visible filter at the bottom left. It is drawn, not a text field:
 /// typing anywhere in the list feeds it, so it never has to take focus. With
-/// `caret`, a steady text cursor shows where typing goes: after the text, or
-/// before the placeholder.
+/// `caret`, a steady text cursor follows the typed text; an empty filter has
+/// none, so it does not look like a field waiting for input.
 fn filter_bar(ui: &mut egui::Ui, filter: &str, items: usize, caret: bool) {
     let text = if filter.is_empty() {
         egui::RichText::new(filter_placeholder(items)).weak()
@@ -94,8 +94,8 @@ fn filter_bar(ui: &mut egui::Ui, filter: &str, items: usize, caret: bool) {
             ui.set_min_width(180.0);
             crate::ui::icons::magnifier(ui);
             let label = ui.add(egui::Label::new(text).selectable(false)).rect;
-            if caret {
-                let x = if filter.is_empty() { label.left() } else { label.right() + 1.0 };
+            if caret && !filter.is_empty() {
+                let x = label.right() + 1.0;
                 let stroke = ui.visuals().text_cursor.stroke;
                 ui.painter().line_segment([egui::pos2(x, label.top()), egui::pos2(x, label.bottom())], stroke);
             }
@@ -188,9 +188,7 @@ mod tests {
         let cursor = cursor.expect("cursor painted");
         assert!((cursor.left() - text.right()).abs() <= 2.0, "after the text: {cursor:?} vs {text:?}");
         assert!(cursor.top() <= text.top() + 1.0 && cursor.bottom() >= text.bottom() - 1.0, "as tall as the text");
-        let (text, cursor) = painted_bar("", true);
-        let cursor = cursor.expect("cursor painted on the placeholder");
-        assert!((cursor.left() - text.left()).abs() <= 2.0, "before the placeholder: {cursor:?} vs {text:?}");
+        assert_eq!(painted_bar("", true).1, None, "no cursor while nothing is typed");
         assert_eq!(painted_bar("f6", false).1, None, "no cursor while the path box or a rename takes the keys");
     }
 
