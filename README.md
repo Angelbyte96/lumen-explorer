@@ -54,7 +54,8 @@ git push origin v0.1.0
 
 The "Release" workflow tests on Windows, builds `lumen-v0.1.0-windows-x86_64.exe`
 and creates the GitHub Release with it and notes generated from the commits.
-A tag that does not match `Cargo.toml` fails without publishing anything.
+A tag that does not match `Cargo.toml` fails without publishing anything
+(`scripts/check-release-tag.sh`, tested by `scripts/test-release-tag.sh`).
 
 ## Keyboard shortcuts
 
