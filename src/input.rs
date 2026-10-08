@@ -1,6 +1,6 @@
 //! All keyboard shortcuts live here so they are easy to find and change.
 
-use eframe::egui::{Context, Event, Id, Key, Modifiers};
+use eframe::egui::{Context, Event, Id, Key, Modifiers, MouseWheelUnit};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -43,6 +43,11 @@ pub enum Action {
     PrevTab,
     /// Ctrl+D: bookmark the current folder, or remove its bookmark.
     ToggleBookmark,
+    /// Bigger / smaller icons and rows in the list (Ctrl+Plus / Ctrl+Minus,
+    /// Ctrl+wheel); Ctrl+0 goes back to the normal size.
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
     /// Escape: clears the filter, else stops a running count, else the copy or move.
     Cancel,
     /// Escape held down (key repeat).
@@ -83,7 +88,37 @@ pub fn read_actions(ctx: &Context) -> Vec<Action> {
         // Outside `input_mut`: egui's context lock is not reentrant.
         let events = ctx.input(|i| i.events.clone());
         actions.extend(clipboard_actions(ctx, &events));
+        actions.extend(wheel_zoom(ctx, &events));
     }
+    actions
+}
+
+/// Touchpad scrolling, in points, needed for one zoom level.
+const ZOOM_SWIPE: f32 = 50.0;
+
+/// Ctrl+wheel: a mouse wheel zooms one level per notch; a touchpad sends many
+/// small scrolls, so they add up to `ZOOM_SWIPE` per level.
+fn wheel_zoom(ctx: &Context, events: &[Event]) -> Vec<Action> {
+    let swiped_id = Id::new("lumen_zoom_swipe");
+    let mut swiped = ctx.data(|d| d.get_temp::<f32>(swiped_id)).unwrap_or(0.0);
+    let mut actions = Vec::new();
+    for event in events {
+        let Event::MouseWheel { unit, delta, modifiers, .. } = event else { continue };
+        if !modifiers.command || delta.y == 0.0 {
+            continue;
+        }
+        let step = |up: bool| if up { Action::ZoomIn } else { Action::ZoomOut };
+        if *unit == MouseWheelUnit::Point {
+            swiped += delta.y;
+            while swiped.abs() >= ZOOM_SWIPE {
+                actions.push(step(swiped > 0.0));
+                swiped -= ZOOM_SWIPE.copysign(swiped);
+            }
+        } else {
+            actions.push(step(delta.y > 0.0));
+        }
+    }
+    ctx.data_mut(|d| d.insert_temp(swiped_id, swiped));
     actions
 }
 
@@ -126,6 +161,16 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
         }
         if i.consume_key(Modifiers::ALT, Key::R) {
             actions.push(Action::Count);
+        }
+        // Ctrl++ needs Shift on some layouts (Ctrl+Shift+=); matching ignores it.
+        if i.consume_key(Modifiers::COMMAND, Key::Plus) || i.consume_key(Modifiers::COMMAND, Key::Equals) {
+            actions.push(Action::ZoomIn);
+        }
+        if i.consume_key(Modifiers::COMMAND, Key::Minus) {
+            actions.push(Action::ZoomOut);
+        }
+        if i.consume_key(Modifiers::COMMAND, Key::Num0) {
+            actions.push(Action::ZoomReset);
         }
         let plain = [
             (Key::ArrowDown, Action::Move(1)),
@@ -205,7 +250,7 @@ fn clipboard_actions(ctx: &Context, events: &[Event]) -> Vec<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eframe::egui::RawInput;
+    use eframe::egui::{self, RawInput};
 
     /// Runs one frame with these events and returns what `read_actions` saw.
     fn actions_for(events: Vec<Event>) -> Vec<Action> {
@@ -313,6 +358,42 @@ mod tests {
 
     fn release(key: Key, modifiers: Modifiers) -> Event {
         Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers }
+    }
+
+    fn wheel(unit: MouseWheelUnit, y: f32, modifiers: Modifiers) -> Event {
+        Event::MouseWheel { unit, delta: egui::vec2(0.0, y), modifiers, phase: egui::TouchPhase::Move }
+    }
+
+    #[test]
+    fn ctrl_plus_minus_and_zero_zoom_the_list() {
+        let with = |key| actions_for(vec![self::key(key, Modifiers::COMMAND)]);
+        assert_eq!(with(Key::Plus), [Action::ZoomIn]);
+        assert_eq!(with(Key::Equals), [Action::ZoomIn], "Ctrl+= where + needs Shift");
+        assert_eq!(with(Key::Minus), [Action::ZoomOut]);
+        assert_eq!(with(Key::Num0), [Action::ZoomReset]);
+        let shifted = actions_for(vec![self::key(Key::Equals, Modifiers::COMMAND | Modifiers::SHIFT)]);
+        assert_eq!(shifted, [Action::ZoomIn], "Ctrl+Shift+= is Ctrl++ on a US keyboard");
+        assert_eq!(actions_for(vec![self::key(Key::Minus, Modifiers::NONE)]), []);
+    }
+
+    #[test]
+    fn ctrl_wheel_zooms_one_level_per_notch_and_a_plain_wheel_does_not() {
+        let ctrl = Modifiers::COMMAND;
+        assert_eq!(actions_for(vec![wheel(MouseWheelUnit::Line, 1.0, ctrl)]), [Action::ZoomIn]);
+        assert_eq!(actions_for(vec![wheel(MouseWheelUnit::Line, -1.0, ctrl)]), [Action::ZoomOut]);
+        assert_eq!(actions_for(vec![wheel(MouseWheelUnit::Line, 1.0, Modifiers::NONE)]), []);
+    }
+
+    #[test]
+    fn ctrl_on_a_touchpad_zooms_once_per_swipe_distance_not_per_event() {
+        let ctx = Context::default();
+        let swipe = |y| vec![wheel(MouseWheelUnit::Point, y, Modifiers::COMMAND)];
+        let mut zooms = Vec::new();
+        for _ in 0..10 {
+            zooms.extend(frames(&ctx, swipe(10.0))); // 100 points in small steps
+        }
+        assert_eq!(zooms, [Action::ZoomIn, Action::ZoomIn]);
+        assert_eq!(frames(&ctx, swipe(-60.0)), [Action::ZoomOut]);
     }
 
     #[test]

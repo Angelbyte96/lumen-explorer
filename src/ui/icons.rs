@@ -54,9 +54,8 @@ const ARCHIVE: &[&str] = &[
     "zip", "tar", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "deb", "rpm", "appimage", "iso", "jar",
 ];
 
-/// Draws the entry's icon in a square as tall as a line of body text.
-pub fn show(ui: &mut egui::Ui, entry: &Entry) -> egui::Response {
-    let side = ui.text_style_height(&egui::TextStyle::Body);
+/// Draws the entry's icon in a square `side` points wide.
+pub fn show(ui: &mut egui::Ui, entry: &Entry, side: f32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
     if ui.is_rect_visible(rect) {
         paint(ui.painter(), rect, kind_of(entry));

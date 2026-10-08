@@ -523,6 +523,8 @@ pub struct LumenApp {
     /// Mounted disks with their usage, and when they were read.
     disks: (Option<Instant>, Vec<(Mount, Option<Usage>)>),
     sidebar_open: bool,
+    /// Icon and row size in the list, shared by every tab.
+    list_zoom: u8,
     /// Folder size and counts being computed (Alt+R); one at a time.
     counting: Option<Count>,
     /// Informational line in the status bar ("1 item copied").
@@ -543,6 +545,9 @@ pub struct LumenApp {
 /// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
 /// keyboard feels instant; list-wide changes skip them entirely (see [`Scroll`]).
 fn apply_style(ctx: &egui::Context) {
+    // Ctrl+Plus / Ctrl+Minus zoom only the list's icons and rows (Action::ZoomIn),
+    // not the whole window as egui would.
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
     ctx.all_styles_mut(|style| {
         style.scroll_animation =
             egui::style::ScrollAnimation::new(2000.0, egui::Rangef::new(0.05, 0.09));
@@ -572,6 +577,7 @@ impl LumenApp {
             trash: None,
             disks: (None, Vec::new()),
             sidebar_open: true,
+            list_zoom: 0,
             notice: None,
             watcher: Watcher::new({
                 let ctx = ctx.clone();
@@ -609,6 +615,7 @@ impl LumenApp {
         app.tab.view.show_hidden = config.show_hidden;
         app.sidebar_open = config.sidebar;
         app.preview_open = config.preview;
+        app.list_zoom = config.list_zoom;
         app.bookmarks = Bookmarks::from_paths(config.bookmarks);
         app.window = config.window;
         app.saved = app.settings(true);
@@ -626,6 +633,7 @@ impl LumenApp {
             preview: self.preview_open,
             window: if with_window { self.window } else { self.saved.window },
             bookmarks: self.bookmarks.paths().to_vec(),
+            list_zoom: self.list_zoom,
         }
     }
 
@@ -1129,6 +1137,9 @@ impl LumenApp {
         match action {
             Action::FocusPathBar => self.path_bar.request_focus(),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
+            Action::ZoomIn => self.list_zoom = (self.list_zoom + 1).min(ui::file_list::MAX_ZOOM),
+            Action::ZoomOut => self.list_zoom = self.list_zoom.saturating_sub(1),
+            Action::ZoomReset => self.list_zoom = 0,
             Action::Activate => self.activate_selected(ctx),
             Action::GoParent => {
                 self.hold_absorbed = self.tab.view.pop_filter();
@@ -1316,7 +1327,7 @@ impl eframe::App for LumenApp {
 
         egui::CentralPanel::default_margins().show(ui, |ui| {
             let scroll = self.tab.view.scroll.take();
-            let event = ui::file_list::show(ui, &self.tab.view, scroll, self.rename.as_mut());
+            let event = ui::file_list::show(ui, &self.tab.view, self.list_zoom, scroll, self.rename.as_mut());
             match event {
                 Some(ListEvent::Select(i)) => self.tab.view.selected = Some(i),
                 Some(ListEvent::Activate(i)) => {
@@ -1621,6 +1632,7 @@ mod tests {
             preview: true,
             window: Some([1000.0, 700.0]),
             bookmarks: vec![PathBuf::from("/srv"), PathBuf::from("/srv")],
+            list_zoom: 3,
         }
     }
 
@@ -1636,6 +1648,33 @@ mod tests {
         assert!(app.preview_open);
         assert_eq!(app.bookmarks.paths(), [PathBuf::from("/srv")], "repeats dropped");
         assert_eq!(app.window, Some([1000.0, 700.0]));
+        assert_eq!(app.list_zoom, 3);
+    }
+
+    #[test]
+    fn list_zoom_steps_between_its_limits_and_is_saved_at_once() {
+        let (ctx, _, dir) = app_in("app-zoom");
+        let path = dir.join("cfg/lumen/config");
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
+        app.handle_action(&ctx, Action::ZoomOut);
+        assert_eq!(app.list_zoom, 0, "already the smallest");
+        for _ in 0..10 {
+            app.handle_action(&ctx, Action::ZoomIn);
+        }
+        assert_eq!(app.list_zoom, ui::file_list::MAX_ZOOM, "stops at the biggest");
+        app.handle_action(&ctx, Action::ZoomOut);
+        assert_eq!(app.list_zoom, ui::file_list::MAX_ZOOM - 1);
+        app.save_settings(false);
+        assert_eq!(Config::load(&path).unwrap().list_zoom, ui::file_list::MAX_ZOOM - 1);
+        app.handle_action(&ctx, Action::ZoomReset);
+        assert_eq!(app.list_zoom, 0);
+        assert_eq!(ctx.zoom_factor(), 1.0, "the rest of the window never zooms");
+    }
+
+    #[test]
+    fn eguis_own_whole_window_zoom_is_off() {
+        let (ctx, _app, _dir) = app_in("app-zoom-egui");
+        assert!(!ctx.options(|o| o.zoom_with_keyboard), "Ctrl+Plus must zoom only the list");
     }
 
     #[test]

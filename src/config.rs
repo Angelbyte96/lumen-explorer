@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::app::{Sort, SortColumn};
+use crate::ui::file_list::MAX_ZOOM;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -15,6 +16,8 @@ pub struct Config {
     /// Inner size of the window in points; `None` for the default size.
     pub window: Option<[f32; 2]>,
     pub bookmarks: Vec<PathBuf>,
+    /// Icon and row size in the list, 0 (normal) to `MAX_ZOOM`.
+    pub list_zoom: u8,
 }
 
 impl Default for Config {
@@ -26,6 +29,7 @@ impl Default for Config {
             preview: false,
             window: None,
             bookmarks: Vec::new(),
+            list_zoom: 0,
         }
     }
 }
@@ -48,6 +52,9 @@ impl Config {
                 "sidebar" => config.sidebar = parse_bool(value).unwrap_or(config.sidebar),
                 "preview" => config.preview = parse_bool(value).unwrap_or(config.preview),
                 "window" => config.window = parse_window(value),
+                "list_zoom" => {
+                    config.list_zoom = value.parse().ok().filter(|z| *z <= MAX_ZOOM).unwrap_or(config.list_zoom)
+                }
                 "bookmark" if !value.is_empty() => config.bookmarks.push(PathBuf::from(value)),
                 _ => {}
             }
@@ -67,6 +74,7 @@ impl Config {
         if let Some([w, h]) = self.window {
             text += &format!("window = {}x{}\n", w.round(), h.round());
         }
+        text += &format!("list_zoom = {}\n", self.list_zoom);
         for path in &self.bookmarks {
             // A value is the rest of its line, trimmed: it must not hold a break
             // or start/end with spaces.
@@ -106,6 +114,9 @@ impl Config {
         }
         if before.window != after.window {
             merged.window = after.window;
+        }
+        if before.list_zoom != after.list_zoom {
+            merged.list_zoom = after.list_zoom;
         }
         merged.bookmarks.retain(|p| !before.bookmarks.contains(p) || after.bookmarks.contains(p));
         for path in &after.bookmarks {
@@ -225,6 +236,7 @@ mod tests {
             preview: true,
             window: Some([1200.0, 800.0]),
             bookmarks: vec![PathBuf::from("/home/u/Descargas"), PathBuf::from("/srv/my files")],
+            list_zoom: 2,
         }
     }
 
@@ -234,6 +246,7 @@ mod tests {
         assert!(text.contains("sort = size desc\n"), "{text}");
         assert!(text.contains("show_hidden = true\n"), "{text}");
         assert!(text.contains("window = 1200x800\n"), "{text}");
+        assert!(text.contains("list_zoom = 2\n"), "{text}");
         assert!(text.contains("bookmark = /srv/my files\n"), "{text}");
         assert_eq!(Config::parse(&text), sample());
         assert_eq!(Config::parse(&Config::default().to_text()), Config::default());
@@ -272,6 +285,19 @@ bookmark =
             ..Config::default()
         };
         assert_eq!(Config::parse(&config.to_text()).bookmarks, [PathBuf::from("/ok")]);
+    }
+
+    #[test]
+    fn a_list_zoom_out_of_range_keeps_the_normal_size() {
+        assert_eq!(Config::parse("list_zoom = 4").list_zoom, 4);
+        assert_eq!(Config::parse("list_zoom = 5").list_zoom, 0, "above MAX_ZOOM");
+        assert_eq!(Config::parse("list_zoom = -1").list_zoom, 0);
+        assert_eq!(Config::parse("list_zoom = big").list_zoom, 0);
+        let before = Config::default();
+        let after = Config { list_zoom: 3, ..before.clone() };
+        let disk = Config { sidebar: false, ..before.clone() };
+        let merged = Config::merge(&disk, &before, &after);
+        assert_eq!((merged.list_zoom, merged.sidebar), (3, false), "this window's zoom, the other's panel");
     }
 
     #[test]

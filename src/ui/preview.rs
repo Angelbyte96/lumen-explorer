@@ -57,7 +57,7 @@ pub fn show(
 ) {
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        icons::show(ui, entry);
+        icons::show(ui, entry, ui.text_style_height(&egui::TextStyle::Body));
         ui.add(egui::Label::new(egui::RichText::new(&entry.name).strong()).truncate());
     });
     ui.weak(details(entry, totals, pane.content.as_ref()));
@@ -158,7 +158,7 @@ fn folder(ui: &mut egui::Ui, entries: &[Entry], show_hidden: bool, sort: Sort) {
                 let entry = &entries[rows[row.index()]];
                 row.col(|ui| {
                     ui.horizontal(|ui| {
-                        icons::show(ui, entry);
+                        icons::show(ui, entry, ui.text_style_height(&egui::TextStyle::Body));
                         name_label(ui, entry);
                     });
                 });
