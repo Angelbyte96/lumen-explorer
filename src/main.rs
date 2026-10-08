@@ -21,7 +21,8 @@ fn main() -> eframe::Result {
             .with_title("Lumen")
             .with_app_id("lumen")
             .with_inner_size(settings.config.window.unwrap_or([960.0, 640.0]))
-            .with_min_inner_size(config::MIN_WINDOW),
+            .with_min_inner_size(config::MIN_WINDOW)
+            .with_icon(window_icon()),
         ..Default::default()
     };
     eframe::run_native(
@@ -31,4 +32,28 @@ fn main() -> eframe::Result {
             Ok(Box::new(app::LumenApp::with_config(&cc.egui_ctx, start, log, settings)))
         }),
     )
+}
+
+/// The app icon (assets/lumen.png), built into the binary. The title bar and
+/// taskbar show it on X11 and Windows; GNOME on Wayland takes the icon from
+/// lumen.desktop instead.
+fn window_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../assets/lumen.png"))
+        .expect("assets/lumen.png is a valid PNG")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_icon_is_the_256_pixel_png() {
+        let icon = window_icon();
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+        // Corners are transparent (rounded tile), the centre is opaque.
+        let alpha = |x: usize, y: usize| icon.rgba[(y * 256 + x) * 4 + 3];
+        assert_eq!(alpha(0, 0), 0);
+        assert_eq!(alpha(128, 128), 255);
+    }
 }
