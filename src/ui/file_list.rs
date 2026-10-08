@@ -14,6 +14,10 @@ use crate::ui::path_popup::{marked_name, word_ranges};
 
 pub enum ListEvent {
     Select(usize),
+    /// Ctrl+click: add or remove the row.
+    Toggle(usize),
+    /// Shift+click: select the range up to the row.
+    Extend(usize),
     Activate(usize),
     Sort(SortColumn),
     /// The in-place rename ended: `true` with Enter, `false` with Escape or a click elsewhere.
@@ -66,6 +70,8 @@ pub fn show(
     let text_height = ui.text_style_height(&egui::TextStyle::Body);
     let header_height = row_height(0, text_height);
     let (icon, row_height) = (icon_side(zoom, text_height), row_height(zoom, text_height));
+    // With rows picked, they are the highlight; the cursor row alone otherwise.
+    let multi = view.picked_count() > 0;
     let mut event = None;
 
     let mut table = TableBuilder::new(ui)
@@ -101,7 +107,7 @@ pub fn show(
             body.rows(row_height, rows.len(), |mut row| {
                 let i = row.index();
                 let entry = &entries[rows[i]];
-                row.set_selected(selected == Some(i));
+                row.set_selected(if multi { view.is_picked(i) } else { selected == Some(i) });
                 row.col(|ui| {
                     // Icon and name on one line as tall as the row, centred in it:
                     // a plain `horizontal` is one text line tall, so a zoomed icon
@@ -130,7 +136,14 @@ pub fn show(
                 if response.double_clicked() {
                     event = Some(ListEvent::Activate(i));
                 } else if response.clicked() {
-                    event = Some(ListEvent::Select(i));
+                    let m = response.ctx.input(|input| input.modifiers);
+                    event = Some(if m.command {
+                        ListEvent::Toggle(i)
+                    } else if m.shift {
+                        ListEvent::Extend(i)
+                    } else {
+                        ListEvent::Select(i)
+                    });
                 }
             });
         });

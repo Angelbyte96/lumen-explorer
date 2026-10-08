@@ -25,6 +25,8 @@ pub struct Status<'a> {
     pub folder_count: usize,
     /// Selected row, as an index into the rows shown.
     pub selected: Option<usize>,
+    /// Rows picked with Ctrl+A, Ctrl+click or Shift.
+    pub picked: usize,
 }
 
 pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
@@ -55,6 +57,10 @@ pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
             ui.spinner();
             ui.label(counting);
             ui.weak("Esc to cancel");
+        }
+        if let Some(picked) = picked_text(status.picked) {
+            ui.separator();
+            ui.strong(picked);
         }
         if let Some(notice) = status.notice {
             ui.separator();
@@ -114,6 +120,11 @@ pub fn filter_placeholder(items: usize) -> String {
     format!("Filter {items} {noun}…")
 }
 
+/// "5 selected" while rows are picked.
+pub fn picked_text(picked: usize) -> Option<String> {
+    (picked > 0).then(|| format!("{picked} selected"))
+}
+
 /// "9/10": the selected row, counted from 1, of the rows shown.
 pub fn position_text(selected: Option<usize>, rows: usize) -> String {
     format!("{}/{rows}", selected.map_or(0, |i| i + 1))
@@ -165,6 +176,7 @@ mod tests {
             counting: None,
             folder_count: 0,
             selected: None,
+            picked: 0,
         };
         let mut shapes = Vec::new();
         for _ in 0..2 {
@@ -186,6 +198,13 @@ mod tests {
             _ => None,
         });
         (text, cursor)
+    }
+
+    #[test]
+    fn picked_rows_are_counted_only_when_there_are_some() {
+        assert_eq!(picked_text(0), None);
+        assert_eq!(picked_text(1).as_deref(), Some("1 selected"));
+        assert_eq!(picked_text(5).as_deref(), Some("5 selected"));
     }
 
     #[test]
@@ -220,6 +239,7 @@ mod tests {
             counting: None,
             folder_count: 2,
             selected: None,
+            picked: 0,
         };
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 200.0));
         let mut shapes = Vec::new();
