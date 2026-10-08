@@ -41,6 +41,18 @@ rustup target add x86_64-pc-windows-gnu
 cargo check --target x86_64-pc-windows-gnu --all-targets
 ```
 
+On Windows:
+
+- Started without a folder, Lumen opens your user folder (Windows hands apps
+  a working directory such as `C:\Windows\System32`). On Linux it opens the
+  folder it was started from.
+- Storage in the side panel lists local and USB drives with their free space;
+  network and CD drives are left out.
+- Files open as a double-click in File Explorer does: Windows asks before
+  opening a downloaded file only when its type is dangerous (`.exe`, `.bat`…),
+  not for a downloaded image or document.
+- Settings are saved in `%USERPROFILE%\.config\lumen\config`.
+
 ## Releases
 
 Artifacts expire and need a GitHub login; a release is a public, permanent
