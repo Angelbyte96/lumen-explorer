@@ -119,21 +119,29 @@ enum ItemIcon {
     Glyph(&'static str),
 }
 
-/// One clickable row; the folder on screen is highlighted. `hint` shows on hover.
+/// One clickable row, the panel's full width; the folder on screen is
+/// highlighted. `hint` shows on hover anywhere on it, icon and empty end included.
 fn item(ui: &mut egui::Ui, icon: ItemIcon, label: &str, hint: &str, path: &Path, current: &Path) -> egui::Response {
     let selected = path == current;
-    let inner = ui.horizontal(|ui| {
-        match icon {
-            ItemIcon::Folder => {
-                icons::folder(ui);
+    // Senses clicks below the name button, so the button keeps its own.
+    let row = egui::UiBuilder::new().sense(egui::Sense::click());
+    let inner = ui.scope_builder(row, |ui| {
+        ui.horizontal(|ui| {
+            ui.set_min_width(ui.available_width());
+            match icon {
+                ItemIcon::Folder => {
+                    icons::folder(ui);
+                }
+                ItemIcon::Glyph(glyph) => {
+                    // Not selectable, or it would take the row's click.
+                    ui.add(egui::Label::new(glyph).selectable(false));
+                }
             }
-            ItemIcon::Glyph(glyph) => {
-                ui.label(glyph);
-            }
-        }
-        ui.add(egui::Button::selectable(selected, label).frame_when_inactive(false))
+            ui.add(egui::Button::selectable(selected, label).frame_when_inactive(false))
+        })
+        .inner
     });
-    inner.inner.on_hover_text(hint)
+    inner.response.union(inner.inner).on_hover_text(hint)
 }
 
 #[cfg(test)]
@@ -147,6 +155,22 @@ mod tests {
         assert_eq!(usage_text(&usage), "120.0 GB free of 465.0 GB");
         assert!((used_fraction(&usage) - 345.0 / 465.0).abs() < 1e-6);
         assert_eq!(used_fraction(&Usage { total: 0, free: 0 }), 0.0, "an empty disk is not NaN");
+    }
+
+    #[test]
+    fn the_whole_row_carries_the_hint_and_the_click() {
+        let ctx = egui::Context::default();
+        let (mut row, mut avail) = (egui::Rect::NOTHING, 0.0);
+        let draw = |ui: &mut egui::Ui| item(ui, ItemIcon::Glyph(DISK), "File System", "/\nfree", Path::new("/"), Path::new("/home"));
+        crate::ui::testing::frame(&ctx, vec![], |ui| {
+            avail = ui.available_width();
+            row = draw(ui).rect;
+        });
+        assert!(row.min.x <= 8.5, "the glyph is covered: {row:?}");
+        assert!(row.width() >= avail - 1.0, "the empty part is covered: {row:?}");
+        for pos in [row.left_center() + egui::vec2(2.0, 0.0), row.right_center() - egui::vec2(5.0, 0.0)] {
+            assert!(crate::ui::testing::click(&ctx, pos, |ui| draw(ui).clicked()), "a click at {pos:?} opens it");
+        }
     }
 
     #[test]
