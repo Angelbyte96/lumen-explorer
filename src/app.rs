@@ -16,6 +16,7 @@ use crate::fs::ops::Renamed;
 use crate::fs::preview::Previewer;
 use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
+use crate::ui::tabs::TabEvent;
 use crate::ui::toolbar::{Nav, ToolbarEvent};
 use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_bar::PathBar, preview::PreviewPane, status_bar::Status};
 
@@ -447,10 +448,11 @@ struct Running {
     target: PathBuf,
 }
 
-pub struct LumenApp {
+/// What each tab keeps on its own: the folder on screen with its filter and
+/// selection, the back/forward lists and the listing in flight.
+pub struct Tab {
     view: View,
     lister: Lister,
-    path_bar: PathBar,
     /// Id of the listing currently on screen (or the last one that failed).
     shown_id: u64,
     /// Entry to select once the pending listing arrives.
@@ -458,12 +460,45 @@ pub struct LumenApp {
     /// How the pending listing was started.
     pending_nav: NavKind,
     history: History,
-    dialog: Option<Dialog>,
-    rename: Option<RenameEdit>,
     /// Folder just created: rename it once a listing shows it selected.
     rename_after_load: Option<PathBuf>,
     /// Error to show once the pending reload lands (a reload clears errors).
     error_after_load: Option<String>,
+}
+
+impl Tab {
+    /// A tab about to list `current`, sorted and filtered for hidden files like `like`.
+    fn new(current: PathBuf, like: Option<&View>, log: bool) -> Self {
+        let mut view = View { current, ..View::default() };
+        if let Some(like) = like {
+            view.sort = like.sort;
+            view.show_hidden = like.show_hidden;
+        }
+        Self {
+            view,
+            lister: Lister::new(log),
+            shown_id: 0,
+            select_after_load: None,
+            pending_nav: NavKind::New,
+            history: History::default(),
+            rename_after_load: None,
+            error_after_load: None,
+        }
+    }
+}
+
+pub struct LumenApp {
+    /// The tab on screen.
+    tab: Tab,
+    /// Every tab in bar order; the slot of the tab on screen is empty.
+    tabs: Vec<Option<Tab>>,
+    /// Index of the tab on screen in `tabs`.
+    active: usize,
+    /// Print listing times (LUMEN_LOG=1); new tabs inherit it.
+    log: bool,
+    path_bar: PathBar,
+    dialog: Option<Dialog>,
+    rename: Option<RenameEdit>,
     clipboard: Option<Clip>,
     /// Copy or move running in the background; one at a time.
     job: Option<Running>,
@@ -506,17 +541,13 @@ impl LumenApp {
     pub fn new(ctx: &egui::Context, start: PathBuf, log: bool) -> Self {
         apply_style(ctx);
         let mut app = Self {
-            view: View { current: start.clone(), ..View::default() },
-            lister: Lister::new(log),
+            tab: Tab::new(start.clone(), None, log),
+            tabs: vec![None],
+            active: 0,
+            log,
             path_bar: PathBar::default(),
-            shown_id: 0,
-            select_after_load: None,
-            pending_nav: NavKind::New,
-            history: History::default(),
             dialog: None,
             rename: None,
-            rename_after_load: None,
-            error_after_load: None,
             clipboard: None,
             job: None,
             counting: None,
@@ -594,28 +625,28 @@ impl LumenApp {
         select: Option<String>,
     ) {
         // Its result would only be dropped: totals belong to the folder on screen.
-        if path != self.view.current {
+        if path != self.tab.view.current {
             self.cancel_count();
         }
-        self.pending_nav = kind;
-        self.select_after_load = select;
+        self.tab.pending_nav = kind;
+        self.tab.select_after_load = select;
         let ctx = ctx.clone();
         // Wake the UI as soon as the worker finishes, without polling in a loop.
-        self.lister.request(path, move || ctx.request_repaint());
+        self.tab.lister.request(path, move || ctx.request_repaint());
     }
 
     fn activate_selected(&mut self, ctx: &egui::Context) {
-        let Some(entry) = self.view.selected_entry() else { return };
+        let Some(entry) = self.tab.view.selected_entry() else { return };
         let path = entry.path.clone();
         if entry.is_dir {
             self.navigate(ctx, path, None);
         } else if let Err(err) = open::that_detached(&path) {
-            self.view.error = Some(format!("Cannot open {}: {err}", path.display()));
+            self.tab.view.error = Some(format!("Cannot open {}: {err}", path.display()));
         }
     }
 
     fn go_parent(&mut self, ctx: &egui::Context) {
-        let current = self.view.current.clone();
+        let current = self.tab.view.current.clone();
         if let Some(parent) = current.parent() {
             let select = came_from(&current, parent);
             self.navigate(ctx, parent.to_path_buf(), select);
@@ -624,48 +655,48 @@ impl LumenApp {
 
     fn go_history(&mut self, ctx: &egui::Context, kind: NavKind) {
         let target = match kind {
-            NavKind::Back => self.history.back_target(),
-            NavKind::Forward => self.history.forward_target(),
+            NavKind::Back => self.tab.history.back_target(),
+            NavKind::Forward => self.tab.history.forward_target(),
             NavKind::New | NavKind::Refresh => None,
         };
         if let Some(target) = target.cloned() {
-            let select = came_from(&self.view.current, &target);
+            let select = came_from(&self.tab.view.current, &target);
             self.navigate_as(ctx, kind, target, select);
         }
     }
 
     /// Lists the current folder again after an operation changed it.
     fn reload(&mut self, ctx: &egui::Context, select: Option<String>) {
-        self.navigate(ctx, self.view.current.clone(), select);
+        self.navigate(ctx, self.tab.view.current.clone(), select);
     }
 
     fn ask_trash(&mut self) {
-        let Some(entry) = self.view.selected_entry() else { return };
+        let Some(entry) = self.tab.view.selected_entry() else { return };
         // Trashing it again would lose the record that lets it be restored.
         if self.trash.as_deref().is_some_and(|trash| places::in_trash(&entry.path, trash)) {
-            self.view.error = Some("This is already in the trash".into());
+            self.tab.view.error = Some("This is already in the trash".into());
             return;
         }
         self.dialog = Some(Dialog::Trash {
             path: entry.path.clone(),
             name: entry.name.clone(),
-            select: self.view.name_after_removal(),
+            select: self.tab.view.name_after_removal(),
         });
     }
 
     fn start_rename(&mut self) {
-        let Some(entry) = self.view.selected_entry() else { return };
+        let Some(entry) = self.tab.view.selected_entry() else { return };
         self.rename = Some(RenameEdit::new(entry.path.clone(), &entry.name, entry.is_dir));
     }
 
     fn new_folder(&mut self, ctx: &egui::Context) {
-        match fs::ops::create_folder(&self.view.current) {
+        match fs::ops::create_folder(&self.tab.view.current) {
             Ok(path) => {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
-                self.rename_after_load = Some(path);
+                self.tab.rename_after_load = Some(path);
                 self.reload(ctx, name);
             }
-            Err(err) => self.view.error = Some(err),
+            Err(err) => self.tab.view.error = Some(err),
         }
     }
 
@@ -673,15 +704,15 @@ impl LumenApp {
     fn finish_rename(&mut self, ctx: &egui::Context, mut edit: RenameEdit, replace: bool) {
         match fs::ops::rename(&edit.path, &edit.text, replace) {
             Ok(Renamed::To(_)) => {
-                self.view.error = None;
+                self.tab.view.error = None;
                 self.reload(ctx, Some(edit.text));
             }
             Ok(Renamed::Unchanged) => {}
             Ok(Renamed::TargetExists) => self.dialog = Some(Dialog::Replace(edit)),
             Err(err) => {
                 // A replace may have trashed the target before failing: reload.
-                let keep = self.view.selected_entry().map(|e| e.name.clone());
-                self.error_after_load = Some(err);
+                let keep = self.tab.view.selected_entry().map(|e| e.name.clone());
+                self.tab.error_after_load = Some(err);
                 edit.focus = true;
                 self.rename = Some(edit);
                 self.reload(ctx, keep);
@@ -690,7 +721,7 @@ impl LumenApp {
     }
 
     fn set_clipboard(&mut self, mode: Mode) {
-        let Some(entry) = self.view.selected_entry() else { return };
+        let Some(entry) = self.tab.view.selected_entry() else { return };
         self.clipboard = Some(Clip { path: entry.path.clone(), mode });
         self.notice = Some(match mode {
             Mode::Copy => "1 item copied".into(),
@@ -700,14 +731,14 @@ impl LumenApp {
 
     fn paste(&mut self, ctx: &egui::Context) {
         if self.job.is_some() {
-            self.view.error = Some("Another operation is still running".into());
+            self.tab.view.error = Some("Another operation is still running".into());
             return;
         }
         let Some(Clip { path, mode }) = self.clipboard.clone() else {
             self.notice = Some("Nothing to paste: Ctrl+C or Ctrl+X first".into());
             return;
         };
-        match transfer::plan(&path, &self.view.current, mode) {
+        match transfer::plan(&path, &self.tab.view.current, mode) {
             Ok(Plan::Ready(target)) => self.start_job(ctx, path, target, mode, false),
             Ok(Plan::Nothing) => {
                 let name = file_name(&path).unwrap_or_default();
@@ -716,7 +747,7 @@ impl LumenApp {
             Ok(Plan::TargetExists(target)) => {
                 self.dialog = Some(Dialog::Paste { source: path, target, mode });
             }
-            Err(err) => self.view.error = Some(err),
+            Err(err) => self.tab.view.error = Some(err),
         }
     }
 
@@ -729,7 +760,7 @@ impl LumenApp {
         replace: bool,
     ) {
         self.notice = None;
-        self.view.error = None;
+        self.tab.view.error = None;
         let ctx = ctx.clone();
         let job = Job::start(source, target.clone(), mode, replace, move || ctx.request_repaint());
         self.job = Some(Running { job, target });
@@ -750,17 +781,17 @@ impl LumenApp {
                     Mode::Move => "Move cancelled".into(),
                 });
             }
-            Err(err) => self.error_after_load = Some(err),
+            Err(err) => self.tab.error_after_load = Some(err),
         }
         // A navigation started meanwhile shows fresh contents anyway; reloading
         // here would supersede it. A pending refresh may be replaced.
-        if self.lister.is_pending(self.shown_id) && self.pending_nav != NavKind::Refresh {
+        if self.tab.lister.is_pending(self.tab.shown_id) && self.tab.pending_nav != NavKind::Refresh {
             return;
         }
-        let select = if running.target.parent() == Some(self.view.current.as_path()) {
+        let select = if running.target.parent() == Some(self.tab.view.current.as_path()) {
             file_name(&running.target)
         } else {
-            self.view.selected_entry().map(|e| e.name.clone())
+            self.tab.view.selected_entry().map(|e| e.name.clone())
         };
         self.reload(ctx, select);
     }
@@ -778,7 +809,7 @@ impl LumenApp {
             Dialog::Trash { path, name, select } => match fs::ops::trash(&path) {
                 Ok(()) => self.reload(ctx, select),
                 Err(err) => {
-                    self.error_after_load = Some(err);
+                    self.tab.error_after_load = Some(err);
                     self.reload(ctx, Some(name));
                 }
             },
@@ -789,9 +820,78 @@ impl LumenApp {
         }
     }
 
+    /// Titles of every tab, in bar order.
+    fn tab_labels(&self) -> Vec<String> {
+        self.tabs
+            .iter()
+            .map(|slot| {
+                let tab = slot.as_ref().unwrap_or(&self.tab);
+                ui::tabs::tab_label(&tab.view.current)
+            })
+            .collect()
+    }
+
+    /// Ctrl+T or +: opens the current folder in a new tab after this one.
+    fn new_tab(&mut self, ctx: &egui::Context) {
+        let tab = Tab::new(self.tab.view.current.clone(), Some(&self.tab.view), self.log);
+        self.leave_tab();
+        let old = std::mem::replace(&mut self.tab, tab);
+        self.tabs[self.active] = Some(old);
+        self.active += 1;
+        self.tabs.insert(self.active, None);
+        self.navigate(ctx, self.tab.view.current.clone(), None);
+    }
+
+    /// Ctrl+W or ×: closes tab `index`; the last tab stays open.
+    fn close_tab(&mut self, ctx: &egui::Context, index: usize) {
+        if self.tabs.len() < 2 || index >= self.tabs.len() {
+            return;
+        }
+        if index != self.active {
+            self.tabs.remove(index);
+            if index < self.active {
+                self.active -= 1;
+            }
+            return;
+        }
+        // Show the right neighbour, or the left one when closing the last tab.
+        let next = if index + 1 < self.tabs.len() { index + 1 } else { index - 1 };
+        self.select_tab(ctx, next);
+        self.tabs.remove(index);
+        if index < self.active {
+            self.active -= 1;
+        }
+    }
+
+    /// Puts tab `index` on screen and reloads it: its folder may have changed
+    /// while it was not watched.
+    fn select_tab(&mut self, ctx: &egui::Context, index: usize) {
+        if index == self.active || index >= self.tabs.len() {
+            return;
+        }
+        let Some(tab) = self.tabs[index].take() else { return };
+        self.leave_tab();
+        let old = std::mem::replace(&mut self.tab, tab);
+        self.tabs[self.active] = Some(old);
+        self.active = index;
+        self.tab.view.scroll = Some(Scroll::Instant);
+        self.watcher.watch(&self.tab.view.current);
+        // A listing still in flight shows fresh contents anyway.
+        if !self.tab.lister.is_pending(self.tab.shown_id) {
+            self.navigate_as(ctx, NavKind::Refresh, self.tab.view.current.clone(), None);
+        }
+    }
+
+    /// What belongs to the tab on screen and must not follow it into the background.
+    fn leave_tab(&mut self) {
+        self.cancel_count();
+        self.rename = None;
+        self.hold_absorbed = false;
+    }
+
     /// Ctrl+D or the star: bookmarks the folder on screen, or removes it.
     fn toggle_bookmark(&mut self) {
-        let current = self.view.current.clone();
+        let current = self.tab.view.current.clone();
         let name = file_name(&current).unwrap_or_else(|| current.display().to_string());
         self.notice = Some(if self.bookmarks.toggle(&current) {
             format!("Added “{name}” to bookmarks")
@@ -810,7 +910,7 @@ impl LumenApp {
             ToolbarEvent::ToggleBookmark => self.toggle_bookmark(),
             ToolbarEvent::Go(path) => self.navigate(ctx, path, None),
             ToolbarEvent::Typed(text) => {
-                let current = &self.view.current;
+                let current = &self.tab.view.current;
                 let target = fs::resolve_input_path(&text, current, fs::home_dir().as_deref());
                 self.navigate(ctx, target, None);
             }
@@ -819,7 +919,7 @@ impl LumenApp {
 
     /// Alt+R: counts what the selected folder holds, in the background.
     fn count_selected(&mut self, ctx: &egui::Context) {
-        let Some(entry) = self.view.selected_entry().filter(|e| e.is_dir) else { return };
+        let Some(entry) = self.tab.view.selected_entry().filter(|e| e.is_dir) else { return };
         let path = entry.path.clone();
         // Only the newest count matters; the old one would be dropped unread.
         self.cancel_count();
@@ -845,7 +945,7 @@ impl LumenApp {
 
     /// Stores a finished count if its folder is still on screen.
     fn finish_count(&mut self, count: Count, result: Result<Option<Totals>, String>) {
-        if count.path.parent() != Some(self.view.current.as_path()) {
+        if count.path.parent() != Some(self.tab.view.current.as_path()) {
             return;
         }
         let Some(name) = file_name(&count.path) else { return };
@@ -856,10 +956,10 @@ impl LumenApp {
                     let folders = if n == 1 { "folder" } else { "folders" };
                     self.notice = Some(format!("“{name}”: {n} {folders} could not be read"));
                 }
-                self.view.set_totals(name, totals);
+                self.tab.view.set_totals(name, totals);
             }
             Ok(None) => {}
-            Err(err) => self.view.error = Some(err),
+            Err(err) => self.tab.view.error = Some(err),
         }
     }
 
@@ -872,7 +972,7 @@ impl LumenApp {
     /// Keeps the open panel on the selected entry, loading it again when the
     /// selection moves or the entry changes on disk.
     fn sync_preview(&mut self, ctx: &egui::Context) {
-        let entry = self.view.selected_entry().filter(|_| self.preview_open);
+        let entry = self.tab.view.selected_entry().filter(|_| self.preview_open);
         let current = match (entry, &self.preview) {
             (Some(entry), Some(pane)) => pane.shows(entry),
             (None, None) => true,
@@ -896,37 +996,37 @@ impl LumenApp {
 
     /// Shows a finished listing and settles what depended on it.
     fn apply(&mut self, listing: Listing) {
-        self.shown_id = listing.id;
-        let select = self.select_after_load.take();
-        let from = self.view.current.clone();
+        self.tab.shown_id = listing.id;
+        let select = self.tab.select_after_load.take();
+        let from = self.tab.view.current.clone();
         let to = listing.result.is_ok().then(|| listing.path.clone());
-        if self.pending_nav == NavKind::Refresh {
-            self.view.apply_refresh(listing);
+        if self.tab.pending_nav == NavKind::Refresh {
+            self.tab.view.apply_refresh(listing);
         } else {
-            self.view.apply_listing(listing, select.as_deref());
+            self.tab.view.apply_listing(listing, select.as_deref());
         }
-        self.history.settle(self.pending_nav, &from, to.as_deref());
+        self.tab.history.settle(self.tab.pending_nav, &from, to.as_deref());
         if to.is_some() {
-            self.watcher.watch(&self.view.current);
-            if self.pending_nav != NavKind::Refresh {
-                self.recents.visit(&self.view.current);
+            self.watcher.watch(&self.tab.view.current);
+            if self.tab.pending_nav != NavKind::Refresh {
+                self.recents.visit(&self.tab.view.current);
             }
-        } else if self.pending_nav == NavKind::Refresh {
+        } else if self.tab.pending_nav == NavKind::Refresh {
             // The open folder is gone; watch it afresh if it comes back.
             self.watcher.forget();
         }
-        if let Some(err) = self.error_after_load.take() {
-            self.view.error = Some(err);
+        if let Some(err) = self.tab.error_after_load.take() {
+            self.tab.view.error = Some(err);
         }
         // The edited entry may be gone (another folder, a reload).
         if let Some(edit) = &self.rename
-            && !self.view.entries.iter().any(|e| e.path == edit.path)
+            && !self.tab.view.entries.iter().any(|e| e.path == edit.path)
         {
             self.rename = None;
         }
         // A faster navigation may have superseded the reload: check the entry.
-        if let Some(created) = self.rename_after_load.take()
-            && self.view.selected_entry().is_some_and(|e| e.path == created)
+        if let Some(created) = self.tab.rename_after_load.take()
+            && self.tab.view.selected_entry().is_some_and(|e| e.path == created)
         {
             self.start_rename();
         }
@@ -939,11 +1039,11 @@ impl LumenApp {
             self.refresh.note_change(now);
         }
         if self.refresh.take_due(now) {
-            if self.lister.is_pending(self.shown_id) {
+            if self.tab.lister.is_pending(self.tab.shown_id) {
                 // Never supersede a navigation; try again once it has landed.
                 self.refresh.note_change(now);
             } else {
-                self.navigate_as(ctx, NavKind::Refresh, self.view.current.clone(), None);
+                self.navigate_as(ctx, NavKind::Refresh, self.tab.view.current.clone(), None);
             }
         }
         if let Some(wait) = self.refresh.wait(now) {
@@ -954,10 +1054,10 @@ impl LumenApp {
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::FocusPathBar => self.path_bar.request_focus(),
-            Action::ToggleHidden => self.view.toggle_hidden(),
+            Action::ToggleHidden => self.tab.view.toggle_hidden(),
             Action::Activate => self.activate_selected(ctx),
             Action::GoParent => {
-                self.hold_absorbed = self.view.pop_filter();
+                self.hold_absorbed = self.tab.view.pop_filter();
                 if !self.hold_absorbed {
                     self.go_parent(ctx);
                 }
@@ -965,17 +1065,17 @@ impl LumenApp {
             // A hold that started on the filter only erases; going up takes a new press.
             Action::GoParentHeld => {
                 if self.hold_absorbed {
-                    self.view.pop_filter();
+                    self.tab.view.pop_filter();
                 } else {
                     self.go_parent(ctx);
                 }
             }
-            Action::Move(_) | Action::First | Action::Last => self.view.move_selection(action),
+            Action::Move(_) | Action::First | Action::Last => self.tab.view.move_selection(action),
             // A leading Space is the preview key; after other text it is just a space.
-            Action::TypeChar(' ') if self.view.filter().is_empty() => {
+            Action::TypeChar(' ') if self.tab.view.filter().is_empty() => {
                 self.preview_open = !self.preview_open;
             }
-            Action::TypeChar(c) => self.view.push_filter(c),
+            Action::TypeChar(c) => self.tab.view.push_filter(c),
             Action::Back => self.go_history(ctx, NavKind::Back),
             Action::Forward => self.go_history(ctx, NavKind::Forward),
             Action::Trash => self.ask_trash(),
@@ -986,10 +1086,16 @@ impl LumenApp {
             Action::Paste => self.paste(ctx),
             Action::Count => self.count_selected(ctx),
             Action::ToggleBookmark => self.toggle_bookmark(),
+            Action::NewTab => self.new_tab(ctx),
+            Action::CloseTab => self.close_tab(ctx, self.active),
+            Action::NextTab => self.select_tab(ctx, (self.active + 1) % self.tabs.len()),
+            Action::PrevTab => {
+                self.select_tab(ctx, (self.active + self.tabs.len() - 1) % self.tabs.len());
+            }
             // Clearing a filter is the cheaper surprise than cancelling a copy.
             // A count is cheaper to lose than a copy, too.
             Action::Cancel => {
-                self.hold_absorbed = self.view.clear_filter();
+                self.hold_absorbed = self.tab.view.clear_filter();
                 if !self.hold_absorbed && self.cancel_count() {
                     self.notice = Some("Calculation cancelled".into());
                     self.hold_absorbed = true;
@@ -1011,7 +1117,7 @@ impl eframe::App for LumenApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        if let Some(listing) = self.lister.poll() {
+        if let Some(listing) = self.tab.lister.poll() {
             self.apply(listing);
         }
 
@@ -1035,15 +1141,26 @@ impl eframe::App for LumenApp {
             }
         }
 
+        egui::Panel::top("tabs").show(ui, |ui| {
+            ui.add_space(3.0);
+            let labels = self.tab_labels();
+            match ui::tabs::show(ui, &labels, self.active) {
+                Some(TabEvent::Select(i)) => self.select_tab(&ctx, i),
+                Some(TabEvent::Close(i)) => self.close_tab(&ctx, i),
+                Some(TabEvent::New) => self.new_tab(&ctx),
+                None => {}
+            }
+        });
+
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.add_space(4.0);
-            let current = self.view.current.clone();
+            let current = self.tab.view.current.clone();
             let home = fs::home_dir();
             let nav = Nav {
                 current: &current,
                 home: home.as_deref(),
-                can_back: self.history.back_target().is_some(),
-                can_forward: self.history.forward_target().is_some(),
+                can_back: self.tab.history.back_target().is_some(),
+                can_forward: self.tab.history.forward_target().is_some(),
                 bookmarked: self.bookmarks.contains(&current),
             };
             if let Some(event) = ui::toolbar::show(ui, &nav, &mut self.path_bar) {
@@ -1056,13 +1173,13 @@ impl eframe::App for LumenApp {
             ui::status_bar::show(
                 ui,
                 &Status {
-                    filter: self.view.filter(),
-                    item_count: self.view.rows.len(),
-                    hidden_count: self.view.hidden_count(),
-                    show_hidden: self.view.show_hidden,
-                    loading: self.lister.is_pending(self.shown_id),
-                    last_elapsed: self.view.last_elapsed,
-                    error: self.view.error.as_deref(),
+                    filter: self.tab.view.filter(),
+                    item_count: self.tab.view.rows.len(),
+                    hidden_count: self.tab.view.hidden_count(),
+                    show_hidden: self.tab.view.show_hidden,
+                    loading: self.tab.lister.is_pending(self.tab.shown_id),
+                    last_elapsed: self.tab.view.last_elapsed,
+                    error: self.tab.view.error.as_deref(),
                     job: self
                         .job
                         .as_ref()
@@ -1085,7 +1202,7 @@ impl eframe::App for LumenApp {
                 .size_range(140.0..=360.0)
                 .show(ui, |ui| {
                     let sidebar = Sidebar {
-                        current: &self.view.current,
+                        current: &self.tab.view.current,
                         bookmarks: self.bookmarks.paths(),
                         places: &self.places,
                         disks: &self.disks.1,
@@ -1104,15 +1221,15 @@ impl eframe::App for LumenApp {
                 .resizable(true)
                 .default_size(width * 0.4)
                 .size_range(200.0..=width * 0.75)
-                .show(ui, |ui| match (&mut self.preview, self.view.selected_entry()) {
+                .show(ui, |ui| match (&mut self.preview, self.tab.view.selected_entry()) {
                     (Some(pane), Some(entry)) => {
                         ui::preview::show(
                             ui,
                             entry,
-                            self.view.totals.get(&entry.name),
+                            self.tab.view.totals.get(&entry.name),
                             pane,
-                            self.view.show_hidden,
-                            self.view.sort,
+                            self.tab.view.show_hidden,
+                            self.tab.view.sort,
                         );
                     }
                     _ => {
@@ -1122,15 +1239,15 @@ impl eframe::App for LumenApp {
         }
 
         egui::CentralPanel::default_margins().show(ui, |ui| {
-            let scroll = self.view.scroll.take();
-            let event = ui::file_list::show(ui, &self.view, scroll, self.rename.as_mut());
+            let scroll = self.tab.view.scroll.take();
+            let event = ui::file_list::show(ui, &self.tab.view, scroll, self.rename.as_mut());
             match event {
-                Some(ListEvent::Select(i)) => self.view.selected = Some(i),
+                Some(ListEvent::Select(i)) => self.tab.view.selected = Some(i),
                 Some(ListEvent::Activate(i)) => {
-                    self.view.selected = Some(i);
+                    self.tab.view.selected = Some(i);
                     self.activate_selected(&ctx);
                 }
-                Some(ListEvent::Sort(column)) => self.view.sort_by(column),
+                Some(ListEvent::Sort(column)) => self.tab.view.sort_by(column),
                 Some(ListEvent::RenameEnded(submit)) => {
                     if let Some(edit) = self.rename.take()
                         && submit
@@ -1200,7 +1317,9 @@ mod tests {
         let mut app = LumenApp::new(&ctx, dir.clone(), false);
         let entries = fs::lister::read_entries(&dir).unwrap();
         let listing = Listing { id: 0, path: dir.clone(), result: Ok(entries), elapsed: Duration::ZERO };
-        app.view.apply_listing(listing, None);
+        app.tab.view.apply_listing(listing, None);
+        // As if the startup listing had landed: nothing is in flight.
+        app.tab.shown_id = app.tab.lister.latest_id();
         (ctx, app, dir)
     }
 
@@ -1210,7 +1329,7 @@ mod tests {
         assert!(!app.preview_open);
         app.handle_action(&ctx, Action::TypeChar(' '));
         assert!(app.preview_open);
-        assert_eq!(app.view.filter(), "");
+        assert_eq!(app.tab.view.filter(), "");
         app.handle_action(&ctx, Action::TypeChar(' '));
         assert!(!app.preview_open, "the same Space closes it");
     }
@@ -1220,7 +1339,7 @@ mod tests {
         let (ctx, mut app, _) = app_in("app-space-filter");
         app.handle_action(&ctx, Action::TypeChar('a'));
         app.handle_action(&ctx, Action::TypeChar(' '));
-        assert_eq!(app.view.filter(), "a ");
+        assert_eq!(app.tab.view.filter(), "a ");
         assert!(!app.preview_open);
     }
 
@@ -1229,11 +1348,11 @@ mod tests {
         let (ctx, mut app, dir) = app_in("app-backspace");
         app.handle_action(&ctx, Action::TypeChar('b'));
         app.handle_action(&ctx, Action::GoParent);
-        assert_eq!(app.view.filter(), "");
-        assert_eq!(app.select_after_load, None, "no navigation started");
+        assert_eq!(app.tab.view.filter(), "");
+        assert_eq!(app.tab.select_after_load, None, "no navigation started");
         app.handle_action(&ctx, Action::GoParent);
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        assert_eq!(app.select_after_load, Some(name), "went up to the parent");
+        assert_eq!(app.tab.select_after_load, Some(name), "went up to the parent");
     }
 
     #[test]
@@ -1245,21 +1364,21 @@ mod tests {
         for _ in 0..3 {
             app.handle_action(&ctx, Action::GoParentHeld);
         }
-        assert_eq!(app.view.filter(), "");
-        assert_eq!(app.select_after_load, None, "the held key did not climb a folder");
+        assert_eq!(app.tab.view.filter(), "");
+        assert_eq!(app.tab.select_after_load, None, "the held key did not climb a folder");
         app.handle_action(&ctx, Action::GoParent);
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        assert_eq!(app.select_after_load, Some(name), "a new press goes up");
+        assert_eq!(app.tab.select_after_load, Some(name), "a new press goes up");
     }
 
     #[test]
     fn holding_backspace_with_no_filter_still_climbs_folders() {
         let (ctx, mut app, dir) = app_in("app-backspace-held-climb");
         app.handle_action(&ctx, Action::GoParent);
-        app.select_after_load = None;
+        app.tab.select_after_load = None;
         app.handle_action(&ctx, Action::GoParentHeld);
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        assert_eq!(app.select_after_load, Some(name));
+        assert_eq!(app.tab.select_after_load, Some(name));
     }
 
     #[test]
@@ -1270,7 +1389,7 @@ mod tests {
         app.handle_action(&ctx, Action::TypeChar('b'));
         app.handle_action(&ctx, Action::Cancel);
         app.handle_action(&ctx, Action::CancelHeld);
-        assert_eq!(app.view.filter(), "");
+        assert_eq!(app.tab.view.filter(), "");
         assert!(!app.job.as_ref().unwrap().job.cancel_requested(), "the copy goes on");
         app.handle_action(&ctx, Action::Cancel);
         assert!(app.job.as_ref().unwrap().job.cancel_requested(), "a new press cancels");
@@ -1292,7 +1411,7 @@ mod tests {
         app.paste(&ctx);
         app.handle_action(&ctx, Action::TypeChar('b'));
         app.handle_action(&ctx, Action::Cancel);
-        assert_eq!(app.view.filter(), "");
+        assert_eq!(app.tab.view.filter(), "");
         assert!(!app.job.as_ref().unwrap().job.cancel_requested(), "the copy goes on");
         app.handle_action(&ctx, Action::Cancel);
         assert!(app.job.as_ref().unwrap().job.cancel_requested());
@@ -1303,18 +1422,124 @@ mod tests {
         Listing { id: 0, path: dir.to_path_buf(), result: Ok(entries), elapsed: Duration::ZERO }
     }
 
+    /// Lists what the active tab asked for, synchronously, as a later frame would.
+    fn land(app: &mut LumenApp) {
+        let path = app.tab.lister.last_requested().expect("a listing was requested");
+        let mut listing = listing_of(&path);
+        listing.id = app.tab.lister.latest_id();
+        app.apply(listing);
+    }
+
+    #[test]
+    fn a_new_tab_opens_the_same_folder_after_this_one_with_its_own_history() {
+        let (ctx, mut app, dir) = app_in("app-tab-new");
+        app.tab.view.sort_by(SortColumn::Size);
+        app.tab.view.toggle_hidden();
+        app.handle_action(&ctx, Action::Activate); // into sub
+        land(&mut app);
+        assert!(app.tab.history.back_target().is_some());
+        app.handle_action(&ctx, Action::NewTab);
+        assert_eq!((app.tabs.len(), app.active), (2, 1));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub")));
+        land(&mut app);
+        assert_eq!(app.tab.view.current, dir.join("sub"));
+        assert_eq!(app.tab.view.sort.column, SortColumn::Size, "sort carried over");
+        assert!(app.tab.view.show_hidden, "Ctrl+H carried over");
+        assert!(app.tab.history.back_target().is_none(), "a fresh history");
+        assert_eq!(app.tab_labels(), ["sub", "sub"]);
+    }
+
+    #[test]
+    fn each_tab_keeps_its_own_folder_filter_and_selection() {
+        let (ctx, mut app, dir) = app_in("app-tab-own");
+        app.handle_action(&ctx, Action::TypeChar('b'));
+        app.handle_action(&ctx, Action::TypeChar('.'));
+        assert_eq!(app.tab.view.selected_entry().unwrap().name, "b.txt");
+        app.handle_action(&ctx, Action::NewTab);
+        land(&mut app);
+        assert_eq!(app.tab.view.filter(), "", "the new tab starts unfiltered");
+        app.handle_toolbar(&ctx, ToolbarEvent::Go(dir.join("sub")));
+        land(&mut app);
+        app.handle_action(&ctx, Action::PrevTab);
+        assert_eq!(app.active, 0);
+        assert_eq!(app.tab.view.current, dir);
+        assert_eq!(app.tab.view.filter(), "b.");
+        assert_eq!(app.tab.view.selected_entry().unwrap().name, "b.txt");
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(app.tab_labels(), [name, "sub".to_owned()]);
+        app.handle_action(&ctx, Action::NextTab);
+        assert_eq!(app.tab.view.current, dir.join("sub"));
+    }
+
+    #[test]
+    fn switching_tabs_wraps_around_and_reloads_the_tab_shown() {
+        let (ctx, mut app, dir) = app_in("app-tab-cycle");
+        app.handle_action(&ctx, Action::NewTab);
+        land(&mut app);
+        app.handle_action(&ctx, Action::NextTab);
+        assert_eq!(app.active, 0, "past the last tab comes the first");
+        assert_eq!(app.tab.pending_nav, NavKind::Refresh, "it may have changed meanwhile");
+        assert_eq!(app.tab.lister.last_requested(), Some(dir));
+        app.handle_action(&ctx, Action::PrevTab);
+        assert_eq!(app.active, 1, "before the first comes the last");
+    }
+
+    #[test]
+    fn switching_tabs_stops_the_count_and_the_rename() {
+        let (ctx, mut app, _) = app_in("app-tab-switch-stops");
+        app.handle_action(&ctx, Action::NewTab);
+        land(&mut app);
+        app.handle_action(&ctx, Action::Count);
+        app.handle_action(&ctx, Action::Rename);
+        assert!(app.counting.is_some() && app.rename.is_some());
+        app.handle_action(&ctx, Action::NextTab);
+        assert!(app.counting.is_none() && app.rename.is_none());
+    }
+
+    #[test]
+    fn closing_a_tab_shows_its_right_neighbour_and_the_last_tab_stays() {
+        let (ctx, mut app, dir) = app_in("app-tab-close");
+        app.handle_action(&ctx, Action::CloseTab);
+        assert_eq!(app.tabs.len(), 1, "the only tab cannot be closed");
+        app.handle_action(&ctx, Action::NewTab);
+        land(&mut app);
+        app.handle_toolbar(&ctx, ToolbarEvent::Go(dir.join("sub")));
+        land(&mut app);
+        app.handle_action(&ctx, Action::NewTab); // third tab, in sub
+        land(&mut app);
+        app.select_tab(&ctx, 1);
+        app.handle_action(&ctx, Action::CloseTab);
+        assert_eq!((app.tabs.len(), app.active), (2, 1), "the right neighbour moved into its place");
+        assert_eq!(app.tab.view.current, dir.join("sub"));
+        app.close_tab(&ctx, 1);
+        assert_eq!((app.tabs.len(), app.active), (1, 0), "no right neighbour: the left one");
+        assert_eq!(app.tab.view.current, dir);
+    }
+
+    #[test]
+    fn closing_a_tab_in_the_background_keeps_the_one_on_screen() {
+        let (ctx, mut app, dir) = app_in("app-tab-close-other");
+        app.handle_action(&ctx, Action::NewTab);
+        land(&mut app);
+        app.handle_toolbar(&ctx, ToolbarEvent::Go(dir.join("sub")));
+        land(&mut app);
+        app.close_tab(&ctx, 0);
+        assert_eq!((app.tabs.len(), app.active), (1, 0));
+        assert_eq!(app.tab.view.current, dir.join("sub"));
+    }
+
     #[test]
     fn visited_folders_become_recents_but_refreshes_and_failures_do_not() {
         let (_ctx, mut app, dir) = app_in("app-recents");
         app.apply(listing_of(&dir.join("sub")));
         assert_eq!(app.recents.paths(), [dir.join("sub")]);
-        app.pending_nav = NavKind::Back;
+        app.tab.pending_nav = NavKind::Back;
         app.apply(listing_of(&dir));
         assert_eq!(app.recents.paths(), [dir.clone(), dir.join("sub")]);
-        app.pending_nav = NavKind::Refresh;
+        app.tab.pending_nav = NavKind::Refresh;
         app.apply(listing_of(&dir.join("sub")));
         assert_eq!(app.recents.paths()[0], dir, "a refresh is not a visit");
-        app.pending_nav = NavKind::New;
+        app.tab.pending_nav = NavKind::New;
         let failed = Listing { id: 0, path: dir.join("gone"), result: Err(ListError::NotFound(dir.join("gone"))), elapsed: Duration::ZERO };
         app.apply(failed);
         assert_eq!(app.recents.paths().len(), 2);
@@ -1326,10 +1551,10 @@ mod tests {
         app.trash = Some(dir.clone());
         app.ask_trash();
         assert!(app.dialog.is_none(), "no confirmation is offered");
-        assert_eq!(app.view.error.as_deref(), Some("This is already in the trash"));
+        assert_eq!(app.tab.view.error.as_deref(), Some("This is already in the trash"));
         assert!(dir.join("sub").exists());
         app.trash = Some(dir.join("elsewhere"));
-        app.view.error = None;
+        app.tab.view.error = None;
         app.ask_trash();
         assert!(app.dialog.is_some(), "outside the trash Delete still asks");
     }
@@ -1348,7 +1573,7 @@ mod tests {
     fn side_panel_items_open_and_bookmarks_can_be_removed() {
         let (ctx, mut app, dir) = app_in("app-sidebar");
         app.handle_sidebar(&ctx, SidebarEvent::Open(dir.join("sub")));
-        assert_eq!(app.lister.last_requested(), Some(dir.join("sub")));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub")));
         app.bookmarks.toggle(&dir.join("sub"));
         app.handle_sidebar(&ctx, SidebarEvent::RemoveBookmark(dir.join("sub")));
         assert!(app.bookmarks.paths().is_empty());
@@ -1372,17 +1597,17 @@ mod tests {
         app.handle_action(&ctx, Action::TypeChar('a'));
         app.handle_toolbar(&ctx, ToolbarEvent::Up);
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        assert_eq!(app.select_after_load, Some(name), "went up, selecting where we came from");
-        assert_eq!(app.view.filter(), "a", "the filter is not touched");
+        assert_eq!(app.tab.select_after_load, Some(name), "went up, selecting where we came from");
+        assert_eq!(app.tab.view.filter(), "a", "the filter is not touched");
     }
 
     #[test]
     fn a_crumb_or_typed_path_navigates() {
         let (ctx, mut app, dir) = app_in("app-crumb");
         app.handle_toolbar(&ctx, ToolbarEvent::Go(dir.join("sub")));
-        assert_eq!(app.lister.last_requested(), Some(dir.join("sub")));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub")));
         app.handle_toolbar(&ctx, ToolbarEvent::Typed("sub/..".into()));
-        assert_eq!(app.lister.last_requested(), Some(dir.clone()));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.clone()));
     }
 
     /// Lets the running count finish, as the next frames would.
@@ -1402,12 +1627,12 @@ mod tests {
         let (ctx, mut app, dir) = app_in("app-count");
         std::fs::write(dir.join("sub/c.txt"), "12345").unwrap();
         std::fs::create_dir(dir.join("sub/inner")).unwrap();
-        assert_eq!(app.view.selected_entry().unwrap().name, "sub");
+        assert_eq!(app.tab.view.selected_entry().unwrap().name, "sub");
         app.handle_action(&ctx, Action::Count);
         assert_eq!(app.counting.as_ref().map(|c| c.path.clone()), Some(dir.join("sub")));
         wait_count(&mut app);
         let expected = Totals { folders: 1, files: 1, bytes: 5, unreadable: 0 };
-        assert_eq!(app.view.totals.get("sub"), Some(&expected));
+        assert_eq!(app.tab.view.totals.get("sub"), Some(&expected));
         assert_eq!(app.notice, None);
     }
 
@@ -1415,10 +1640,10 @@ mod tests {
     fn alt_r_on_a_file_does_nothing() {
         let (ctx, mut app, _) = app_in("app-count-file");
         app.handle_action(&ctx, Action::Move(1));
-        assert_eq!(app.view.selected_entry().unwrap().name, "a.txt");
+        assert_eq!(app.tab.view.selected_entry().unwrap().name, "a.txt");
         app.handle_action(&ctx, Action::Count);
         assert!(app.counting.is_none());
-        assert!(app.view.totals.is_empty());
+        assert!(app.tab.view.totals.is_empty());
     }
 
     #[test]
@@ -1429,7 +1654,7 @@ mod tests {
         app.handle_action(&ctx, Action::Count);
         app.handle_action(&ctx, Action::TypeChar('s'));
         app.handle_action(&ctx, Action::Cancel);
-        assert_eq!(app.view.filter(), "");
+        assert_eq!(app.tab.view.filter(), "");
         assert!(app.counting.is_some(), "the count goes on");
         app.handle_action(&ctx, Action::Cancel);
         assert!(app.counting.is_none(), "the count stops");
@@ -1454,7 +1679,7 @@ mod tests {
         let (_ctx, mut app, dir) = app_in("app-count-stale");
         let count = Count::start(dir.join("elsewhere/sub"), || {});
         app.finish_count(count, Ok(Some(Totals { files: 3, ..Totals::default() })));
-        assert!(app.view.totals.is_empty());
+        assert!(app.tab.view.totals.is_empty());
     }
 
     #[test]
@@ -1462,10 +1687,10 @@ mod tests {
         let (_ctx, mut app, dir) = app_in("app-count-errors");
         let partial = Totals { folders: 4, files: 1, bytes: 9, unreadable: 2 };
         app.finish_count(Count::start(dir.join("sub"), || {}), Ok(Some(partial)));
-        assert_eq!(app.view.totals.get("sub"), Some(&partial));
+        assert_eq!(app.tab.view.totals.get("sub"), Some(&partial));
         assert_eq!(app.notice.as_deref(), Some("“sub”: 2 folders could not be read"));
         app.finish_count(Count::start(dir.join("sub"), || {}), Err("Cannot read sub: gone".into()));
-        assert_eq!(app.view.error.as_deref(), Some("Cannot read sub: gone"));
+        assert_eq!(app.tab.view.error.as_deref(), Some("Cannot read sub: gone"));
     }
 
     /// Lets the preview worker finish, as the next frames would.
@@ -1511,7 +1736,7 @@ mod tests {
         assert_eq!(preview_text(wait_preview(&ctx, &mut app)), "A");
         std::fs::write(dir.join("a.txt"), "AAA").unwrap();
         let entries = fs::lister::read_entries(&dir).unwrap();
-        app.view.apply_refresh(Listing { id: 1, path: dir, result: Ok(entries), elapsed: Duration::ZERO });
+        app.tab.view.apply_refresh(Listing { id: 1, path: dir, result: Ok(entries), elapsed: Duration::ZERO });
         assert_eq!(preview_text(wait_preview(&ctx, &mut app)), "AAA");
     }
 

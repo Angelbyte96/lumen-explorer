@@ -161,6 +161,12 @@ impl Lister {
         shown_id != self.latest_id
     }
 
+    /// Id of the newest request.
+    #[cfg(test)]
+    pub fn latest_id(&self) -> u64 {
+        self.latest_id
+    }
+
     /// The folder of the newest request.
     #[cfg(test)]
     pub fn last_requested(&self) -> Option<PathBuf> {
