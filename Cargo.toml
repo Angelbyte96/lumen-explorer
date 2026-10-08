@@ -28,6 +28,11 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Drive letters, volume names and free space for the side panel. The same
+# windows-sys eframe already uses: only adds the feature.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 # GNOME on Wayland leaves the title bar to the app. Without this feature winit
 # draws a bare fallback frame (no title, no double-click to maximize); with it,
 # an Adwaita-style one. Same winit eframe already uses: only adds the feature.
