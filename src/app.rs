@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use crate::config::Config;
 use crate::fs::count::{Count, Totals};
 use crate::fs::watch::Watcher;
 use crate::fs::{self, Entry, Lister, Listing};
@@ -501,6 +502,12 @@ pub struct LumenApp {
     active: usize,
     /// Print listing times (LUMEN_LOG=1); new tabs inherit it.
     log: bool,
+    /// Where settings are saved; `None` keeps them in memory (tests).
+    config_path: Option<PathBuf>,
+    /// The settings last written, to save only when something changed.
+    saved: Config,
+    /// Inner window size in points, saved when Lumen closes.
+    window: Option<[f32; 2]>,
     path_bar: PathBar,
     dialog: Option<Dialog>,
     rename: Option<RenameEdit>,
@@ -550,6 +557,9 @@ impl LumenApp {
             tabs: vec![None],
             active: 0,
             log,
+            config_path: None,
+            saved: Config::default(),
+            window: None,
             path_bar: PathBar::default(),
             dialog: None,
             rename: None,
@@ -586,6 +596,54 @@ impl LumenApp {
         }
         app.navigate(ctx, start, None);
         app
+    }
+
+    /// Starts with saved settings, writing changes back to `path`.
+    pub fn with_config(
+        ctx: &egui::Context,
+        start: PathBuf,
+        log: bool,
+        config: Config,
+        path: Option<PathBuf>,
+    ) -> Self {
+        let mut app = Self::new(ctx, start, log);
+        // The startup listing has not landed yet: it is sorted with these.
+        app.tab.view.sort = config.sort;
+        app.tab.view.show_hidden = config.show_hidden;
+        app.sidebar_open = config.sidebar;
+        app.preview_open = config.preview;
+        app.bookmarks = Bookmarks::from_paths(config.bookmarks);
+        app.window = config.window;
+        app.saved = app.settings(true);
+        app.config_path = path;
+        app
+    }
+
+    /// The settings as they are now. The window size is the one last saved
+    /// unless `with_window`: resizing alone writes nothing until Lumen closes.
+    fn settings(&self, with_window: bool) -> Config {
+        Config {
+            sort: self.tab.view.sort,
+            show_hidden: self.tab.view.show_hidden,
+            sidebar: self.sidebar_open,
+            preview: self.preview_open,
+            window: if with_window { self.window } else { self.saved.window },
+            bookmarks: self.bookmarks.paths().to_vec(),
+        }
+    }
+
+    /// Writes the settings when they differ from the file.
+    fn save_settings(&mut self, with_window: bool) {
+        let Some(path) = &self.config_path else { return };
+        let settings = self.settings(with_window);
+        if settings == self.saved {
+            return;
+        }
+        if let Err(err) = settings.save(path) {
+            self.tab.view.error = Some(format!("Cannot save settings: {err}"));
+        }
+        // Even after a failure: the next change tries again, not every frame.
+        self.saved = settings;
     }
 
     /// Disks for the side panel, read again every few seconds so a plugged-in
@@ -1279,6 +1337,15 @@ impl eframe::App for LumenApp {
         {
             self.answer_dialog(&ctx, answer);
         }
+
+        if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
+            self.window = Some([rect.width(), rect.height()]);
+        }
+        self.save_settings(false);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_settings(true);
     }
 }
 
@@ -1533,6 +1600,69 @@ mod tests {
         app.close_tab(&ctx, 0);
         assert_eq!((app.tabs.len(), app.active), (1, 0));
         assert_eq!(app.tab.view.current, dir.join("sub"));
+    }
+
+    fn saved_config() -> Config {
+        Config {
+            sort: Sort { column: SortColumn::Size, descending: true },
+            show_hidden: true,
+            sidebar: false,
+            preview: true,
+            window: Some([1000.0, 700.0]),
+            bookmarks: vec![PathBuf::from("/srv"), PathBuf::from("/srv")],
+        }
+    }
+
+    #[test]
+    fn saved_settings_are_applied_at_startup() {
+        let dir = crate::fs::ops::tests::fresh_fixture("app-config-start");
+        let ctx = egui::Context::default();
+        let app = LumenApp::with_config(&ctx, dir, false, saved_config(), None);
+        assert_eq!(app.tab.view.sort, Sort { column: SortColumn::Size, descending: true });
+        assert!(app.tab.view.show_hidden);
+        assert!(!app.sidebar_open);
+        assert!(app.preview_open);
+        assert_eq!(app.bookmarks.paths(), [PathBuf::from("/srv")], "repeats dropped");
+        assert_eq!(app.window, Some([1000.0, 700.0]));
+    }
+
+    #[test]
+    fn a_changed_setting_is_written_at_once_but_a_resize_only_on_close() {
+        let (ctx, _, dir) = app_in("app-config-save");
+        let path = dir.join("cfg/lumen/config");
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, Config::default(), Some(path.clone()));
+        app.save_settings(false);
+        assert!(!path.exists(), "nothing changed, nothing written");
+        app.handle_action(&ctx, Action::ToggleBookmark);
+        app.handle_action(&ctx, Action::ToggleHidden);
+        app.tab.view.sort_by(SortColumn::Modified);
+        app.handle_toolbar(&ctx, ToolbarEvent::ToggleSidebar);
+        app.handle_action(&ctx, Action::TypeChar(' ')); // preview
+        app.save_settings(false);
+        let written = Config::load(&path);
+        assert_eq!(written.bookmarks, std::slice::from_ref(&dir));
+        assert!(written.show_hidden && !written.sidebar && written.preview);
+        assert_eq!(written.sort.column, SortColumn::Modified);
+        app.window = Some([900.0, 600.0]);
+        app.save_settings(false);
+        assert_eq!(Config::load(&path).window, None, "a resize alone is not written");
+        app.save_settings(true);
+        assert_eq!(Config::load(&path).window, Some([900.0, 600.0]), "closing writes it");
+    }
+
+    #[test]
+    fn a_failed_save_says_so_once() {
+        let (ctx, _, dir) = app_in("app-config-fail");
+        std::fs::write(dir.join("blocker"), "not a folder").unwrap();
+        let path = dir.join("blocker/lumen/config");
+        let mut app = LumenApp::with_config(&ctx, dir, false, Config::default(), Some(path));
+        app.handle_action(&ctx, Action::ToggleHidden);
+        app.save_settings(false);
+        let error = app.tab.view.error.clone().expect("the failure is shown");
+        assert!(error.starts_with("Cannot save settings: "), "{error}");
+        app.tab.view.error = None;
+        app.save_settings(false);
+        assert_eq!(app.tab.view.error, None, "not repeated every frame");
     }
 
     #[test]
