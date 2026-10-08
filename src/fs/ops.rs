@@ -47,9 +47,18 @@ pub(crate) fn same_entry(a: &Path, b: &Path) -> bool {
 #[cfg(windows)]
 pub(crate) fn same_entry(a: &Path, b: &Path) -> bool {
     match (file_id(a), file_id(b)) {
-        (Some(a), Some(b)) => a == b,
+        (Some(a), Some(b)) => ids_match(a, b),
         _ => false,
     }
+}
+
+/// (volume serial, file index high, low). Some network and user-space
+/// filesystems report index 0 for every file: that tells nothing, so it never
+/// counts as the same entry (the cautious answer for rename and paste).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn ids_match(a: (u32, u32, u32), b: (u32, u32, u32)) -> bool {
+    let known = |(_, high, low): (u32, u32, u32)| high != 0 || low != 0;
+    known(a) && a == b
 }
 
 #[cfg(windows)]
@@ -292,6 +301,13 @@ pub(crate) mod tests {
         assert!(same_entry(&dir.join("sub"), &dir.join("sub")), "folders too");
         assert!(!same_entry(&dir.join("a.txt"), &dir.join("b.txt")));
         assert!(!same_entry(&dir.join("a.txt"), &dir.join("ghost.txt")), "a missing entry is never the same");
+    }
+
+    #[test]
+    fn a_zero_file_index_is_never_the_same_entry() {
+        assert!(ids_match((7, 0, 42), (7, 0, 42)));
+        assert!(!ids_match((7, 0, 42), (8, 0, 42)), "another volume");
+        assert!(!ids_match((7, 0, 0), (7, 0, 0)), "index 0 is unknown, not a match");
     }
 
     /// NTFS ignores case: "A.txt" already exists, and it is "a.txt" itself.
