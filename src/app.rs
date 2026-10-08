@@ -1282,6 +1282,7 @@ impl eframe::App for LumenApp {
                 ui,
                 &Status {
                     filter: self.tab.view.filter(),
+                    caret: !self.path_popup.is_open() && self.rename.is_none(),
                     item_count: self.tab.view.rows.len(),
                     hidden_count: self.tab.view.hidden_count(),
                     show_hidden: self.tab.view.show_hidden,

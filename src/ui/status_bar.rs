@@ -8,6 +8,8 @@ use crate::fs::transfer::{Mode, Progress};
 pub struct Status<'a> {
     /// Text typed in the filter bar.
     pub filter: &'a str,
+    /// Typing goes to the filter now (no path box or rename open): show its cursor.
+    pub caret: bool,
     pub item_count: usize,
     pub hidden_count: usize,
     pub show_hidden: bool,
@@ -27,7 +29,7 @@ pub struct Status<'a> {
 
 pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
     ui.horizontal(|ui| {
-        filter_bar(ui, status.filter, status.item_count);
+        filter_bar(ui, status.filter, status.item_count, status.caret);
         ui.separator();
         ui.label(count_text(status.item_count, !status.filter.is_empty()));
         if status.hidden_count > 0 && !status.show_hidden {
@@ -74,8 +76,10 @@ pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
 }
 
 /// Always-visible filter at the bottom left. It is drawn, not a text field:
-/// typing anywhere in the list feeds it, so it never has to take focus.
-fn filter_bar(ui: &mut egui::Ui, filter: &str, items: usize) {
+/// typing anywhere in the list feeds it, so it never has to take focus. With
+/// `caret`, a steady text cursor shows where typing goes: after the text, or
+/// before the placeholder.
+fn filter_bar(ui: &mut egui::Ui, filter: &str, items: usize, caret: bool) {
     let text = if filter.is_empty() {
         egui::RichText::new(filter_placeholder(items)).weak()
     } else {
@@ -89,7 +93,12 @@ fn filter_bar(ui: &mut egui::Ui, filter: &str, items: usize) {
         .show(ui, |ui| {
             ui.set_min_width(180.0);
             crate::ui::icons::magnifier(ui);
-            ui.add(egui::Label::new(text).selectable(false));
+            let label = ui.add(egui::Label::new(text).selectable(false)).rect;
+            if caret {
+                let x = if filter.is_empty() { label.left() } else { label.right() + 1.0 };
+                let stroke = ui.visuals().text_cursor.stroke;
+                ui.painter().line_segment([egui::pos2(x, label.top()), egui::pos2(x, label.bottom())], stroke);
+            }
         });
 }
 
@@ -132,6 +141,58 @@ pub fn progress_text(mode: Mode, progress: &Progress) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The filter bar's text and its cursor (a line in the text cursor colour), if any.
+    fn painted_bar(filter: &str, caret: bool) -> (egui::Rect, Option<egui::Rect>) {
+        let ctx = egui::Context::default();
+        let status = Status {
+            filter,
+            caret,
+            item_count: 9,
+            hidden_count: 0,
+            show_hidden: false,
+            loading: false,
+            last_elapsed: None,
+            error: None,
+            job: None,
+            notice: None,
+            counting: None,
+            folder_count: 0,
+            selected: None,
+        };
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| show(ui, &status));
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let shown = if filter.is_empty() { filter_placeholder(9) } else { filter.to_owned() };
+        let text = shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == shown => Some(t.galley.rect.translate(t.pos.to_vec2())),
+                _ => None,
+            })
+            .expect("filter text painted");
+        let colour = ctx.global_style().visuals.text_cursor.stroke.color;
+        let cursor = shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::LineSegment { points, stroke } if stroke.color == colour => Some(egui::Rect::from_two_pos(points[0], points[1])),
+            _ => None,
+        });
+        (text, cursor)
+    }
+
+    #[test]
+    fn the_filter_bar_shows_a_cursor_while_typing_goes_to_it() {
+        let (text, cursor) = painted_bar("f6", true);
+        let cursor = cursor.expect("cursor painted");
+        assert!((cursor.left() - text.right()).abs() <= 2.0, "after the text: {cursor:?} vs {text:?}");
+        assert!(cursor.top() <= text.top() + 1.0 && cursor.bottom() >= text.bottom() - 1.0, "as tall as the text");
+        let (text, cursor) = painted_bar("", true);
+        let cursor = cursor.expect("cursor painted on the placeholder");
+        assert!((cursor.left() - text.left()).abs() <= 2.0, "before the placeholder: {cursor:?} vs {text:?}");
+        assert_eq!(painted_bar("f6", false).1, None, "no cursor while the path box or a rename takes the keys");
+    }
 
     #[test]
     fn count_reads_matches_while_filtering() {
