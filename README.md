@@ -12,6 +12,35 @@ LUMEN_LOG=1 cargo run          # print how long each folder listing takes
 cargo test                     # unit tests (fixtures live in ~/pruebas-explorador)
 ```
 
+## Install (Linux)
+
+```sh
+scripts/install-desktop.sh             # build release, add Lumen to the app menu
+scripts/install-desktop.sh --uninstall # remove it again
+```
+
+No sudo: the binary goes to `~/.local/bin/lumen`, the menu entry to
+`~/.local/share/applications/lumen.desktop` and the icon to
+`~/.local/share/icons/hicolor`. Lumen then shows up as "Lumen" in the GNOME
+app grid, and can be pinned to the dock.
+
+The icon is `assets/lumen.svg`; after editing it, run
+`python3 scripts/render_icon.py` to regenerate `assets/lumen.png`, which the
+binary uses as its window icon.
+
+## Windows
+
+Every push to `main` or a `feat/*` branch runs the "Windows build" workflow in
+GitHub Actions: it runs the tests on Windows and keeps `lumen.exe` as a
+download (Actions tab, open a run, Artifacts, `lumen-windows`). The `.exe`
+needs no installer; double-click it to start Lumen. To check the code compiles
+for Windows locally:
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+cargo check --target x86_64-pc-windows-gnu --all-targets
+```
+
 ## Keyboard shortcuts
 
 | Key | Action |
