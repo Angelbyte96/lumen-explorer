@@ -11,6 +11,17 @@ pub struct Bookmarks {
 }
 
 impl Bookmarks {
+    /// Bookmarks read back from the settings, without repeats.
+    pub fn from_paths(paths: Vec<PathBuf>) -> Self {
+        let mut bookmarks = Self::default();
+        for path in paths {
+            if !bookmarks.contains(&path) {
+                bookmarks.paths.push(path);
+            }
+        }
+        bookmarks
+    }
+
     pub fn paths(&self) -> &[PathBuf] {
         &self.paths
     }

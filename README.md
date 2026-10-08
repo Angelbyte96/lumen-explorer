@@ -54,5 +54,7 @@ The preview panel follows the selection: a folder shows its contents, text and c
 
 The open folder reloads by itself when something changes on disk, keeping the selection and the sort order.
 
+Settings are kept in `~/.config/lumen/config` (or `$XDG_CONFIG_HOME/lumen/config`): bookmarks, sort order, Ctrl+H, whether the side panel and the preview are open, and the window size. They are written as soon as they change (the window size when Lumen closes). It is a plain `key = value` file; lines Lumen does not understand are ignored. Open tabs are not restored yet.
+
 The status bar shows the filter on the left ("Filter 9 files…" while empty), how long the last listing took, and on the right the folders shown and the selected row out of the rows shown ("1/9").
 Listing always runs on a background thread, so the window never freezes.
