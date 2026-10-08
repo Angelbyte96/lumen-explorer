@@ -5,6 +5,8 @@ use eframe::egui;
 use crate::fs::transfer::{Mode, Progress};
 
 pub struct Status<'a> {
+    /// Text typed in the filter bar.
+    pub filter: &'a str,
     pub item_count: usize,
     pub hidden_count: usize,
     pub show_hidden: bool,
@@ -18,7 +20,9 @@ pub struct Status<'a> {
 
 pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
     ui.horizontal(|ui| {
-        ui.label(format!("{} items", status.item_count));
+        filter_bar(ui, status.filter);
+        ui.separator();
+        ui.label(count_text(status.item_count, !status.filter.is_empty()));
         if status.hidden_count > 0 && !status.show_hidden {
             ui.weak(format!("({} hidden, Ctrl+H to show)", status.hidden_count));
         }
@@ -48,6 +52,36 @@ pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
     });
 }
 
+/// Always-visible filter at the bottom left. It is drawn, not a text field:
+/// typing anywhere in the list feeds it, so it never has to take focus.
+fn filter_bar(ui: &mut egui::Ui, filter: &str) {
+    let text = if filter.is_empty() {
+        egui::RichText::new("Type to filter · Space to preview").weak()
+    } else {
+        egui::RichText::new(filter).strong()
+    };
+    egui::Frame::new()
+        .fill(ui.visuals().extreme_bg_color)
+        .stroke(ui.visuals().widgets.inactive.bg_stroke)
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(6, 1))
+        .show(ui, |ui| {
+            ui.set_min_width(180.0);
+            ui.label("🔍");
+            ui.add(egui::Label::new(text).selectable(false));
+        });
+}
+
+/// "12 items", or how many rows the filter left.
+pub fn count_text(items: usize, filtering: bool) -> String {
+    match (filtering, items) {
+        (false, n) => format!("{n} items"),
+        (true, 0) => "No matches".into(),
+        (true, 1) => "1 match".into(),
+        (true, n) => format!("{n} matches"),
+    }
+}
+
 /// "Copying 3/10 — 45%": files done of total, then share of bytes.
 pub fn progress_text(mode: Mode, progress: &Progress) -> String {
     let verb = match mode {
@@ -60,6 +94,15 @@ pub fn progress_text(mode: Mode, progress: &Progress) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn count_reads_matches_while_filtering() {
+        assert_eq!(count_text(12, false), "12 items");
+        assert_eq!(count_text(0, false), "0 items");
+        assert_eq!(count_text(3, true), "3 matches");
+        assert_eq!(count_text(1, true), "1 match");
+        assert_eq!(count_text(0, true), "No matches");
+    }
 
     #[test]
     fn progress_reads_files_then_percent() {

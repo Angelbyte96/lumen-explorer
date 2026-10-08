@@ -385,6 +385,11 @@ impl Job {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
+    pub fn cancel_requested(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
     /// Takes the messages that arrived. Returns the result once the job is over.
     pub fn poll(&mut self) -> Option<Result<Outcome, String>> {
         while let Ok(event) = self.rx.try_recv() {

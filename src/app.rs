@@ -48,16 +48,13 @@ impl Sort {
     }
 }
 
-/// Pause after which type-to-search starts a new word.
-pub const SEARCH_RESET: Duration = Duration::from_secs(1);
-
 /// What is on screen. Pure data, no egui or threads, so it is unit-testable.
 #[derive(Default)]
 pub struct View {
     /// Folder whose entries are shown. Only changes when a listing succeeds.
     pub current: PathBuf,
     pub entries: Vec<Entry>,
-    /// Indices into `entries` that pass the hidden-files filter, in display order.
+    /// Indices into `entries` that pass the hidden-files and text filters, in display order.
     pub rows: Vec<usize>,
     /// Index into `rows`.
     pub selected: Option<usize>,
@@ -68,23 +65,33 @@ pub struct View {
     pub error: Option<String>,
     /// Set when the selection changed via keyboard, so the table scrolls to it.
     pub scroll: Option<Scroll>,
-    /// Type-to-search: lowercase prefix typed so far and when the last key came.
-    search: String,
-    search_at: Option<Instant>,
+    /// What was typed in the filter bar; rows must contain it, ignoring case.
+    filter: String,
 }
 
 impl View {
     /// Applies a finished listing. On error the previous folder stays on screen.
     /// `select_name` re-selects an entry, e.g. the folder we just left with Backspace.
+    /// A new folder starts unfiltered; reloading the same one keeps the filter
+    /// unless it would hide `select_name` (a new folder, a renamed entry).
     pub fn apply_listing(&mut self, listing: Listing, select_name: Option<&str>) {
         match listing.result {
             Ok(entries) => {
+                if listing.path != self.current {
+                    self.filter.clear();
+                }
                 self.current = listing.path;
                 self.entries = entries;
                 self.last_elapsed = Some(listing.elapsed);
                 self.error = None;
-                self.search.clear();
                 self.rebuild_rows(None);
+                if let Some(name) = select_name
+                    && self.row_of_name(name).is_none()
+                    && !self.filter.is_empty()
+                {
+                    self.filter.clear();
+                    self.rebuild_rows(None);
+                }
                 let wanted = select_name.and_then(|name| self.row_of_name(name));
                 self.selected = wanted.or((!self.rows.is_empty()).then_some(0));
                 self.scroll = Some(Scroll::Instant);
@@ -95,7 +102,7 @@ impl View {
 
     /// Applies a listing of the folder already shown, after something changed
     /// it. Unlike a navigation it keeps the selection (the same row if the entry
-    /// vanished), the type-to-search word, the error line and the scroll.
+    /// vanished), the filter, the error line and the scroll.
     pub fn apply_refresh(&mut self, listing: Listing) {
         let entries = match listing.result {
             Ok(entries) => entries,
@@ -129,21 +136,39 @@ impl View {
         self.scroll = Some(Scroll::Instant);
     }
 
-    /// Selects the first visible row whose name starts with what was typed.
-    /// Takes `now` so tests control the clock.
-    pub fn type_char(&mut self, c: char, now: Instant) {
-        if self.search_at.is_none_or(|at| now.duration_since(at) >= SEARCH_RESET) {
-            self.search.clear();
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    /// Adds a typed character to the filter and selects the first match.
+    pub fn push_filter(&mut self, c: char) {
+        self.filter.push(c);
+        self.refilter(None);
+    }
+
+    /// Erases the last filter character. `false` when there was none.
+    pub fn pop_filter(&mut self) -> bool {
+        if self.filter.pop().is_none() {
+            return false;
         }
-        self.search_at = Some(now);
-        self.search.extend(c.to_lowercase());
-        let found = self.rows.iter().position(|&i| {
-            self.entries[i].name.to_lowercase().starts_with(&self.search)
-        });
-        if let Some(row) = found {
-            self.selected = Some(row);
-            self.scroll = Some(Scroll::Smooth);
+        self.refilter(None);
+        true
+    }
+
+    /// Empties the filter, keeping the selected entry. `false` when it was empty.
+    pub fn clear_filter(&mut self) -> bool {
+        if self.filter.is_empty() {
+            return false;
         }
+        let keep = self.selected_entry().map(|e| e.name.clone());
+        self.filter.clear();
+        self.refilter(keep.as_deref());
+        true
+    }
+
+    fn refilter(&mut self, keep_name: Option<&str>) {
+        self.rebuild_rows(keep_name);
+        self.scroll = Some(Scroll::Instant);
     }
 
     pub fn move_selection(&mut self, action: Action) {
@@ -181,8 +206,12 @@ impl View {
 
     fn rebuild_rows(&mut self, keep_name: Option<&str>) {
         let show_hidden = self.show_hidden;
+        let needle = self.filter.to_lowercase();
         self.rows = (0..self.entries.len())
-            .filter(|&i| show_hidden || !self.entries[i].hidden)
+            .filter(|&i| {
+                let e = &self.entries[i];
+                (show_hidden || !e.hidden) && (needle.is_empty() || e.name.to_lowercase().contains(&needle))
+            })
             .collect();
         let (entries, sort) = (&self.entries, self.sort);
         self.rows.sort_by(|&a, &b| compare(entries, sort, a, b));
@@ -389,6 +418,8 @@ pub struct LumenApp {
     /// Watches the folder on screen; changes schedule a refresh.
     watcher: Watcher,
     refresh: RefreshTimer,
+    /// Side panel toggled with Space.
+    preview_open: bool,
 }
 
 /// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
@@ -423,6 +454,7 @@ impl LumenApp {
                 move || ctx.request_repaint()
             }),
             refresh: RefreshTimer::default(),
+            preview_open: false,
         };
         app.navigate(ctx, start, None);
         app
@@ -650,9 +682,17 @@ impl LumenApp {
             Action::FocusPathBar => self.path_bar.request_focus(),
             Action::ToggleHidden => self.view.toggle_hidden(),
             Action::Activate => self.activate_selected(ctx),
-            Action::GoParent => self.go_parent(ctx),
+            Action::GoParent => {
+                if !self.view.pop_filter() {
+                    self.go_parent(ctx);
+                }
+            }
             Action::Move(_) | Action::First | Action::Last => self.view.move_selection(action),
-            Action::TypeChar(c) => self.view.type_char(c, Instant::now()),
+            // A leading Space is the preview key; after other text it is just a space.
+            Action::TypeChar(' ') if self.view.filter().is_empty() => {
+                self.preview_open = !self.preview_open;
+            }
+            Action::TypeChar(c) => self.view.push_filter(c),
             Action::Back => self.go_history(ctx, NavKind::Back),
             Action::Forward => self.go_history(ctx, NavKind::Forward),
             Action::Trash => self.ask_trash(),
@@ -661,8 +701,11 @@ impl LumenApp {
             Action::Copy => self.set_clipboard(Mode::Copy),
             Action::Cut => self.set_clipboard(Mode::Move),
             Action::Paste => self.paste(ctx),
+            // Clearing a filter is the cheaper surprise than cancelling a copy.
             Action::Cancel => {
-                if let Some(running) = &self.job {
+                if !self.view.clear_filter()
+                    && let Some(running) = &self.job
+                {
                     running.job.cancel();
                 }
             }
@@ -741,6 +784,7 @@ impl eframe::App for LumenApp {
             ui::status_bar::show(
                 ui,
                 &Status {
+                    filter: self.view.filter(),
                     item_count: self.view.rows.len(),
                     hidden_count: self.view.hidden_count(),
                     show_hidden: self.view.show_hidden,
@@ -830,6 +874,65 @@ mod tests {
         assert!(app.job.is_none());
         assert!(app.clipboard.is_some(), "still cut, ready to paste elsewhere");
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "A");
+    }
+
+    /// An app showing `dir` with `a.txt`, `b.txt` and a `sub` folder, listed synchronously.
+    fn app_in(name: &str) -> (egui::Context, LumenApp, PathBuf) {
+        let dir = crate::fs::ops::tests::fresh_fixture(name);
+        std::fs::write(dir.join("a.txt"), "A").unwrap();
+        std::fs::write(dir.join("b.txt"), "B").unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = LumenApp::new(&ctx, dir.clone(), false);
+        let entries = fs::lister::read_entries(&dir).unwrap();
+        let listing = Listing { id: 0, path: dir.clone(), result: Ok(entries), elapsed: Duration::ZERO };
+        app.view.apply_listing(listing, None);
+        (ctx, app, dir)
+    }
+
+    #[test]
+    fn space_with_an_empty_filter_toggles_the_preview_and_types_nothing() {
+        let (ctx, mut app, _) = app_in("app-space-preview");
+        assert!(!app.preview_open);
+        app.handle_action(&ctx, Action::TypeChar(' '));
+        assert!(app.preview_open);
+        assert_eq!(app.view.filter(), "");
+        app.handle_action(&ctx, Action::TypeChar(' '));
+        assert!(!app.preview_open, "the same Space closes it");
+    }
+
+    #[test]
+    fn space_after_text_is_part_of_the_filter() {
+        let (ctx, mut app, _) = app_in("app-space-filter");
+        app.handle_action(&ctx, Action::TypeChar('a'));
+        app.handle_action(&ctx, Action::TypeChar(' '));
+        assert_eq!(app.view.filter(), "a ");
+        assert!(!app.preview_open);
+    }
+
+    #[test]
+    fn backspace_erases_the_filter_before_going_up() {
+        let (ctx, mut app, dir) = app_in("app-backspace");
+        app.handle_action(&ctx, Action::TypeChar('b'));
+        app.handle_action(&ctx, Action::GoParent);
+        assert_eq!(app.view.filter(), "");
+        assert_eq!(app.select_after_load, None, "no navigation started");
+        app.handle_action(&ctx, Action::GoParent);
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(app.select_after_load, Some(name), "went up to the parent");
+    }
+
+    #[test]
+    fn escape_clears_the_filter_first_and_then_cancels_a_copy() {
+        let (ctx, mut app, dir) = app_in("app-escape");
+        app.clipboard = Some(Clip { path: dir.join("a.txt"), mode: Mode::Copy });
+        app.paste(&ctx);
+        app.handle_action(&ctx, Action::TypeChar('b'));
+        app.handle_action(&ctx, Action::Cancel);
+        assert_eq!(app.view.filter(), "");
+        assert!(!app.job.as_ref().unwrap().job.cancel_requested(), "the copy goes on");
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.job.as_ref().unwrap().job.cancel_requested());
     }
 
     #[test]
@@ -1054,63 +1157,109 @@ mod tests {
         v
     }
 
-    fn type_str(v: &mut View, text: &str, start: Instant, gap: Duration) -> Instant {
-        let mut now = start;
+    fn type_str(v: &mut View, text: &str) {
         for c in text.chars() {
-            v.type_char(c, now);
-            now += gap;
+            v.push_filter(c);
         }
-        now
     }
 
     #[test]
-    fn typing_jumps_to_first_case_insensitive_prefix_match() {
+    fn typing_filters_by_case_insensitive_contains_and_selects_the_first_match() {
         let mut v = search_view();
-        let t0 = Instant::now();
-        type_str(&mut v, "d", t0, Duration::ZERO);
-        assert_eq!(v.selected_entry().unwrap().name, "Desktop");
-        type_str(&mut v, "oc", t0 + Duration::from_millis(300), Duration::from_millis(300));
+        v.selected = Some(3); // notes.txt
+        type_str(&mut v, "Do");
+        assert_eq!(v.filter(), "Do");
+        assert_eq!(row_names(&v), ["Documents", "downloads"], "hidden .docker stays out");
         assert_eq!(v.selected_entry().unwrap().name, "Documents");
-        assert_eq!(v.scroll, Some(Scroll::Smooth));
+        assert_eq!(v.scroll, Some(Scroll::Instant));
+        type_str(&mut v, "w");
+        assert_eq!(row_names(&v), ["downloads"]);
+        // Contains, not only prefix: "top" is inside "Desktop".
+        v.clear_filter();
+        type_str(&mut v, "TOP");
+        assert_eq!(row_names(&v), ["Desktop"]);
     }
 
     #[test]
-    fn pausing_restarts_the_search() {
-        let mut v = search_view();
-        let t0 = Instant::now();
-        let after = type_str(&mut v, "do", t0, Duration::from_millis(200));
-        v.type_char('n', after + SEARCH_RESET);
-        assert_eq!(v.selected_entry().unwrap().name, "notes.txt");
+    fn a_space_after_other_characters_is_part_of_the_filter() {
+        let mut v = View::default();
+        let entries = vec![entry("my doc.txt", false), entry("mydoc.txt", false)];
+        v.apply_listing(ok_listing("/s", entries), None);
+        type_str(&mut v, "my d");
+        assert_eq!(row_names(&v), ["my doc.txt"]);
     }
 
     #[test]
-    fn no_match_keeps_the_selection() {
+    fn no_match_empties_the_list_and_the_selection() {
         let mut v = search_view();
-        let t0 = Instant::now();
-        type_str(&mut v, "no", t0, Duration::ZERO);
-        v.type_char('x', t0);
-        assert_eq!(v.selected_entry().unwrap().name, "notes.txt");
+        type_str(&mut v, "zzz");
+        assert_eq!(row_names(&v), Vec::<&str>::new());
+        assert_eq!(v.selected, None);
+        assert!(v.selected_entry().is_none());
+        assert_eq!(v.entries.len(), 5, "entries are filtered, never dropped");
     }
 
     #[test]
-    fn hidden_rows_are_not_matched_until_shown() {
+    fn backspace_erases_one_character_and_reports_when_there_was_none() {
         let mut v = search_view();
-        let t0 = Instant::now();
-        type_str(&mut v, ".d", t0, Duration::ZERO);
-        assert_eq!(v.selected_entry().unwrap().name, "Desktop", "selection unchanged");
+        type_str(&mut v, "dow");
+        assert!(v.pop_filter());
+        assert_eq!(v.filter(), "do");
+        assert_eq!(row_names(&v), ["Documents", "downloads"]);
+        assert!(v.pop_filter());
+        assert!(v.pop_filter());
+        assert_eq!(v.filter(), "");
+        assert_eq!(row_names(&v), ["Desktop", "Documents", "downloads", "notes.txt"]);
+        assert!(!v.pop_filter(), "empty filter: Backspace goes up instead");
+    }
+
+    #[test]
+    fn clearing_the_filter_keeps_the_selected_entry() {
+        let mut v = search_view();
+        type_str(&mut v, "load");
+        assert!(v.clear_filter());
+        assert_eq!(v.filter(), "");
+        assert_eq!(row_names(&v), ["Desktop", "Documents", "downloads", "notes.txt"]);
+        assert_eq!(v.selected_entry().unwrap().name, "downloads");
+        assert_eq!(v.scroll, Some(Scroll::Instant));
+        assert!(!v.clear_filter(), "nothing to clear");
+    }
+
+    #[test]
+    fn hidden_rows_are_not_matched_until_shown_and_the_filter_survives_ctrl_h() {
+        let mut v = search_view();
+        type_str(&mut v, ".d");
+        assert_eq!(row_names(&v), Vec::<&str>::new());
         v.toggle_hidden();
-        type_str(&mut v, ".d", t0 + SEARCH_RESET * 2, Duration::ZERO);
-        assert_eq!(v.selected_entry().unwrap().name, ".docker");
+        assert_eq!(v.filter(), ".d");
+        assert_eq!(row_names(&v), [".docker"]);
     }
 
     #[test]
-    fn changing_folder_restarts_the_search() {
+    fn changing_folder_clears_the_filter() {
         let mut v = search_view();
-        let t0 = Instant::now();
-        type_str(&mut v, "do", t0, Duration::ZERO);
-        v.apply_listing(ok_listing("/y", vec![entry("notes", true)]), None);
-        v.type_char('n', t0);
-        assert_eq!(v.selected_entry().unwrap().name, "notes");
+        type_str(&mut v, "do");
+        v.apply_listing(ok_listing("/y", vec![entry("notes", true), entry("a", false)]), None);
+        assert_eq!(v.filter(), "");
+        assert_eq!(row_names(&v), ["notes", "a"]);
+    }
+
+    #[test]
+    fn reloading_the_same_folder_keeps_the_filter_unless_it_hides_the_entry_to_select() {
+        let mut v = search_view();
+        type_str(&mut v, "do");
+        let mut entries: Vec<Entry> = v.entries.clone();
+        entries.push(entry("docs", true));
+        v.apply_listing(ok_listing("/home/u", entries.clone()), None);
+        assert_eq!(v.filter(), "do");
+        v.apply_listing(ok_listing("/home/u", entries.clone()), Some("docs"));
+        assert_eq!(v.filter(), "do");
+        assert_eq!(v.selected_entry().unwrap().name, "docs");
+        // A new folder or a renamed entry that does not match must still show up.
+        entries.push(entry("New Folder", true));
+        v.apply_listing(ok_listing("/home/u", entries), Some("New Folder"));
+        assert_eq!(v.filter(), "");
+        assert_eq!(v.selected_entry().unwrap().name, "New Folder");
     }
 
     fn p(path: &str) -> PathBuf {
@@ -1239,12 +1388,11 @@ mod tests {
     }
 
     #[test]
-    fn a_refresh_keeps_sort_hidden_filter_search_and_error() {
+    fn a_refresh_keeps_sort_hidden_filter_text_filter_and_error() {
         let mut v = sortable_view();
         v.sort_by(SortColumn::Size);
         v.sort_by(SortColumn::Size); // descending
-        let t0 = Instant::now();
-        v.type_char('b', t0);
+        v.push_filter('t');
         v.error = Some("Cannot copy x".into());
         v.apply_refresh(ok_listing(
             "/s",
@@ -1255,12 +1403,10 @@ mod tests {
                 file("e.txt", Some(50), None),
             ],
         ));
-        assert_eq!(row_names(&v), ["a_dir", "e.txt", "b.txt"], "size descending, hidden filtered");
+        assert_eq!(row_names(&v), ["e.txt", "b.txt"], "size descending, hidden and \"t\" filtered");
+        assert_eq!(v.filter(), "t");
         assert_eq!(v.error.as_deref(), Some("Cannot copy x"));
         assert_eq!(v.last_elapsed, Some(Duration::from_millis(3)));
-        // Still the same search word: "b" + "." finds b.txt, not a new search for ".".
-        v.type_char('.', t0 + Duration::from_millis(100));
-        assert_eq!(v.selected_entry().unwrap().name, "b.txt");
     }
 
     #[test]

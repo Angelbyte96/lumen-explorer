@@ -10,13 +10,14 @@ pub enum Action {
     Last,
     /// Enter the selected folder or open the selected file.
     Activate,
+    /// Backspace: erases a filter character, or goes up when the filter is empty.
     GoParent,
     FocusPathBar,
     ToggleHidden,
     /// Previous / next folder in the history (Alt+Left / Alt+Right).
     Back,
     Forward,
-    /// A typed character for type-to-search.
+    /// A typed character for the filter bar; a leading Space toggles the preview.
     TypeChar(char),
     /// Move the selected entry to the trash (asks first).
     Trash,
@@ -29,7 +30,7 @@ pub enum Action {
     Cut,
     /// Paste the clipboard into the current folder (Ctrl+V).
     Paste,
-    /// Stop the running copy or move (Escape).
+    /// Escape: clears the filter, else stops the running copy or move.
     Cancel,
 }
 
