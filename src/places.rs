@@ -183,8 +183,13 @@ pub fn disks() -> Vec<Mount> {
 #[cfg(windows)]
 pub fn disks() -> Vec<Mount> {
     use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
+    use windows_sys::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode};
     const DRIVE_REMOVABLE: u32 = 2;
     const DRIVE_FIXED: u32 = 3;
+    // An empty card reader would otherwise pop up a "no disk" system dialog.
+    let mut previous = 0;
+    // SAFETY: `previous` is a valid out-parameter; restored below.
+    unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, &mut previous) };
     // SAFETY: no arguments; returns a bitmask.
     let mask = unsafe { GetLogicalDrives() };
     let mut mounts = Vec::new();
@@ -217,8 +222,10 @@ pub fn disks() -> Vec<Mount> {
         }
         let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
         let volume = String::from_utf16_lossy(&name[..len]);
-        mounts.push(Mount { label: drive_label(letter, &volume), path: PathBuf::from(root) });
+        mounts.push(Mount { label: drive_label(letter, &volume, kind == DRIVE_REMOVABLE), path: PathBuf::from(root) });
     }
+    // SAFETY: restores the mode read above; the old value is not needed.
+    unsafe { SetThreadErrorMode(previous, std::ptr::null_mut()) };
     mounts
 }
 
@@ -234,9 +241,11 @@ pub fn drive_letters(mask: u32) -> Vec<char> {
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
-/// "Windows (C:)", or "Local Disk (D:)" for a drive without a volume name.
-pub fn drive_label(letter: char, volume: &str) -> String {
-    let name = if volume.trim().is_empty() { "Local Disk" } else { volume.trim() };
+/// "Windows (C:)"; without a volume name, "Local Disk (D:)" or "USB Drive (F:)"
+/// as File Explorer says.
+pub fn drive_label(letter: char, volume: &str, removable: bool) -> String {
+    let unnamed = if removable { "USB Drive" } else { "Local Disk" };
+    let name = if volume.trim().is_empty() { unnamed } else { volume.trim() };
     format!("{name} ({letter}:)")
 }
 
@@ -429,9 +438,11 @@ tmpfs /run tmpfs rw 0 0
 
     #[test]
     fn drives_are_labelled_like_file_explorer() {
-        assert_eq!(drive_label('C', "Windows"), "Windows (C:)");
-        assert_eq!(drive_label('D', ""), "Local Disk (D:)");
-        assert_eq!(drive_label('E', "  "), "Local Disk (E:)", "a blank volume name counts as none");
+        assert_eq!(drive_label('C', "Windows", false), "Windows (C:)");
+        assert_eq!(drive_label('D', "", false), "Local Disk (D:)");
+        assert_eq!(drive_label('E', "  ", false), "Local Disk (E:)", "a blank volume name counts as none");
+        assert_eq!(drive_label('F', "", true), "USB Drive (F:)");
+        assert_eq!(drive_label('F', "FOTOS", true), "FOTOS (F:)");
     }
 
     #[test]
