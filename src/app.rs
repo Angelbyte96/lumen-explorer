@@ -421,6 +421,8 @@ pub struct LumenApp {
     refresh: RefreshTimer,
     /// Side panel toggled with Space.
     preview_open: bool,
+    /// The Backspace or Esc being held started on a non-empty filter.
+    held_on_filter: bool,
     previewer: Previewer,
     /// What the panel shows: the selected entry, once its preview loads.
     preview: Option<PreviewPane>,
@@ -459,6 +461,7 @@ impl LumenApp {
             }),
             refresh: RefreshTimer::default(),
             preview_open: false,
+            held_on_filter: false,
             previewer: Previewer::new(),
             preview: None,
         };
@@ -664,6 +667,12 @@ impl LumenApp {
         }
     }
 
+    fn cancel_job(&self) {
+        if let Some(running) = &self.job {
+            running.job.cancel();
+        }
+    }
+
     /// Keeps the open panel on the selected entry, loading it again when the
     /// selection moves or the entry changes on disk.
     fn sync_preview(&mut self, ctx: &egui::Context) {
@@ -714,7 +723,16 @@ impl LumenApp {
             Action::ToggleHidden => self.view.toggle_hidden(),
             Action::Activate => self.activate_selected(ctx),
             Action::GoParent => {
-                if !self.view.pop_filter() {
+                self.held_on_filter = self.view.pop_filter();
+                if !self.held_on_filter {
+                    self.go_parent(ctx);
+                }
+            }
+            // A hold that started on the filter only erases; going up takes a new press.
+            Action::GoParentHeld => {
+                if self.held_on_filter {
+                    self.view.pop_filter();
+                } else {
                     self.go_parent(ctx);
                 }
             }
@@ -734,10 +752,14 @@ impl LumenApp {
             Action::Paste => self.paste(ctx),
             // Clearing a filter is the cheaper surprise than cancelling a copy.
             Action::Cancel => {
-                if !self.view.clear_filter()
-                    && let Some(running) = &self.job
-                {
-                    running.job.cancel();
+                self.held_on_filter = self.view.clear_filter();
+                if !self.held_on_filter {
+                    self.cancel_job();
+                }
+            }
+            Action::CancelHeld => {
+                if !self.held_on_filter {
+                    self.cancel_job();
                 }
             }
         }
@@ -969,6 +991,55 @@ mod tests {
         app.handle_action(&ctx, Action::GoParent);
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(app.select_after_load, Some(name), "went up to the parent");
+    }
+
+    #[test]
+    fn holding_backspace_stops_when_the_filter_is_empty() {
+        let (ctx, mut app, dir) = app_in("app-backspace-held");
+        app.handle_action(&ctx, Action::TypeChar('a'));
+        app.handle_action(&ctx, Action::TypeChar('b'));
+        app.handle_action(&ctx, Action::GoParent);
+        for _ in 0..3 {
+            app.handle_action(&ctx, Action::GoParentHeld);
+        }
+        assert_eq!(app.view.filter(), "");
+        assert_eq!(app.select_after_load, None, "the held key did not climb a folder");
+        app.handle_action(&ctx, Action::GoParent);
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(app.select_after_load, Some(name), "a new press goes up");
+    }
+
+    #[test]
+    fn holding_backspace_with_no_filter_still_climbs_folders() {
+        let (ctx, mut app, dir) = app_in("app-backspace-held-climb");
+        app.handle_action(&ctx, Action::GoParent);
+        app.select_after_load = None;
+        app.handle_action(&ctx, Action::GoParentHeld);
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(app.select_after_load, Some(name));
+    }
+
+    #[test]
+    fn holding_escape_clears_the_filter_without_cancelling_the_copy() {
+        let (ctx, mut app, dir) = app_in("app-escape-held");
+        app.clipboard = Some(Clip { path: dir.join("a.txt"), mode: Mode::Copy });
+        app.paste(&ctx);
+        app.handle_action(&ctx, Action::TypeChar('b'));
+        app.handle_action(&ctx, Action::Cancel);
+        app.handle_action(&ctx, Action::CancelHeld);
+        assert_eq!(app.view.filter(), "");
+        assert!(!app.job.as_ref().unwrap().job.cancel_requested(), "the copy goes on");
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.job.as_ref().unwrap().job.cancel_requested(), "a new press cancels");
+    }
+
+    #[test]
+    fn holding_escape_with_no_filter_still_cancels_the_copy() {
+        let (ctx, mut app, dir) = app_in("app-escape-held-cancel");
+        app.clipboard = Some(Clip { path: dir.join("a.txt"), mode: Mode::Copy });
+        app.paste(&ctx);
+        app.handle_action(&ctx, Action::CancelHeld);
+        assert!(app.job.as_ref().unwrap().job.cancel_requested());
     }
 
     #[test]

@@ -20,7 +20,7 @@ cargo test                     # unit tests (fixtures live in ~/pruebas-explorad
 | PageUp / PageDown | Move 20 rows |
 | Home / End | First / last entry |
 | Enter (or double click) | Enter folder / open file with the default app |
-| Backspace | Erase the last filter character, or go to the parent folder when the filter is empty |
+| Backspace | Erase the last filter character, or go to the parent folder when the filter is empty (holding it stops once the filter is empty) |
 | Ctrl+L | Edit the path bar (Enter to go, Esc to cancel; `~` is your home) |
 | Ctrl+H | Show / hide hidden files |
 | Alt+← / Alt+→ | Back / forward through visited folders |
@@ -31,7 +31,7 @@ cargo test                     # unit tests (fixtures live in ~/pruebas-explorad
 | Ctrl+Shift+N | Create "New Folder" here and rename it |
 | Ctrl+C / Ctrl+X | Copy / cut the selected entry |
 | Ctrl+V | Paste into the current folder |
-| Esc | Clear the filter; with an empty filter, cancel the copy or move in progress |
+| Esc | Clear the filter; with an empty filter, cancel the copy or move in progress (holding it never does both) |
 
 Click the Name, Size or Modified header to sort by that column; click it again to reverse. Folders always stay on top.
 
@@ -39,7 +39,7 @@ Lumen never deletes permanently: Delete moves entries to the system trash, and r
 
 Copy and paste use Lumen's own clipboard (not shared with other apps). Pasting into the same folder creates "name (copy)", "name (copy 2)"... Cut + paste moves: a rename on the same disk, or a copy followed by moving the original to the trash across disks. Copies and moves run in the background with progress in the status bar; cancelling keeps what was already copied and removes the half-written file.
 
-The preview panel follows the selection: a folder shows its contents, text and code files show their first 256 KB as plain text, PNG and JPEG images are shown scaled to fit (files up to 50 MB), and anything else shows its size, kind and date. Previews load in the background, and special files such as pipes are never opened.
+The preview panel follows the selection: a folder shows its contents, text and code files show their first 256 KB as plain text, PNG and JPEG images are shown scaled to fit (files up to 50 MB, and pictures that would need more than 192 MB of RAM are skipped), and anything else shows its size, kind and date. Previews load in the background, and special files such as pipes are never opened.
 
 The open folder reloads by itself when something changes on disk, keeping the selection and the sort order.
 

@@ -16,6 +16,9 @@ use super::lister::read_entries;
 pub const TEXT_LIMIT: usize = 256 * 1024;
 /// Image files above this size are not decoded.
 pub const IMAGE_LIMIT: u64 = 50 * 1024 * 1024;
+/// RAM the decoder may use. A small file can claim a huge picture; this still
+/// admits a 48-megapixel photo (8000 x 6000 RGBA is 183 MiB).
+pub const IMAGE_MEMORY_LIMIT: u64 = 192 * 1024 * 1024;
 /// Decoded images are scaled down so their longest side fits this.
 pub const IMAGE_MAX_SIDE: u32 = 2048;
 
@@ -56,6 +59,7 @@ pub fn load(path: &Path) -> Content {
         }
         return match decode_image(path) {
             Ok(picture) => Content::Image(picture),
+            Err(image::ImageError::Limits(_)) => Content::Info("Image too large to preview".into()),
             Err(err) => Content::Info(format!("Cannot read image: {err}")),
         };
     }
@@ -74,8 +78,12 @@ fn is_image(path: &Path) -> bool {
 
 fn decode_image(path: &Path) -> Result<Picture, image::ImageError> {
     // The format comes from the bytes, so a PNG named .jpg still works. The
-    // decoder's default limits refuse images that would need over 512 MB.
-    let mut image = image::ImageReader::open(path)?.with_guessed_format()?.decode()?;
+    // size in the header is checked against the limit before any pixel is read.
+    let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(IMAGE_MEMORY_LIMIT);
+    reader.limits(limits);
+    let mut image = reader.decode()?;
     let original = [image.width(), image.height()];
     if original.iter().any(|&side| side > IMAGE_MAX_SIDE) {
         image = image.thumbnail(IMAGE_MAX_SIDE, IMAGE_MAX_SIDE);
@@ -273,6 +281,47 @@ mod tests {
         assert_eq!(info_of(load(&dir.join("huge.png"))), "Image larger than 50 MB: no preview");
         std::fs::write(dir.join("broken.jpeg"), b"not really a jpeg").unwrap();
         assert!(info_of(load(&dir.join("broken.jpeg"))).starts_with("Cannot read image: "));
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
+
+    /// A PNG whose header claims `width` x `height` (8-bit, `color` type), with
+    /// no real pixel data: enough to test the size check without the memory.
+    fn png_header_only(path: &Path, width: u32, height: u32, color: u8) {
+        let mut ihdr = b"IHDR".to_vec();
+        ihdr.extend(width.to_be_bytes());
+        ihdr.extend(height.to_be_bytes());
+        ihdr.extend([8, color, 0, 0, 0]);
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        // The decoder reads up to the first data chunk before it knows the size.
+        for chunk in [ihdr, b"IDAT".to_vec(), b"IEND".to_vec()] {
+            png.extend((chunk.len() as u32 - 4).to_be_bytes());
+            png.extend(&chunk);
+            png.extend(crc32(&chunk).to_be_bytes());
+        }
+        std::fs::write(path, png).unwrap();
+    }
+
+    #[test]
+    fn images_that_would_take_too_much_memory_are_refused_before_decoding() {
+        let dir = fresh_fixture("preview-bomb");
+        // 7200 x 7200 RGBA needs 207 MB of RAM, over the limit.
+        png_header_only(&dir.join("bomb.png"), 7200, 7200, 6);
+        assert_eq!(info_of(load(&dir.join("bomb.png"))), "Image too large to preview");
+        // A 48-megapixel photo (8000 x 6000 RGB, 144 MB) is still accepted:
+        // here it fails later, only because the pixel data is missing.
+        png_header_only(&dir.join("photo.png"), 8000, 6000, 2);
+        let reason = info_of(load(&dir.join("photo.png")));
+        assert!(reason.starts_with("Cannot read image: "), "{reason}");
     }
 
     #[test]

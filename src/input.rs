@@ -12,6 +12,8 @@ pub enum Action {
     Activate,
     /// Backspace: erases a filter character, or goes up when the filter is empty.
     GoParent,
+    /// Backspace held down (key repeat).
+    GoParentHeld,
     FocusPathBar,
     ToggleHidden,
     /// Previous / next folder in the history (Alt+Left / Alt+Right).
@@ -32,6 +34,8 @@ pub enum Action {
     Paste,
     /// Escape: clears the filter, else stops the running copy or move.
     Cancel,
+    /// Escape held down (key repeat).
+    CancelHeld,
 }
 
 /// Answer to an open confirmation dialog.
@@ -101,10 +105,8 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
             (Key::Home, Action::First),
             (Key::End, Action::Last),
             (Key::Enter, Action::Activate),
-            (Key::Backspace, Action::GoParent),
             (Key::Delete, Action::Trash),
             (Key::F2, Action::Rename),
-            (Key::Escape, Action::Cancel),
         ];
         // egui ignores extra Shift/Alt when matching, so Shift+Arrow would act
         // like a plain arrow. Require no modifiers; those combos are reserved.
@@ -113,6 +115,20 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
                 // Counts key-repeat events too (holding an arrow).
                 let presses = i.count_and_consume_key(Modifiers::NONE, key);
                 actions.extend(std::iter::repeat_n(action, presses));
+            }
+            // These act on the filter first; the app must know a held key from
+            // a new press so holding one does not run past an emptied filter.
+            for (key, press, held) in [
+                (Key::Backspace, Action::GoParent, Action::GoParentHeld),
+                (Key::Escape, Action::Cancel, Action::CancelHeld),
+            ] {
+                i.events.retain(|event| match event {
+                    Event::Key { key: k, pressed: true, repeat, .. } if *k == key => {
+                        actions.push(if *repeat { held } else { press });
+                        false
+                    }
+                    _ => true,
+                });
             }
         }
         let m = i.modifiers;
@@ -291,6 +307,18 @@ mod tests {
         assert_eq!(confirm_for(vec![key(Key::Enter, Modifiers::NONE)]), Some(Confirm::Yes));
         assert_eq!(confirm_for(vec![key(Key::Escape, Modifiers::NONE)]), Some(Confirm::No));
         assert_eq!(confirm_for(vec![key(Key::ArrowDown, Modifiers::NONE)]), None);
+    }
+
+    fn repeat(key: Key) -> Event {
+        Event::Key { key, physical_key: None, pressed: true, repeat: true, modifiers: Modifiers::NONE }
+    }
+
+    #[test]
+    fn held_backspace_and_escape_are_told_apart_from_a_fresh_press() {
+        let held = vec![key(Key::Backspace, Modifiers::NONE), repeat(Key::Backspace), repeat(Key::Backspace)];
+        assert_eq!(actions_for(held), [Action::GoParent, Action::GoParentHeld, Action::GoParentHeld]);
+        let held = vec![key(Key::Escape, Modifiers::NONE), repeat(Key::Escape)];
+        assert_eq!(actions_for(held), [Action::Cancel, Action::CancelHeld]);
     }
 
     #[test]
