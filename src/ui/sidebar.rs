@@ -32,6 +32,14 @@ pub fn usage_text(usage: &Usage) -> String {
     format!("{} free of {}", format_size(usage.free), format_size(usage.total))
 }
 
+/// A disk row's tooltip: where it is mounted and, when known, its free space.
+pub fn disk_hint(path: &Path, usage: Option<&Usage>) -> String {
+    match usage {
+        Some(usage) => format!("{}\n{}", path.display(), usage_text(usage)),
+        None => path.display().to_string(),
+    }
+}
+
 /// Share of the disk in use, 0.0 to 1.0, for the bar under its name.
 pub fn used_fraction(usage: &Usage) -> f32 {
     if usage.total == 0 {
@@ -55,7 +63,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
                 ui.weak("Ctrl+D or ☆ adds the folder you are in");
             }
             for path in sidebar.bookmarks {
-                let response = item(ui, ItemIcon::Folder, &label_of(path), path, sidebar.current);
+                let response = item(ui, ItemIcon::Folder, &label_of(path), &path.display().to_string(), path, sidebar.current);
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(path.clone()));
                 }
@@ -70,26 +78,28 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
         section(ui, "Places", true, |ui| {
             for place in sidebar.places {
                 let icon = if place.trash { ItemIcon::Glyph(TRASH) } else { ItemIcon::Folder };
-                if item(ui, icon, &place.label, &place.path, sidebar.current).clicked() {
+                if item(ui, icon, &place.label, &place.path.display().to_string(), &place.path, sidebar.current).clicked() {
                     event = Some(SidebarEvent::Open(place.path.clone()));
                 }
             }
         });
         section(ui, "Storage", true, |ui| {
             for (mount, usage) in sidebar.disks {
-                let response = item(ui, ItemIcon::Glyph(DISK), &mount.label, &mount.path, sidebar.current);
+                // The bar is only 4 px tall: the whole row tells the free space too.
+                let hint = disk_hint(&mount.path, usage.as_ref());
+                let response = item(ui, ItemIcon::Glyph(DISK), &mount.label, &hint, &mount.path, sidebar.current);
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(mount.path.clone()));
                 }
                 if let Some(usage) = usage {
                     let bar = egui::ProgressBar::new(used_fraction(usage)).desired_height(4.0);
-                    ui.add(bar).on_hover_text(usage_text(usage));
+                    ui.add(bar).on_hover_text(hint);
                 }
             }
         });
         section(ui, "Recents", false, |ui| {
             for path in sidebar.recents {
-                if item(ui, ItemIcon::Folder, &label_of(path), path, sidebar.current).clicked() {
+                if item(ui, ItemIcon::Folder, &label_of(path), &path.display().to_string(), path, sidebar.current).clicked() {
                     event = Some(SidebarEvent::Open(path.clone()));
                 }
             }
@@ -109,8 +119,8 @@ enum ItemIcon {
     Glyph(&'static str),
 }
 
-/// One clickable row; the folder on screen is highlighted. The full path shows on hover.
-fn item(ui: &mut egui::Ui, icon: ItemIcon, label: &str, path: &Path, current: &Path) -> egui::Response {
+/// One clickable row; the folder on screen is highlighted. `hint` shows on hover.
+fn item(ui: &mut egui::Ui, icon: ItemIcon, label: &str, hint: &str, path: &Path, current: &Path) -> egui::Response {
     let selected = path == current;
     let inner = ui.horizontal(|ui| {
         match icon {
@@ -123,7 +133,7 @@ fn item(ui: &mut egui::Ui, icon: ItemIcon, label: &str, path: &Path, current: &P
         }
         ui.add(egui::Button::selectable(selected, label).frame_when_inactive(false))
     });
-    inner.inner.on_hover_text(path.display().to_string())
+    inner.inner.on_hover_text(hint)
 }
 
 #[cfg(test)]
@@ -137,5 +147,13 @@ mod tests {
         assert_eq!(usage_text(&usage), "120.0 GB free of 465.0 GB");
         assert!((used_fraction(&usage) - 345.0 / 465.0).abs() < 1e-6);
         assert_eq!(used_fraction(&Usage { total: 0, free: 0 }), 0.0, "an empty disk is not NaN");
+    }
+
+    #[test]
+    fn a_disk_row_tells_its_free_space_not_only_its_thin_bar() {
+        let gb = 1024u64.pow(3);
+        let usage = Usage { total: 465 * gb, free: 120 * gb };
+        assert_eq!(disk_hint(Path::new("/"), Some(&usage)), "/\n120.0 GB free of 465.0 GB");
+        assert_eq!(disk_hint(Path::new("/mnt/data"), None), "/mnt/data", "usage not read yet");
     }
 }
