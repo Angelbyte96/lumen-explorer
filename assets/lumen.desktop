@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Lumen
+GenericName=File Explorer
+Comment=A fast, lightweight, keyboard-first file explorer
+Exec=lumen %f
+Icon=lumen
+Terminal=false
+Categories=System;FileTools;FileManager;
+MimeType=inode/directory;
+Keywords=files;folders;explorer;browser;
+StartupWMClass=lumen
