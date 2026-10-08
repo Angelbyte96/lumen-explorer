@@ -102,9 +102,11 @@ pub fn show(
                 let entry = &entries[rows[i]];
                 row.set_selected(selected == Some(i));
                 row.col(|ui| {
-                    // Cells stack top-down: keep the icon and the name on one line,
-                    // or the name lands below the row and gets clipped out of view.
-                    ui.horizontal(|ui| {
+                    // Icon and name on one line as tall as the row, centred in it:
+                    // a plain `horizontal` is one text line tall, so a zoomed icon
+                    // would hang below the row and be clipped (and the name with it).
+                    let line = egui::vec2(ui.available_width(), row_height);
+                    ui.allocate_ui_with_layout(line, egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         icons::show(ui, entry, icon);
                         if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
                             if let Some(submit) = rename_field(ui, edit) {
@@ -285,6 +287,44 @@ mod tests {
         assert!(sides.windows(2).all(|w| w[0] < w[1]), "each level is bigger: {sides:?}");
         assert_eq!(icon_side(MAX_ZOOM, text), 4.0 * text);
         assert_eq!(icon_side(MAX_ZOOM + 3, text), icon_side(MAX_ZOOM, text), "never past the limit");
+    }
+
+    /// Where each text and the icon of the first row were painted, at `zoom`.
+    fn painted(zoom: u8) -> Vec<egui::epaint::ClippedShape> {
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        (view.entries, view.rows) = (vec![entry("a.txt")], vec![0]);
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                show(ui, &view, zoom, None, None);
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        shapes
+    }
+
+    #[test]
+    fn zoomed_names_stay_level_with_the_other_columns_and_icons_are_whole() {
+        for zoom in 0..=MAX_ZOOM {
+            let shapes = painted(zoom);
+            let y = |text: &str| {
+                shapes.iter().find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos.y + t.galley.rect.center().y),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{text:?} painted"))
+            };
+            assert!((y("a.txt") - y("TXT file")).abs() < 1.5, "zoom {zoom}: name off its row");
+            // The icon: small shapes in the Name column, none cut by the row's clip.
+            for s in shapes.iter().filter(|s| !matches!(s.shape, egui::Shape::Text(_)) && s.clip_rect.min.x < 20.0) {
+                let b = s.shape.visual_bounding_rect();
+                if b.is_finite() && b.width() < 80.0 {
+                    assert!(b.max.y <= s.clip_rect.max.y + 0.5, "zoom {zoom}: icon clipped {b:?} by {:?}", s.clip_rect);
+                }
+            }
+        }
     }
 
     #[test]

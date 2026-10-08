@@ -163,6 +163,28 @@ mod tests {
     }
 
     #[test]
+    fn a_click_on_the_crumb_bar_keeps_the_path() {
+        use crate::ui::testing::{click, frame};
+        use eframe::egui::{Event, Key, Modifiers};
+        let enter = Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        let ctx = egui::Context::default();
+        let mut bar = PathBar::default();
+        let nav = Nav {
+            current: Path::new("/home/u/Descargas"),
+            home: Some(Path::new("/home/u")),
+            can_back: false,
+            can_forward: false,
+            bookmarked: false,
+        };
+        frame(&ctx, vec![], |ui| show(ui, &nav, &mut bar));
+        click(&ctx, egui::pos2(700.0, 18.0), |ui| show(ui, &nav, &mut bar));
+        frame(&ctx, vec![], |ui| show(ui, &nav, &mut bar));
+        frame(&ctx, vec![Event::Text("/x".into())], |ui| show(ui, &nav, &mut bar));
+        let typed = frame(&ctx, vec![enter], |ui| show(ui, &nav, &mut bar));
+        assert_eq!(typed, Some(ToolbarEvent::Typed("/home/u/Descargas/x".into())));
+    }
+
+    #[test]
     fn inside_home_the_crumbs_start_at_it() {
         assert_eq!(
             labels("/home/u/Descargas/fotos", Some("/home/u")),

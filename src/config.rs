@@ -288,6 +288,13 @@ bookmark =
     }
 
     #[test]
+    fn an_older_file_without_list_zoom_loads_unchanged() {
+        let c = Config::parse("sort = size desc\nsidebar = false\nbookmark = /srv\n");
+        assert_eq!((c.list_zoom, c.sidebar, c.bookmarks.len()), (0, false, 1));
+        assert_eq!(Config::parse("list_zoom = 255").list_zoom, 0);
+    }
+
+    #[test]
     fn a_list_zoom_out_of_range_keeps_the_normal_size() {
         assert_eq!(Config::parse("list_zoom = 4").list_zoom, 4);
         assert_eq!(Config::parse("list_zoom = 5").list_zoom, 0, "above MAX_ZOOM");
