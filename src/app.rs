@@ -722,7 +722,14 @@ impl LumenApp {
         let path = entry.path.clone();
         if entry.is_dir {
             self.navigate(ctx, path, None);
-        } else if let Err(err) = open::that_detached(&path) {
+        } else {
+            self.open_file(&path);
+        }
+    }
+
+    /// Opens a file with its default app (Enter in the list or the path box).
+    fn open_file(&mut self, path: &Path) {
+        if let Err(err) = open::that_detached(path) {
             self.tab.view.error = Some(format!("Cannot open {}: {err}", path.display()));
         }
     }
@@ -1003,6 +1010,7 @@ impl LumenApp {
                 }
                 self.navigate(ctx, path, select);
             }
+            PopupEvent::Open(path) => self.open_file(&path),
             PopupEvent::Back => self.go_history(ctx, NavKind::Back),
             PopupEvent::Forward => self.go_history(ctx, NavKind::Forward),
         }
