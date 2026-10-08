@@ -272,6 +272,8 @@ XDG_VIDEOS_DIR="$HOME/Vídeos"
         let get = |key: &str| dirs.iter().find(|(k, _)| k == key).map(|(_, p)| p.clone());
         assert_eq!(get("DOWNLOAD"), Some(PathBuf::from("/home/u/Descargas")));
         assert_eq!(get("VIDEOS"), Some(PathBuf::from("/home/u/Vídeos")));
+        // An XDG file only exists on Linux, where /media/fotos is absolute.
+        #[cfg(unix)]
         assert_eq!(get("PICTURES"), Some(PathBuf::from("/media/fotos")), "absolute paths stay");
         assert_eq!(get("MUSIC"), None, "set to home itself: disabled");
         assert_eq!(get("TEMPLATES"), Some(PathBuf::from("/home/u/Plantillas")));

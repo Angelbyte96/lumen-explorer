@@ -421,7 +421,7 @@ fn copy_link(from: &Path, to: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::ops::tests::{fresh_fixture, purge_trashed_from};
+    use crate::fs::ops::tests::{as_trashed, fresh_fixture, purge_trashed_from};
 
     fn os(s: &str) -> &OsStr {
         OsStr::new(s)
@@ -436,14 +436,7 @@ mod tests {
     }
 
     fn in_trash(dir: &Path) -> Vec<String> {
-        let mut names: Vec<_> = trash::os_limited::list()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|item| item.original_parent == dir)
-            .map(|item| item.name.to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        names
+        crate::fs::ops::tests::trashed_names_from(dir)
     }
 
     #[test]
@@ -643,7 +636,7 @@ mod tests {
         assert_eq!(done, Ok(Outcome::Done));
         assert_same_tree(&dir.join("moved"));
         assert!(!src.exists());
-        assert_eq!(in_trash(&dir), ["src"], "the original is recoverable");
+        assert_eq!(in_trash(&dir), as_trashed(&["src"]), "the original is recoverable");
         purge_trashed_from(&dir);
     }
 
@@ -667,7 +660,7 @@ mod tests {
         assert_eq!(done, Ok(Outcome::Done));
         assert_eq!(read(&dir.join("dst/a.txt")), "new");
         assert_eq!(read(&dir.join("a.txt")), "new", "copy keeps the source");
-        assert_eq!(in_trash(&dir.join("dst")), ["a.txt"]);
+        assert_eq!(in_trash(&dir.join("dst")), as_trashed(&["a.txt"]));
         purge_trashed_from(&dir.join("dst"));
     }
 

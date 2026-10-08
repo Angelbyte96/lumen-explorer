@@ -183,7 +183,8 @@ mod tests {
     fn fixture(name: &str) -> PathBuf {
         let root = crate::fs::home_dir()
             .expect("HOME must be set")
-            .join("pruebas-explorador/test-fixtures")
+            .join("pruebas-explorador")
+            .join("test-fixtures")
             .join(name);
         std::fs::create_dir_all(&root).unwrap();
         root
