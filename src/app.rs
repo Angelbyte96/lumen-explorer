@@ -1181,6 +1181,7 @@ impl LumenApp {
                 self.preview_open = !self.preview_open;
             }
             Action::TypeChar(c) => self.tab.view.push_filter(c),
+            Action::Up => self.go_parent(ctx),
             Action::Back => self.go_history(ctx, NavKind::Back),
             Action::Forward => self.go_history(ctx, NavKind::Forward),
             Action::Trash => self.ask_trash(),
@@ -1511,6 +1512,16 @@ mod tests {
         app.handle_action(&ctx, Action::GoParent);
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(app.tab.select_after_load, Some(name), "went up to the parent");
+    }
+
+    #[test]
+    fn alt_up_goes_to_the_parent_even_with_filter_text() {
+        let (ctx, mut app, dir) = app_in("app-alt-up");
+        app.handle_action(&ctx, Action::TypeChar('a'));
+        app.handle_action(&ctx, Action::Up);
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(app.tab.select_after_load, Some(name), "went up, selecting the folder it came from");
+        assert_eq!(app.tab.view.filter(), "a", "the filter is not edited");
     }
 
     #[test]

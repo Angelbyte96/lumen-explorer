@@ -14,6 +14,8 @@ pub enum Action {
     GoParent,
     /// Backspace held down (key repeat).
     GoParentHeld,
+    /// Alt+Up: the parent folder, whatever the filter holds.
+    Up,
     FocusPathBar,
     ToggleHidden,
     /// Previous / next folder in the history (Alt+Left / Alt+Right).
@@ -159,6 +161,9 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
         if i.consume_key(Modifiers::ALT, Key::ArrowRight) {
             actions.push(Action::Forward);
         }
+        if i.consume_key(Modifiers::ALT, Key::ArrowUp) {
+            actions.push(Action::Up);
+        }
         if i.consume_key(Modifiers::ALT, Key::R) {
             actions.push(Action::Count);
         }
@@ -299,6 +304,13 @@ mod tests {
             key(Key::ArrowRight, Modifiers::NONE),
         ]);
         assert_eq!(actions, []);
+    }
+
+    #[test]
+    fn alt_up_goes_to_the_parent_and_a_plain_up_still_moves() {
+        let actions = actions_for(vec![Event::ModifiersChanged(Modifiers::ALT), key(Key::ArrowUp, Modifiers::ALT)]);
+        assert_eq!(actions, [Action::Up]);
+        assert_eq!(actions_for(vec![key(Key::ArrowUp, Modifiers::NONE)]), [Action::Move(-1)]);
     }
 
     #[test]
