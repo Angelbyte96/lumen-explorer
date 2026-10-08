@@ -117,7 +117,9 @@ pub(crate) mod tests {
     pub(crate) fn fresh_fixture(name: &str) -> PathBuf {
         let dir = crate::fs::home_dir()
             .expect("HOME must be set")
-            .join("pruebas-explorador/test-fixtures/ops")
+            .join("pruebas-explorador")
+            .join("test-fixtures")
+            .join("ops")
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -134,13 +136,29 @@ pub(crate) mod tests {
         let _ = trash::os_limited::purge_all(items);
     }
 
-    fn trashed_names_from(dir: &Path) -> Vec<String> {
-        trash::os_limited::list()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|item| item.original_parent == dir)
-            .map(|item| item.name.to_string_lossy().into_owned())
-            .collect()
+    /// Names of this fixture's items in the trash, sorted, as `as_trashed` gives them.
+    pub(crate) fn trashed_names_from(dir: &Path) -> Vec<String> {
+        let items = trash::os_limited::list().unwrap_or_default();
+        let names = items.iter().filter(|item| item.original_parent == dir).map(|item| item.name.to_string_lossy());
+        as_trashed(&names.collect::<Vec<_>>())
+    }
+
+    /// `names` sorted and, on Windows, without extensions: the Recycle Bin
+    /// reports names the way Explorer shows them, which may hide extensions.
+    pub(crate) fn as_trashed<S: AsRef<str>>(names: &[S]) -> Vec<String> {
+        let mut names: Vec<String> = names
+            .iter()
+            .map(|name| {
+                let name = name.as_ref();
+                if cfg!(windows) {
+                    Path::new(name).file_stem().map_or(name.into(), |s| s.to_string_lossy().into_owned())
+                } else {
+                    name.to_owned()
+                }
+            })
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]
@@ -154,9 +172,7 @@ pub(crate) mod tests {
 
         assert!(!dir.join("old.txt").exists());
         assert!(!dir.join("old_dir").exists());
-        let mut in_trash = trashed_names_from(&dir);
-        in_trash.sort();
-        assert_eq!(in_trash, ["old.txt", "old_dir"], "recoverable, not deleted");
+        assert_eq!(trashed_names_from(&dir), as_trashed(&["old.txt", "old_dir"]), "recoverable, not deleted");
         purge_trashed_from(&dir);
     }
 
@@ -225,7 +241,7 @@ pub(crate) mod tests {
         assert_eq!(done, Renamed::To(dir.join("b.txt")));
         assert!(!dir.join("a.txt").exists());
         assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "A");
-        assert_eq!(trashed_names_from(&dir), ["b.txt"], "old b.txt is recoverable");
+        assert_eq!(trashed_names_from(&dir), as_trashed(&["b.txt"]), "old b.txt is recoverable");
         purge_trashed_from(&dir);
     }
 
@@ -280,7 +296,7 @@ pub(crate) mod tests {
         rename(&dir.join("src"), "dst", true).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("dst/s")).unwrap(), "S");
         assert!(!dir.join("dst/k").exists());
-        assert_eq!(trashed_names_from(&dir), ["dst"]);
+        assert_eq!(trashed_names_from(&dir), as_trashed(&["dst"]));
         purge_trashed_from(&dir);
     }
 
@@ -306,7 +322,7 @@ pub(crate) mod tests {
         assert_eq!(rename(&dir.join("a.txt"), "b.txt", false), Ok(Renamed::TargetExists));
         assert_eq!(rename(&dir.join("a.txt"), "b.txt", true), Ok(Renamed::To(dir.join("b.txt"))));
         assert!(!dir.join("a.txt").exists(), "rename(2) between hard links would keep both");
-        assert_eq!(trashed_names_from(&dir), ["b.txt"]);
+        assert_eq!(trashed_names_from(&dir), as_trashed(&["b.txt"]));
         purge_trashed_from(&dir);
     }
 }

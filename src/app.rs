@@ -1733,15 +1733,22 @@ mod tests {
     }
 
     #[test]
-    fn a_settings_path_through_a_file_is_reported_at_startup() {
+    fn a_settings_path_through_a_file_is_reported() {
         let (ctx, _, dir) = app_in("app-config-blocked");
         std::fs::write(dir.join("blocker"), "not a folder").unwrap();
         let path = dir.join("blocker/lumen/config");
         let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path)));
         app.handle_action(&ctx, Action::ToggleHidden);
         app.save_settings(false);
-        let error = app.tab.error_after_load.clone().expect("told once the folder lists");
-        assert!(error.starts_with("Cannot read settings"), "{error}");
+        // Linux refuses to read through a file (ENOTDIR). Windows reports it as
+        // missing, so the problem shows up when the change is saved instead.
+        let error = if cfg!(unix) {
+            app.tab.error_after_load.clone().expect("told once the folder lists")
+        } else {
+            app.tab.view.error.clone().expect("told when saving")
+        };
+        let told = if cfg!(unix) { "Cannot read settings" } else { "Cannot save settings" };
+        assert!(error.starts_with(told), "{error}");
         assert_eq!(std::fs::read_to_string(dir.join("blocker")).unwrap(), "not a folder");
     }
 
