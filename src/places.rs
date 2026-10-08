@@ -95,7 +95,7 @@ fn named_user_dirs(text: &str, home: &Path) -> Vec<(String, Option<PathBuf>)> {
             let value = value.trim().trim_matches('"');
             let path = match value.strip_prefix("$HOME") {
                 Some(rest) => home.join(rest.trim_start_matches('/')),
-                None if value.starts_with('/') => PathBuf::from(value),
+                None if Path::new(value).is_absolute() => PathBuf::from(value),
                 None => return None,
             };
             Some((key.to_owned(), (path != home).then_some(path)))

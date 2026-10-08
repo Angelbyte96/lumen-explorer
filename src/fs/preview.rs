@@ -325,6 +325,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // FIFOs
     fn special_files_are_never_opened() {
         let dir = fresh_fixture("preview-fifo");
         let made = std::process::Command::new("mkfifo").arg(dir.join("pipe")).status();

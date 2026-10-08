@@ -786,6 +786,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // FIFOs
     fn a_fifo_does_not_block_the_copy() {
         let dir = fresh_fixture("xfer-fifo");
         std::fs::create_dir(dir.join("src")).unwrap();
@@ -803,6 +804,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // FIFOs
     fn special_files_are_reported_not_opened() {
         let dir = fresh_fixture("xfer-special");
         std::fs::create_dir(dir.join("src")).unwrap();
