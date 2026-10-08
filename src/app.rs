@@ -77,7 +77,8 @@ pub struct View {
     /// Set when the selection changed via keyboard, so the table scrolls to it.
     pub scroll: Option<Scroll>,
     /// What was typed in the filter bar; rows must contain each of its words,
-    /// in any order, ignoring case (like the Ctrl+L box).
+    /// in any order, ignoring case (like the Ctrl+L box). A name equal to it
+    /// is listed first.
     filter: String,
     /// Folder totals computed with Alt+R, by entry name. Kept while the folder
     /// stays on screen, dropped when another folder is shown.
@@ -267,6 +268,9 @@ pub fn visible_rows(
         _ => Vec::new(),
     };
     rows.sort_by(|&a, &b| compare(entries, totals, &kinds, sort, a, b));
+    // The name typed in full goes above the partial matches (a stable sort,
+    // so those keep the column order).
+    rows.sort_by_key(|&i| !crate::ui::path_popup::is_exact(&entries[i].name, filter));
     rows
 }
 
@@ -2390,6 +2394,20 @@ mod tests {
         v.clear_filter();
         type_str(&mut v, "TOP");
         assert_eq!(row_names(&v), ["Desktop"]);
+    }
+
+    #[test]
+    fn an_exact_name_comes_first_and_partial_matches_keep_the_sort() {
+        let mut v = View { sort: Sort { column: SortColumn::Name, descending: true }, ..View::default() };
+        let entries = vec![entry("f6", true), entry("f6-config", true), entry("verify-f6", true), entry("f6.png", false)];
+        v.apply_listing(ok_listing("/p", entries), None);
+        type_str(&mut v, "F6");
+        assert_eq!(row_names(&v), ["f6", "verify-f6", "f6-config", "f6.png"]);
+        assert_eq!(v.selected_entry().unwrap().name, "f6", "the exact match is selected");
+        type_str(&mut v, " -");
+        assert_eq!(row_names(&v), ["verify-f6", "f6-config"], "no exact match: just the sort");
+        v.clear_filter();
+        assert_eq!(row_names(&v), ["verify-f6", "f6-config", "f6", "f6.png"], "no filter: just the sort");
     }
 
     #[test]
