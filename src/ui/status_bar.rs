@@ -147,12 +147,14 @@ pub fn counting_text(name: &str, totals: &Totals) -> String {
 }
 
 /// "Copying 3/10 — 45%": files done of total, then share of bytes.
-pub fn progress_text(mode: Mode, progress: &Progress) -> String {
+/// `item` is which entry of a several-entry paste is running, and of how many.
+pub fn progress_text(mode: Mode, progress: &Progress, item: Option<(usize, usize)>) -> String {
     let verb = match mode {
         Mode::Copy => "Copying",
         Mode::Move => "Moving",
     };
-    format!("{verb} {}/{} — {}%", progress.files_done, progress.files_total, progress.percent())
+    let item = item.map(|(n, total)| format!("item {n} of {total}: ")).unwrap_or_default();
+    format!("{verb} {item}{}/{} — {}%", progress.files_done, progress.files_total, progress.percent())
 }
 
 #[cfg(test)]
@@ -198,6 +200,13 @@ mod tests {
             _ => None,
         });
         (text, cursor)
+    }
+
+    #[test]
+    fn a_paste_of_several_items_says_which_one_is_running() {
+        let p = Progress { files_done: 1, files_total: 4, bytes_done: 50, bytes_total: 100 };
+        assert_eq!(progress_text(Mode::Copy, &p, None), "Copying 1/4 — 50%");
+        assert_eq!(progress_text(Mode::Move, &p, Some((2, 5))), "Moving item 2 of 5: 1/4 — 50%");
     }
 
     #[test]
@@ -309,7 +318,7 @@ mod tests {
     #[test]
     fn progress_reads_files_then_percent() {
         let p = Progress { files_done: 3, files_total: 10, bytes_done: 45, bytes_total: 100 };
-        assert_eq!(progress_text(Mode::Copy, &p), "Copying 3/10 — 45%");
-        assert_eq!(progress_text(Mode::Move, &Progress::default()), "Moving 0/0 — 100%");
+        assert_eq!(progress_text(Mode::Copy, &p, None), "Copying 3/10 — 45%");
+        assert_eq!(progress_text(Mode::Move, &Progress::default(), None), "Moving 0/0 — 100%");
     }
 }
