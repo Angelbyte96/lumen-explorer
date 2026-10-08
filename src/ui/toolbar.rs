@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
-use crate::ui::path_bar::PathBar;
 
 pub const BACK: &str = "⏴";
 pub const FORWARD: &str = "⏵";
@@ -34,8 +33,8 @@ pub enum ToolbarEvent {
     ToggleBookmark,
     /// A crumb was clicked.
     Go(PathBuf),
-    /// Text typed in the path field, confirmed with Enter.
-    Typed(String),
+    /// Ctrl+L's box: a click on the empty part of the crumb bar.
+    EditPath,
 }
 
 /// One clickable piece of the path.
@@ -71,7 +70,7 @@ pub fn crumbs(path: &Path, home: Option<&Path>) -> Vec<Crumb> {
     crumbs
 }
 
-pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>, path_bar: &mut PathBar) -> Option<ToolbarEvent> {
+pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
     let mut event = None;
     ui.horizontal(|ui| {
         let toggle = egui::Button::new(egui::RichText::new(crate::ui::sidebar::TOGGLE).size(16.0)).frame(false);
@@ -101,13 +100,7 @@ pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>, path_bar: &mut PathBar) -> Option<
             event = Some(ToolbarEvent::ToggleBookmark);
         }
         ui.separator();
-        if path_bar.is_editing(ui.ctx()) {
-            if let Some(text) = path_bar.show(ui, nav.current) {
-                event = Some(ToolbarEvent::Typed(text));
-            }
-            return;
-        }
-        if let Some(go) = crumb_bar(ui, nav, path_bar) {
+        if let Some(go) = crumb_bar(ui, nav) {
             event = Some(go);
         }
     });
@@ -115,7 +108,7 @@ pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>, path_bar: &mut PathBar) -> Option<
 }
 
 /// The crumbs, kept scrolled to the end so the current folder is always visible.
-fn crumb_bar(ui: &mut egui::Ui, nav: &Nav<'_>, path_bar: &mut PathBar) -> Option<ToolbarEvent> {
+fn crumb_bar(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
     let mut event = None;
     let height = ui.spacing().interact_size.y;
     let crumbs = crumbs(nav.current, nav.home);
@@ -140,7 +133,7 @@ fn crumb_bar(ui: &mut egui::Ui, nav: &Nav<'_>, path_bar: &mut PathBar) -> Option
                 let rest = egui::vec2(ui.available_width().max(40.0), height);
                 let response = ui.allocate_response(rest, egui::Sense::click());
                 if response.on_hover_text("Edit the path (Ctrl+L)").clicked() {
-                    path_bar.request_focus();
+                    event = Some(ToolbarEvent::EditPath);
                 }
             });
         });
@@ -163,12 +156,9 @@ mod tests {
     }
 
     #[test]
-    fn a_click_on_the_crumb_bar_keeps_the_path() {
+    fn a_click_on_the_empty_crumb_bar_opens_the_path_box() {
         use crate::ui::testing::{click, frame};
-        use eframe::egui::{Event, Key, Modifiers};
-        let enter = Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
         let ctx = egui::Context::default();
-        let mut bar = PathBar::default();
         let nav = Nav {
             current: Path::new("/home/u/Descargas"),
             home: Some(Path::new("/home/u")),
@@ -176,12 +166,8 @@ mod tests {
             can_forward: false,
             bookmarked: false,
         };
-        frame(&ctx, vec![], |ui| show(ui, &nav, &mut bar));
-        click(&ctx, egui::pos2(700.0, 18.0), |ui| show(ui, &nav, &mut bar));
-        frame(&ctx, vec![], |ui| show(ui, &nav, &mut bar));
-        frame(&ctx, vec![Event::Text("/x".into())], |ui| show(ui, &nav, &mut bar));
-        let typed = frame(&ctx, vec![enter], |ui| show(ui, &nav, &mut bar));
-        assert_eq!(typed, Some(ToolbarEvent::Typed("/home/u/Descargas/x".into())));
+        frame(&ctx, vec![], |ui| show(ui, &nav));
+        assert_eq!(click(&ctx, egui::pos2(700.0, 18.0), |ui| show(ui, &nav)), Some(ToolbarEvent::EditPath));
     }
 
     #[test]

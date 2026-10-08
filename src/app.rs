@@ -19,7 +19,7 @@ use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::ui::tabs::TabEvent;
 use crate::ui::toolbar::{Nav, ToolbarEvent};
-use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_bar::PathBar, preview::PreviewPane, status_bar::Status};
+use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_popup::{PathPopup, PopupEvent}, preview::PreviewPane, status_bar::Status};
 
 /// How the table should bring the selection into view on the next frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -508,7 +508,7 @@ pub struct LumenApp {
     saved: Config,
     /// Inner window size in points, saved when Lumen closes.
     window: Option<[f32; 2]>,
-    path_bar: PathBar,
+    path_popup: PathPopup,
     dialog: Option<Dialog>,
     rename: Option<RenameEdit>,
     clipboard: Option<Clip>,
@@ -565,7 +565,7 @@ impl LumenApp {
             config_path: None,
             saved: Config::default(),
             window: None,
-            path_bar: PathBar::default(),
+            path_popup: PathPopup::default(),
             dialog: None,
             rename: None,
             clipboard: None,
@@ -991,11 +991,20 @@ impl LumenApp {
             ToolbarEvent::Up => self.go_parent(ctx),
             ToolbarEvent::ToggleBookmark => self.toggle_bookmark(),
             ToolbarEvent::Go(path) => self.navigate(ctx, path, None),
-            ToolbarEvent::Typed(text) => {
-                let current = &self.tab.view.current;
-                let target = fs::resolve_input_path(&text, current, fs::home_dir().as_deref());
-                self.navigate(ctx, target, None);
+            ToolbarEvent::EditPath => self.path_popup.open(),
+        }
+    }
+
+    fn handle_popup(&mut self, ctx: &egui::Context, event: PopupEvent) {
+        match event {
+            PopupEvent::Go { path, select, new_tab } => {
+                if new_tab {
+                    self.new_tab(ctx);
+                }
+                self.navigate(ctx, path, select);
             }
+            PopupEvent::Back => self.go_history(ctx, NavKind::Back),
+            PopupEvent::Forward => self.go_history(ctx, NavKind::Forward),
         }
     }
 
@@ -1135,7 +1144,7 @@ impl LumenApp {
 
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
         match action {
-            Action::FocusPathBar => self.path_bar.request_focus(),
+            Action::FocusPathBar => self.path_popup.open(),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
             Action::ZoomIn => self.list_zoom = (self.list_zoom + 1).min(ui::file_list::MAX_ZOOM),
             Action::ZoomOut => self.list_zoom = self.list_zoom.saturating_sub(1),
@@ -1220,6 +1229,8 @@ impl eframe::App for LumenApp {
             if let Some(answer) = input::read_confirm(&ctx) {
                 self.answer_dialog(&ctx, answer);
             }
+        } else if self.path_popup.is_open() {
+            // The path box reads its own keys when it is drawn.
         } else {
             for action in input::read_actions(&ctx) {
                 self.handle_action(&ctx, action);
@@ -1248,7 +1259,7 @@ impl eframe::App for LumenApp {
                 can_forward: self.tab.history.forward_target().is_some(),
                 bookmarked: self.bookmarks.contains(&current),
             };
-            if let Some(event) = ui::toolbar::show(ui, &nav, &mut self.path_bar) {
+            if let Some(event) = ui::toolbar::show(ui, &nav) {
                 self.handle_toolbar(&ctx, event);
             }
             ui.add_space(2.0);
@@ -1325,7 +1336,7 @@ impl eframe::App for LumenApp {
                 });
         }
 
-        egui::CentralPanel::default_margins().show(ui, |ui| {
+        let list = egui::CentralPanel::default_margins().show(ui, |ui| {
             let scroll = self.tab.view.scroll.take();
             let event = ui::file_list::show(ui, &self.tab.view, self.list_zoom, scroll, self.rename.as_mut());
             match event {
@@ -1345,6 +1356,13 @@ impl eframe::App for LumenApp {
                 None => {}
             }
         });
+
+        let home = fs::home_dir();
+        let shown = self.tab.view.show_hidden;
+        let current = self.tab.view.current.clone();
+        if let Some(event) = self.path_popup.show(&ctx, list.response.rect, &current, home.as_deref(), shown) {
+            self.handle_popup(&ctx, event);
+        }
 
         // A click on another row or a scroll can take focus without ending the
         // edit above (one event per frame); an unfocused field is a cancel.
@@ -1882,8 +1900,24 @@ mod tests {
         let (ctx, mut app, dir) = app_in("app-crumb");
         app.handle_toolbar(&ctx, ToolbarEvent::Go(dir.join("sub")));
         assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub")));
-        app.handle_toolbar(&ctx, ToolbarEvent::Typed("sub/..".into()));
+        let (path, select) = ui::path_popup::typed_target("sub/..", &dir, None);
+        app.handle_popup(&ctx, PopupEvent::Go { path, select, new_tab: false });
         assert_eq!(app.tab.lister.last_requested(), Some(dir.clone()));
+    }
+
+    #[test]
+    fn ctrl_l_and_the_crumb_bar_open_the_path_box_and_ctrl_enter_uses_a_new_tab() {
+        let (ctx, mut app, dir) = app_in("app-path-box");
+        app.handle_action(&ctx, Action::FocusPathBar);
+        assert!(app.path_popup.is_open());
+        let mut app2 = app_in("app-path-box-2").1;
+        app2.handle_toolbar(&ctx, ToolbarEvent::EditPath);
+        assert!(app2.path_popup.is_open());
+        app.handle_popup(&ctx, PopupEvent::Go { path: dir.join("sub"), select: None, new_tab: true });
+        assert_eq!(app.tabs.len(), 2, "a new tab");
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub")), "showing the folder");
+        app.handle_popup(&ctx, PopupEvent::Go { path: dir.clone(), select: Some("a.txt".into()), new_tab: false });
+        assert_eq!(app.tab.select_after_load.as_deref(), Some("a.txt"), "a file opens its folder, selected");
     }
 
     /// Lets the running count finish, as the next frames would.
