@@ -73,6 +73,7 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 | Ctrl+D | Bookmark the current folder, or remove its bookmark (same as the ☆ button) |
 | Ctrl+H | Show / hide hidden files |
 | Alt+← / Alt+→ | Back / forward through visited folders |
+| Alt+↑ | Go to the parent folder, selecting the folder you came from (works with text in the filter) |
 | Type text | Filter the list to names containing every typed word, in any order, ignoring case ("slides contenido" finds "Slides de contenido"); a name typed in full comes first; the matched letters are highlighted and the text is shown at the bottom left |
 | Space | Open / close the preview panel (with text in the filter, Space starts another word) |
 | Delete | Move the selected entry to the trash (asks first; Enter confirms, Esc cancels) |

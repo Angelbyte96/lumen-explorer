@@ -81,7 +81,7 @@ pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
         let buttons = [
             (BACK, nav.can_back, "Back (Alt+Left)", ToolbarEvent::Back),
             (FORWARD, nav.can_forward, "Forward (Alt+Right)", ToolbarEvent::Forward),
-            (UP, nav.current.parent().is_some(), "Up to the parent folder", ToolbarEvent::Up),
+            (UP, nav.current.parent().is_some(), "Up to the parent folder (Alt+Up)", ToolbarEvent::Up),
         ];
         for (glyph, enabled, hint, on_click) in buttons {
             let button = egui::Button::new(egui::RichText::new(glyph).size(16.0)).frame(false);
