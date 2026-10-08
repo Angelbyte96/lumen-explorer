@@ -60,4 +60,14 @@ mod tests {
         assert_eq!(alpha(0, 0), 0);
         assert_eq!(alpha(128, 128), 255);
     }
+
+    /// GNOME matches the window to its menu entry by app_id, so the entry,
+    /// its icon and its window class are all "lumen".
+    #[test]
+    fn the_desktop_entry_is_named_after_the_app_id() {
+        let entry = include_str!("../assets/lumen.desktop");
+        for line in ["Exec=lumen %f", "Icon=lumen", "StartupWMClass=lumen", "MimeType=inode/directory;"] {
+            assert!(entry.lines().any(|l| l == line), "missing {line}");
+        }
+    }
 }

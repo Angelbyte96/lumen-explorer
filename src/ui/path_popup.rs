@@ -584,7 +584,8 @@ mod tests {
         let (ctx, mut popup, dir) = opened("popup-tab");
         step(&ctx, &mut popup, &dir, vec![text("su")]);
         step(&ctx, &mut popup, &dir, vec![key(Key::Tab, Modifiers::NONE)]);
-        assert_eq!(popup.text(), format!("{}/sub/", dir.display()));
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(popup.text(), format!("{}{sep}sub{sep}", dir.display()));
         assert!(popup.is_open(), "Tab does not leave the box");
         let used = step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::COMMAND)]);
         assert_eq!(used, go(dir.join("sub"), None, true));
@@ -623,8 +624,16 @@ mod tests {
 
     #[test]
     fn the_box_starts_with_the_folder_and_a_separator() {
-        assert_eq!(initial_text(Path::new("/home/u/Descargas")), "/home/u/Descargas/");
-        assert_eq!(initial_text(Path::new("/")), "/");
+        #[cfg(unix)]
+        {
+            assert_eq!(initial_text(Path::new("/home/u/Descargas")), "/home/u/Descargas/");
+            assert_eq!(initial_text(Path::new("/")), "/");
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(initial_text(Path::new(r"C:\Users\u")), r"C:\Users\u\");
+            assert_eq!(initial_text(Path::new(r"C:\")), r"C:\");
+        }
     }
 
     #[test]
@@ -689,9 +698,10 @@ mod tests {
 
     #[test]
     fn tab_completes_a_folder_with_a_separator_and_a_file_without() {
-        assert_eq!(complete("/home/u/", &e("Descargas", true)), "/home/u/Descargas/");
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(complete("/home/u/", &e("Descargas", true)), format!("/home/u/Descargas{sep}"));
         assert_eq!(complete("/home/u/", &e("desc.txt", false)), "/home/u/desc.txt");
-        assert_eq!(complete("", &e("Descargas", true)), "Descargas/");
+        assert_eq!(complete("", &e("Descargas", true)), format!("Descargas{sep}"));
     }
 
     #[test]
