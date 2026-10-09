@@ -512,6 +512,8 @@ fn came_from(current: &Path, target: &Path) -> Option<String> {
 enum Dialog {
     /// The selected entries; `select` is the row to land on once they are gone.
     Trash { paths: Vec<PathBuf>, select: Option<String> },
+    /// Shift+Delete: the same, deleted for good.
+    Delete { paths: Vec<PathBuf>, select: Option<String> },
     /// Renaming onto an existing name; the edit resumes if the user says no.
     Replace(RenameEdit),
     /// Pasting onto an existing name.
@@ -524,6 +526,10 @@ impl Dialog {
             Self::Trash { paths, .. } => match paths.as_slice() {
                 [one] => format!("Move “{}” to the trash?", file_name(one).unwrap_or_default()),
                 many => format!("Move {} items to the trash?", many.len()),
+            },
+            Self::Delete { paths, .. } => match paths.as_slice() {
+                [one] => format!("Permanently delete “{}”? This cannot be undone.", file_name(one).unwrap_or_default()),
+                many => format!("Permanently delete {} items? This cannot be undone.", many.len()),
             },
             Self::Replace(edit) => format!(
                 "“{}” already exists. Replace it? The existing one goes to the trash.",
@@ -539,6 +545,7 @@ impl Dialog {
     fn yes_label(&self) -> &'static str {
         match self {
             Self::Trash { .. } => "Move to Trash",
+            Self::Delete { .. } => "Delete",
             Self::Replace(_) | Self::Paste { .. } => "Replace",
         }
     }
@@ -547,6 +554,7 @@ impl Dialog {
     fn hint(&self) -> &'static str {
         match self {
             Self::Paste { .. } => "Enter to replace · Esc to skip",
+            Self::Delete { .. } => "Enter to delete · Esc to cancel",
             Self::Trash { .. } | Self::Replace(_) => "Enter to confirm · Esc to cancel",
         }
     }
@@ -555,7 +563,7 @@ impl Dialog {
     fn no_label(&self) -> &'static str {
         match self {
             Self::Paste { .. } => "Skip",
-            Self::Trash { .. } | Self::Replace(_) => "Cancel",
+            Self::Trash { .. } | Self::Delete { .. } | Self::Replace(_) => "Cancel",
         }
     }
 }
@@ -983,25 +991,46 @@ impl LumenApp {
     }
 
     fn ask_trash(&mut self) {
+        if let Some((paths, select)) = self.removable_selection() {
+            self.dialog = Some(Dialog::Trash { paths, select });
+        }
+    }
+
+    /// Shift+Delete: the same question, for deleting without the trash.
+    fn ask_delete_forever(&mut self) {
+        if let Some((paths, select)) = self.removable_selection() {
+            self.dialog = Some(Dialog::Delete { paths, select });
+        }
+    }
+
+    /// The selection to remove and the row to land on after it, unless it is
+    /// empty or something in it is already in the trash.
+    fn removable_selection(&mut self) -> Option<(Vec<PathBuf>, Option<String>)> {
         let paths: Vec<PathBuf> = self.tab.view.selection().iter().map(|e| e.path.clone()).collect();
         if paths.is_empty() {
-            return;
+            return None;
         }
         // Trashing it again would lose the record that lets it be restored.
         if let Some(trash) = self.trash.as_deref()
             && paths.iter().any(|path| places::in_trash(path, trash))
         {
             self.tab.view.error = Some("This is already in the trash".into());
-            return;
+            return None;
         }
-        self.dialog = Some(Dialog::Trash { paths, select: self.tab.view.name_after_removal() });
+        Some((paths, self.tab.view.name_after_removal()))
     }
 
-    /// Trashes `paths` in order, stopping at the first failure; the list then
-    /// lands on the entry that failed.
-    fn trash_all(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, select: Option<String>) {
+    /// Trashes or deletes `paths` in order, stopping at the first failure; the
+    /// list then lands on the entry that failed.
+    fn remove_all(
+        &mut self,
+        ctx: &egui::Context,
+        paths: Vec<PathBuf>,
+        select: Option<String>,
+        remove: fn(&Path) -> Result<(), String>,
+    ) {
         for path in paths {
-            if let Err(err) = fs::ops::trash(&path) {
+            if let Err(err) = remove(&path) {
                 self.tab.error_after_load = Some(err);
                 self.reload(ctx, file_name(&path));
                 return;
@@ -1217,12 +1246,13 @@ impl LumenApp {
                     self.rename = Some(edit);
                 }
                 Dialog::Paste { .. } => self.next_paste(ctx),
-                Dialog::Trash { .. } => {}
+                Dialog::Trash { .. } | Dialog::Delete { .. } => {}
             }
             return;
         }
         match dialog {
-            Dialog::Trash { paths, select } => self.trash_all(ctx, paths, select),
+            Dialog::Trash { paths, select } => self.remove_all(ctx, paths, select, fs::ops::trash),
+            Dialog::Delete { paths, select } => self.remove_all(ctx, paths, select, fs::ops::delete_forever),
             Dialog::Replace(edit) => self.finish_rename(ctx, edit, true),
             Dialog::Paste { source, target, mode } => {
                 self.start_job(ctx, source, target, mode, true);
@@ -1520,6 +1550,7 @@ impl LumenApp {
             Action::Back => self.go_history(ctx, NavKind::Back),
             Action::Forward => self.go_history(ctx, NavKind::Forward),
             Action::Trash => self.ask_trash(),
+            Action::DeleteForever => self.ask_delete_forever(),
             Action::Rename => self.start_rename(),
             Action::NewFolder => self.new_folder(ctx),
             Action::Copy => self.set_clipboard(Mode::Copy),
@@ -2256,6 +2287,41 @@ mod tests {
         assert_eq!(names_in(&dir), ["sub"]);
         assert_eq!(crate::fs::ops::tests::trashed_names_from(&dir), crate::fs::ops::tests::as_trashed(&["a.txt", "b.txt"]));
         crate::fs::ops::tests::purge_trashed_from(&dir);
+    }
+
+    #[test]
+    fn shift_delete_asks_once_and_deletes_without_the_trash() {
+        let (ctx, mut app, dir) = app_in("app-delete-forever");
+        pick(&mut app, &["a.txt", "sub"]);
+        app.handle_action(&ctx, Action::DeleteForever);
+        let dialog = app.dialog.as_ref().expect("asks first");
+        assert_eq!(dialog.message(), "Permanently delete 2 items? This cannot be undone.");
+        assert_eq!((dialog.yes_label(), dialog.no_label(), dialog.hint()), ("Delete", "Cancel", "Enter to delete · Esc to cancel"));
+        app.answer_dialog(&ctx, Confirm::No);
+        assert_eq!(names_in(&dir), ["a.txt", "b.txt", "sub"], "Esc keeps everything");
+        app.handle_action(&ctx, Action::DeleteForever);
+        app.answer_dialog(&ctx, Confirm::Yes);
+        assert_eq!(names_in(&dir), ["b.txt"]);
+        assert_eq!(crate::fs::ops::tests::trashed_names_from(&dir), Vec::<String>::new());
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.clone()), "listed again");
+    }
+
+    #[test]
+    fn shift_delete_of_one_entry_names_it() {
+        let (ctx, mut app, _dir) = app_in("app-delete-forever-one");
+        pick(&mut app, &["b.txt"]);
+        app.handle_action(&ctx, Action::DeleteForever);
+        assert_eq!(app.dialog.as_ref().unwrap().message(), "Permanently delete “b.txt”? This cannot be undone.");
+    }
+
+    #[test]
+    fn nothing_inside_the_trash_is_deleted_forever_from_lumen() {
+        let (ctx, mut app, dir) = app_in("app-delete-forever-trash");
+        app.trash = Some(dir.clone());
+        pick(&mut app, &["a.txt"]);
+        app.handle_action(&ctx, Action::DeleteForever);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.tab.view.error.as_deref(), Some("This is already in the trash"));
     }
 
     #[test]

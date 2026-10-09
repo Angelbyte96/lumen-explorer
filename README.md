@@ -94,6 +94,7 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 | Type text | Filter the list to names containing every typed word, in any order, ignoring case ("slides contenido" finds "Slides de contenido"); a name typed in full comes first; the matched letters are highlighted and the text is shown at the bottom left |
 | Space | Open / close the preview panel (with text in the filter, Space starts another word) |
 | Delete | Move the selected entries to the trash (asks once; Enter confirms, Esc cancels) |
+| Shift+Delete | Delete the selected entries for good, without the trash (asks once: "This cannot be undone"; a link is removed, never what it points to) |
 | F2 | Rename the selected entry in place (Enter to apply, Esc to cancel); does nothing with several selected |
 | Ctrl+Shift+N | Create "New Folder" here and rename it |
 | Ctrl+C / Ctrl+X | Copy / cut the selected entries (cut ones are faded until pasted) |

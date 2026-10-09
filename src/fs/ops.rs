@@ -1,4 +1,5 @@
-//! File operations started by the user. Deleting always goes to the trash.
+//! File operations started by the user. Deleting goes to the trash; only
+//! Shift+Delete, after its own question, deletes for good.
 
 use std::path::{Path, PathBuf};
 
@@ -9,6 +10,14 @@ pub fn trash(path: &Path) -> Result<(), String> {
         return Err(format!("No longer exists: {}", path.display()));
     }
     trash::delete(path).map_err(|e| format!("Cannot move {} to trash: {e}", path.display()))
+}
+
+/// Deletes `path` for good, without the trash. A folder goes with everything
+/// in it; a symlink is removed itself, never what it points to.
+pub fn delete_forever(path: &Path) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|_| format!("No longer exists: {}", path.display()))?;
+    let result = if meta.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+    result.map_err(|e| format!("Cannot delete {}: {e}", path.display()))
 }
 
 /// Opens a file with its default app, without waiting for it.
@@ -286,6 +295,34 @@ pub(crate) mod tests {
         assert!(!dir.join("old_dir").exists());
         assert_eq!(trashed_names_from(&dir), as_trashed(&["old.txt", "old_dir"]), "recoverable, not deleted");
         purge_trashed_from(&dir);
+    }
+
+    #[test]
+    fn delete_forever_removes_a_file_and_a_whole_folder_without_the_trash() {
+        let dir = fresh_fixture("delete-forever");
+        std::fs::write(dir.join("a.txt"), "A").unwrap();
+        std::fs::create_dir_all(dir.join("tree/deep")).unwrap();
+        std::fs::write(dir.join("tree/deep/x.txt"), "X").unwrap();
+        delete_forever(&dir.join("a.txt")).unwrap();
+        delete_forever(&dir.join("tree")).unwrap();
+        assert!(!exists(&dir.join("a.txt")) && !exists(&dir.join("tree")));
+        assert_eq!(trashed_names_from(&dir), Vec::<String>::new(), "nothing went to the trash");
+        assert_eq!(
+            delete_forever(&dir.join("a.txt")),
+            Err(format!("No longer exists: {}", dir.join("a.txt").display()))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_forever_removes_a_link_and_never_what_it_points_to() {
+        let dir = fresh_fixture("delete-forever-link");
+        std::fs::create_dir(dir.join("real")).unwrap();
+        std::fs::write(dir.join("real/keep.txt"), "K").unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        delete_forever(&dir.join("link")).unwrap();
+        assert!(std::fs::symlink_metadata(dir.join("link")).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("real/keep.txt")).unwrap(), "K");
     }
 
     #[test]

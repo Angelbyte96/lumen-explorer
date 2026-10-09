@@ -32,6 +32,8 @@ pub enum Action {
     TypeChar(char),
     /// Move the selected entry to the trash (asks first).
     Trash,
+    /// Shift+Delete: delete the selection for good, without the trash (asks first).
+    DeleteForever,
     /// Edit the selected entry's name in place.
     Rename,
     /// Create a folder here and start renaming it (Ctrl+Shift+N).
@@ -198,6 +200,9 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
             (Key::Delete, Action::Trash),
             (Key::F2, Action::Rename),
         ];
+        if i.modifiers == Modifiers::SHIFT && i.consume_key(Modifiers::SHIFT, Key::Delete) {
+            actions.push(Action::DeleteForever);
+        }
         if i.consume_key(Modifiers::SHIFT, Key::F10) {
             actions.push(Action::Menu);
         }
@@ -343,10 +348,12 @@ mod tests {
     #[test]
     fn delete_asks_to_trash_but_not_with_modifiers() {
         assert_eq!(actions_for(vec![key(Key::Delete, Modifiers::NONE)]), [Action::Trash]);
-        // Real input reports held modifiers both ways; Shift+Delete is reserved.
+        // Real input reports held modifiers both ways.
         let shift_delete =
             vec![Event::ModifiersChanged(Modifiers::SHIFT), key(Key::Delete, Modifiers::SHIFT)];
-        assert_eq!(actions_for(shift_delete), []);
+        assert_eq!(actions_for(shift_delete), [Action::DeleteForever], "Shift+Delete skips the trash");
+        let ctrl_delete = vec![Event::ModifiersChanged(Modifiers::CTRL), key(Key::Delete, Modifiers::CTRL)];
+        assert_eq!(actions_for(ctrl_delete), [], "other combos stay reserved");
     }
 
     #[test]
