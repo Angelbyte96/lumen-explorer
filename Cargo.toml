@@ -67,3 +67,8 @@ lto = true          # link-time optimization across all crates
 codegen-units = 1   # better optimization, slower compile
 panic = "abort"     # no unwinding machinery
 strip = true        # remove debug symbols
+
+# The Menu key (next to the right Ctrl) arrives as Shift+F10: egui-winit 0.36.2
+# with one small change, see vendor/egui-winit/LUMEN.md. Redo it on every egui update.
+[patch.crates-io]
+egui-winit = { path = "vendor/egui-winit" }
