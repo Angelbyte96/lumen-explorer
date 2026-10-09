@@ -266,6 +266,9 @@ fn clipboard_actions(ctx: &Context, events: &[Event]) -> Vec<Action> {
     for event in events {
         match event {
             Event::Copy => actions.push(Action::Copy),
+            // On Windows egui-winit turns Shift+Delete into a cut (its old
+            // shortcut) and sends no Delete press: here it deletes, as in Explorer.
+            Event::Cut if ctx.input(|i| i.modifiers.shift && !i.modifiers.command) => actions.push(Action::DeleteForever),
             Event::Cut => actions.push(Action::Cut),
             Event::Paste(_) => {
                 actions.push(Action::Paste);
@@ -393,6 +396,21 @@ mod tests {
             assert_eq!(actions_for(shift(k)), [action], "Shift+{k:?}");
         }
         assert_eq!(actions_for(vec![key(Key::ArrowDown, Modifiers::NONE)]), [Action::Move(1)]);
+    }
+
+    // egui-winit sends Shift+Delete on Windows as Event::Cut, with no key press.
+    #[test]
+    fn shift_delete_sent_as_a_cut_event_still_asks_to_delete() {
+        let events = vec![
+            Event::ModifiersChanged(Modifiers::SHIFT),
+            Event::Cut,
+            Event::Key { key: Key::Delete, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::SHIFT },
+        ];
+        assert_eq!(actions_for(events), [Action::DeleteForever]);
+        let ctrl_x = vec![Event::ModifiersChanged(Modifiers::COMMAND), Event::Cut];
+        assert_eq!(actions_for(ctrl_x), [Action::Cut], "Ctrl+X still cuts");
+        let ctrl_shift_x = vec![Event::ModifiersChanged(Modifiers::COMMAND | Modifiers::SHIFT), Event::Cut];
+        assert_eq!(actions_for(ctrl_shift_x), [Action::Cut]);
     }
 
     #[test]

@@ -81,6 +81,8 @@ pub fn show(
     // With rows picked, they are the highlight; the cursor row alone otherwise.
     let multi = view.picked_count() > 0;
     let mut event = None;
+    // Set again below if the cursor row is drawn this frame.
+    ui.ctx().data_mut(|d| d.remove::<egui::Rect>(cursor_row_id()));
 
     let mut table = TableBuilder::new(ui)
         .striped(true)
@@ -487,6 +489,12 @@ mod tests {
         frame(&ctx, vec![], |ui| show(ui, &view, &[], 0, None, None));
         let first = cursor_row_rect(&ctx).expect("drawn");
         assert!(first.bottom() <= second.top() + 1.0, "{first:?} above {second:?}");
+        // A cursor row scrolled out of view was not drawn: no stale place.
+        view.entries = (0..300).map(|i| entry(&format!("f{i}"))).collect();
+        view.rows = (0..300).collect();
+        view.selected = Some(250);
+        frame(&ctx, vec![], |ui| show(ui, &view, &[], 0, None, None));
+        assert_eq!(cursor_row_rect(&ctx), None);
     }
 
     #[test]

@@ -361,6 +361,27 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("real/keep.txt")).unwrap(), "K");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn delete_forever_never_follows_links_inside_a_folder() {
+        let dir = fresh_fixture("delete-forever-nested");
+        std::fs::create_dir_all(dir.join("outside/deep")).unwrap();
+        std::fs::write(dir.join("outside/keep.txt"), "K").unwrap();
+        std::fs::write(dir.join("outside/deep/keep2.txt"), "K2").unwrap();
+        std::fs::create_dir_all(dir.join("tree/inner")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outside"), dir.join("tree/link_dir")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outside"), dir.join("tree/inner/link_dir2")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outside/keep.txt"), dir.join("tree/link_file")).unwrap();
+        std::os::unix::fs::symlink(dir.join("nowhere"), dir.join("tree/dangling")).unwrap();
+        std::os::unix::fs::symlink(dir.join("nowhere"), dir.join("dangling_top")).unwrap();
+        delete_forever(&dir.join("tree")).unwrap();
+        delete_forever(&dir.join("dangling_top")).unwrap();
+        assert!(std::fs::symlink_metadata(dir.join("tree")).is_err());
+        assert!(std::fs::symlink_metadata(dir.join("dangling_top")).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("outside/keep.txt")).unwrap(), "K");
+        assert_eq!(std::fs::read_to_string(dir.join("outside/deep/keep2.txt")).unwrap(), "K2");
+    }
+
     #[test]
     fn trashing_a_missing_path_is_an_error() {
         let dir = fresh_fixture("trash-missing");

@@ -1583,7 +1583,9 @@ impl LumenApp {
             Action::Extend(rows) => self.tab.view.extend_by(rows),
             Action::SelectAll => self.tab.view.select_all(),
             Action::Menu => {
-                let at = ui::file_list::cursor_row_rect(ctx).map_or(egui::pos2(40.0, 120.0), |r| r.left_bottom() + egui::vec2(24.0, 0.0));
+                // Under the cursor row, or mid-window when it is scrolled out of view.
+                let at = ui::file_list::cursor_row_rect(ctx)
+                    .map_or_else(|| ctx.content_rect().center() - egui::vec2(170.0, 120.0), |r| r.left_bottom() + egui::vec2(24.0, 0.0));
                 match self.tab.view.selected {
                     Some(row) if self.tab.view.picked_count() == 0 || self.tab.view.is_picked(row) => self.open_entry_menu(row, at),
                     Some(_) => {
