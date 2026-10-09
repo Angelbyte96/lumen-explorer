@@ -113,6 +113,12 @@ pub fn menu_icon(painter: &egui::Painter, rect: Rect, icon: crate::menu::MenuIco
             line(&[(0.45, 0.55), (0.85, 0.15)]);
             line(&[(0.6, 0.15), (0.85, 0.15), (0.85, 0.4)]);
         }
+        I::OpenWith => {
+            frame(0.1, 0.1, 0.42, 0.42);
+            frame(0.58, 0.1, 0.9, 0.42);
+            frame(0.1, 0.58, 0.42, 0.9);
+            frame(0.58, 0.58, 0.9, 0.9);
+        }
         I::NewTab => {
             frame(0.1, 0.2, 0.9, 0.85);
             line(&[(0.1, 0.38), (0.9, 0.38)]);

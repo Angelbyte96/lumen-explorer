@@ -9,10 +9,20 @@ use crate::fs::Entry;
 use crate::ui::file_list::{COLUMNS, SORT_ASCENDING, SORT_DESCENDING};
 use crate::ui::path_popup::word_ranges;
 
+/// An application that can open a file ("Open With").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct App {
+    /// Shown in the menu: the .desktop Name, in the user's language when it has one.
+    pub name: String,
+    /// The .desktop file, launched with `gio launch`.
+    pub desktop: std::path::PathBuf,
+}
+
 /// What a menu item does once picked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Open,
+    OpenWith(App),
     OpenInNewTab,
     Cut,
     Copy,
@@ -33,6 +43,7 @@ pub enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuIcon {
     Open,
+    OpenWith,
     NewTab,
     Cut,
     Copy,
@@ -51,8 +62,9 @@ pub enum MenuIcon {
 
 impl MenuIcon {
     #[cfg(test)]
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Open,
+        Self::OpenWith,
         Self::NewTab,
         Self::Cut,
         Self::Copy,
@@ -73,6 +85,7 @@ impl MenuIcon {
     fn of(command: &Command) -> Option<Self> {
         Some(match command {
             Command::Open => Self::Open,
+            Command::OpenWith(_) => return None,
             Command::OpenInNewTab => Self::NewTab,
             Command::Cut => Self::Cut,
             Command::Copy => Self::Copy,
@@ -301,11 +314,16 @@ impl Menu {
 }
 
 /// The menu for the selected entries (`selection`, never empty).
-/// `bookmarked`: the single selected folder is a bookmark.
-pub fn entry_menu(selection: &[&Entry], bookmarked: bool) -> Vec<Item> {
+/// `bookmarked`: the single selected folder is a bookmark. `apps`: what can
+/// open the single selected entry, best first.
+pub fn entry_menu(selection: &[&Entry], bookmarked: bool, apps: &[App]) -> Vec<Item> {
     let single = selection.len() == 1;
     let folder = single && selection[0].is_dir;
     let mut items = vec![Item::run("Open", Some("Enter"), single, Command::Open)];
+    if single && !apps.is_empty() {
+        let apps = apps.iter().map(|app| Item::run(app.name.clone(), None, true, Command::OpenWith(app.clone()))).collect();
+        items.push(Item::sub("Open With", MenuIcon::OpenWith, apps));
+    }
     if folder {
         items.push(Item::run("Open in New Tab", None, true, Command::OpenInNewTab));
     }
@@ -464,13 +482,13 @@ mod tests {
         out
     }
 
-    /// Every item has an icon but the sort columns, which Dolphin leaves bare too.
+    /// Every item has an icon but the sort columns and the apps, which Dolphin leaves bare too.
     fn without_icon(items: &[Item]) -> Vec<String> {
         let mut out = Vec::new();
         for item in items {
             match &item.kind {
                 Kind::Separator => {}
-                Kind::Run(Command::Sort(_)) => {}
+                Kind::Run(Command::Sort(_) | Command::OpenWith(_)) => {}
                 _ if item.icon.is_none() => out.push(item.label.clone()),
                 _ => {}
             }
@@ -484,7 +502,7 @@ mod tests {
     #[test]
     fn every_item_has_an_icon_except_the_sort_columns() {
         let (dir, file) = (entry("src", true), entry("a.txt", false));
-        for items in [entry_menu(&[&dir], false), entry_menu(&[&file], true), background_menu(true, Sort::default())] {
+        for items in [entry_menu(&[&dir], false, &[]), entry_menu(&[&file], true, &[]), background_menu(true, Sort::default())] {
             assert_eq!(without_icon(&items), Vec::<String>::new());
         }
     }
@@ -493,7 +511,7 @@ mod tests {
     fn a_file_offers_open_clipboard_rename_and_trash() {
         let file = entry("a.txt", false);
         assert_eq!(
-            outline(&entry_menu(&[&file], false)),
+            outline(&entry_menu(&[&file], false, &[])),
             [
                 "Open [Enter]",
                 "-",
@@ -512,7 +530,7 @@ mod tests {
     fn a_folder_adds_new_tab_bookmark_and_size() {
         let dir = entry("src", true);
         assert_eq!(
-            outline(&entry_menu(&[&dir], false)),
+            outline(&entry_menu(&[&dir], false, &[])),
             [
                 "Open [Enter]",
                 "Open in New Tab",
@@ -529,14 +547,25 @@ mod tests {
                 "Calculate Size [Alt+R]",
             ]
         );
-        assert!(outline(&entry_menu(&[&dir], true)).contains(&"Remove from Bookmarks".to_owned()));
+        assert!(outline(&entry_menu(&[&dir], true, &[])).contains(&"Remove from Bookmarks".to_owned()));
+    }
+
+    #[test]
+    fn open_with_lists_the_apps_for_one_entry() {
+        let file = entry("a.txt", false);
+        let apps = [App { name: "Editor".into(), desktop: "/a/editor.desktop".into() }, App { name: "Vim".into(), desktop: "/a/vim.desktop".into() }];
+        let items = entry_menu(&[&file], false, &apps);
+        assert_eq!(outline(&items)[..4], ["Open [Enter]", "Open With", "  Editor", "  Vim"]);
+        let Kind::Sub(sub) = &items[1].kind else { panic!("a submenu") };
+        assert_eq!(sub[1].kind, Kind::Run(Command::OpenWith(apps[1].clone())));
+        assert_eq!(outline(&entry_menu(&[&file], false, &[]))[1], "-", "no apps, no submenu");
     }
 
     #[test]
     fn several_entries_keep_only_what_works_on_all() {
         let (dir, file) = (entry("src", true), entry("a.txt", false));
         assert_eq!(
-            outline(&entry_menu(&[&dir, &file], false)),
+            outline(&entry_menu(&[&dir, &file], false, &[])),
             [
                 "Open [Enter] (off)",
                 "-",

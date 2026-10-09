@@ -3,6 +3,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+#[cfg(not(windows))]
+mod apps;
 mod config;
 mod format;
 mod fs;

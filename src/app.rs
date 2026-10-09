@@ -909,7 +909,12 @@ impl LumenApp {
         }
         let selection = view.selection();
         let bookmarked = matches!(selection.as_slice(), [one] if one.is_dir && self.bookmarks.contains(&one.path));
-        self.context_menu = Some(ContextMenu::new(menu::entry_menu(&selection, bookmarked), pos));
+        let apps = match selection.as_slice() {
+            #[cfg(not(windows))]
+            [one] => crate::apps::apps_for(&crate::apps::Dirs::from_env(), &one.name, one.is_dir),
+            _ => Vec::new(),
+        };
+        self.context_menu = Some(ContextMenu::new(menu::entry_menu(&selection, bookmarked, &apps), pos));
     }
 
     /// Right click on the list's empty space: the menu for the folder itself.
@@ -925,6 +930,16 @@ impl LumenApp {
                 if let Some((path, is_dir)) = single {
                     self.activate(ctx, path, is_dir);
                 }
+            }
+            Command::OpenWith(app) => {
+                #[cfg(not(windows))]
+                if let Some((path, _)) = single
+                    && let Err(err) = crate::apps::open_with(&app, &path)
+                {
+                    self.tab.view.error = Some(err);
+                }
+                #[cfg(windows)]
+                let _ = app;
             }
             Command::OpenInNewTab => {
                 if let Some((path, true)) = single {
