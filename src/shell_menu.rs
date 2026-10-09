@@ -152,6 +152,10 @@ pub fn background_menu(shell: Vec<Item>, can_paste: bool, sort: Sort) -> Vec<Ite
             item.enabled = can_paste;
         }
     }));
+    // The shell leaves Paste to File Explorer, which adds its own.
+    if !contains(&items, &Command::Paste) {
+        items.insert(0, Item::run("Paste", Some("Ctrl+V"), can_paste, Command::Paste));
+    }
     let has_refresh = contains(&items, &Command::Refresh);
     items.extend([Item::separator(), menu::sort_menu(sort)]);
     if !has_refresh {
@@ -346,6 +350,20 @@ mod tests {
     fn the_shells_open_runs_lumens_open() {
         assert_eq!(command_for(Some("open"), 0), Command::Open);
         assert_eq!(command_for(Some("Open"), 0), Command::Open);
+    }
+
+    /// Windows CI showed the shell's background menu without Paste (File
+    /// Explorer adds its own): Lumen's then comes first.
+    #[test]
+    fn the_windows_background_menu_always_has_lumens_paste() {
+        let sort = Sort::default();
+        let shell_items = vec![shell("Open in Terminal", 0), Item::sub_plain("New", vec![shell("Text Document", 1)]), shell("Properties", 2)];
+        let items = background_menu(shell_items, true, sort);
+        assert_eq!(runs(&items, &Command::Paste), [("Paste".to_owned(), true)]);
+        assert_eq!(items[0].kind, Kind::Run(Command::Paste), "{:?}", outline(&items));
+        assert_eq!(items[0].shortcut, Some("Ctrl+V"));
+        let with_shells = background_menu(vec![Item::run("Pegar", None, true, Command::Paste)], false, sort);
+        assert_eq!(runs(&with_shells, &Command::Paste), [("Pegar".to_owned(), false)], "not twice");
     }
 
     #[test]
