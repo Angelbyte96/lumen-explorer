@@ -78,6 +78,39 @@ pub fn apps_for(dirs: &Dirs, name: &str, is_dir: bool) -> Vec<App> {
         })
 }
 
+/// Terminals to try, in order: $TERMINAL, then the desktop's choice, then common ones.
+pub fn terminals(user: Option<String>) -> Vec<String> {
+    let usual = [
+        "xdg-terminal-exec",
+        "x-terminal-emulator",
+        "gnome-terminal",
+        "ptyxis",
+        "kgx",
+        "konsole",
+        "xfce4-terminal",
+        "kitty",
+        "alacritty",
+        "foot",
+        "xterm",
+    ];
+    user.filter(|t| !t.is_empty()).into_iter().chain(usual.map(String::from)).collect()
+}
+
+/// Opens a terminal in `folder`: the first one installed. Each starts where it is launched.
+pub fn open_terminal(folder: &Path) -> Result<(), String> {
+    for terminal in terminals(std::env::var("TERMINAL").ok()) {
+        match std::process::Command::new(&terminal).current_dir(folder).spawn() {
+            Ok(mut child) => {
+                std::thread::spawn(move || child.wait());
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("Cannot open {terminal}: {e}")),
+        }
+    }
+    Err("No terminal found: set $TERMINAL or install one".into())
+}
+
 /// Opens `file` with `app`, without waiting for it.
 pub fn open_with(app: &App, file: &Path) -> Result<(), String> {
     let mut child = std::process::Command::new("gio")
@@ -390,6 +423,15 @@ mod tests {
         assert_eq!(app_names(&apps_for(&dirs, "notes.TXT", false)), ["Editor de texto"]);
         assert_eq!(app_names(&apps_for(&dirs, "photos", true)), ["Files"], "folders are inode/directory");
         assert_eq!(apps_for(&dirs, "unknown.xyz", false), []);
+    }
+
+    #[test]
+    fn the_terminal_is_the_users_choice_then_the_usual_ones() {
+        let list = terminals(Some("kitty".into()));
+        assert_eq!(list[..3], ["kitty", "xdg-terminal-exec", "x-terminal-emulator"]);
+        assert!(list.contains(&"gnome-terminal".to_owned()) && list.contains(&"xterm".to_owned()));
+        assert_eq!(terminals(None)[0], "xdg-terminal-exec");
+        assert_eq!(terminals(Some(String::new()))[0], "xdg-terminal-exec");
     }
 
     #[test]
