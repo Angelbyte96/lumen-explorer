@@ -9,7 +9,7 @@ use crate::menu::{Command, Item, Key, Kind, Menu};
 use crate::ui::path_popup::marked_name;
 
 /// Width of the menu, search box included.
-const WIDTH: f32 = 300.0;
+const WIDTH: f32 = 340.0;
 /// Lines shown before the list scrolls.
 const VISIBLE_ROWS: f32 = 18.0;
 /// Marks a closed / open submenu.
@@ -20,6 +20,8 @@ pub struct ContextMenu {
     menu: Menu,
     /// Top-left corner: where the right click was.
     pos: egui::Pos2,
+    /// Height of the rows as last laid out; the list is that tall up to a limit.
+    content: Option<f32>,
 }
 
 /// What the open menu did this frame.
@@ -31,7 +33,7 @@ pub enum MenuEvent {
 
 impl ContextMenu {
     pub fn new(items: Vec<Item>, pos: egui::Pos2) -> Self {
-        Self { menu: Menu::new(items), pos }
+        Self { menu: Menu::new(items), pos, content: None }
     }
 
     #[cfg(test)]
@@ -72,14 +74,26 @@ impl ContextMenu {
                 });
                 ui.separator();
                 let row_height = ui.spacing().interact_size.y;
-                egui::ScrollArea::vertical()
-                    .max_height(VISIBLE_ROWS * row_height)
+                // egui's default minimum is 64 points while the area's height is
+                // unknown, which showed three lines: as tall as the rows, up to a limit.
+                let limit = VISIBLE_ROWS * row_height;
+                let tall = self.content.map_or(limit, |h| h.min(limit));
+                let list = egui::ScrollArea::vertical()
+                    .max_height(limit)
+                    .min_scrolled_height(tall)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         if let Some(command) = self.rows(ui) {
                             event = Some(MenuEvent::Run(command));
                         }
                     });
+                ui.ctx().data_mut(|d| d.insert_temp(list_id(), list.inner_rect));
+                let measured = list.content_size.y;
+                if self.content.is_none_or(|h| (h - measured).abs() > 0.5) {
+                    // The rows changed height (first frame, a search, a submenu): lay out again.
+                    self.content = Some(measured);
+                    ui.ctx().request_discard("context menu height");
+                }
             });
         if event.is_none() && modal.should_close() {
             event = Some(MenuEvent::Closed);
@@ -171,6 +185,11 @@ fn field_id() -> egui::Id {
     egui::Id::new("lumen_context_menu_field")
 }
 
+/// Where the list of rows was last shown, scrolled or not.
+pub fn list_id() -> egui::Id {
+    egui::Id::new("lumen_menu_list_rect")
+}
+
 /// Where row `index` was last drawn (for tests).
 pub fn row_id(index: usize) -> egui::Id {
     egui::Id::new(("lumen_menu_row_rect", index))
@@ -236,6 +255,25 @@ mod tests {
         let mut menu = sample();
         step(&ctx, &mut menu, vec![]);
         assert_eq!(click(&ctx, egui::pos2(700.0, 550.0), |ui| menu.show(ui.ctx())), Some(MenuEvent::Closed));
+    }
+
+    #[test]
+    fn a_long_menu_shows_its_items_without_scrolling() {
+        let ctx = egui::Context::default();
+        let items = (0..12).map(|i| Item::run(format!("Item {i}"), None, true, Command::Open)).collect();
+        let mut menu = ContextMenu::new(items, egui::pos2(100.0, 50.0));
+        for _ in 0..3 {
+            step(&ctx, &mut menu, vec![]);
+        }
+        let (first, last) = (row_rect(&ctx, 0), row_rect(&ctx, 11));
+        let shown = ctx.data(|d| d.get_temp::<egui::Rect>(list_id())).expect("list drawn");
+        assert!(shown.contains_rect(first) && shown.contains_rect(last), "{first:?} and {last:?} inside {shown:?}");
+        let mut short = sample();
+        for _ in 0..3 {
+            step(&ctx, &mut short, vec![]);
+        }
+        let shown = ctx.data(|d| d.get_temp::<egui::Rect>(list_id())).unwrap();
+        assert!(shown.height() < 3.0 * row_rect(&ctx, 0).height(), "two items, no empty space: {shown:?}");
     }
 
     #[test]

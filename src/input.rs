@@ -13,6 +13,8 @@ pub enum Action {
     Extend(isize),
     /// Ctrl+A: every row shown.
     SelectAll,
+    /// Shift+F10: the right-click menu for the selection.
+    Menu,
     /// Enter the selected folder or open the selected file.
     Activate,
     /// Backspace: erases a filter character, or goes up when the filter is empty.
@@ -196,6 +198,9 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
             (Key::Delete, Action::Trash),
             (Key::F2, Action::Rename),
         ];
+        if i.consume_key(Modifiers::SHIFT, Key::F10) {
+            actions.push(Action::Menu);
+        }
         if i.modifiers == Modifiers::SHIFT {
             let extend = [
                 (Key::ArrowDown, 1),
@@ -381,6 +386,13 @@ mod tests {
             assert_eq!(actions_for(shift(k)), [action], "Shift+{k:?}");
         }
         assert_eq!(actions_for(vec![key(Key::ArrowDown, Modifiers::NONE)]), [Action::Move(1)]);
+    }
+
+    #[test]
+    fn shift_f10_opens_the_menu_and_a_plain_f10_does_not() {
+        let events = vec![Event::ModifiersChanged(Modifiers::SHIFT), key(Key::F10, Modifiers::SHIFT)];
+        assert_eq!(actions_for(events), [Action::Menu]);
+        assert_eq!(actions_for(vec![key(Key::F10, Modifiers::NONE)]), []);
     }
 
     #[test]

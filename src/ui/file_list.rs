@@ -20,6 +20,8 @@ pub enum ListEvent {
     Extend(usize),
     /// Right click on the row: its menu.
     Menu(usize),
+    /// A click below the rows; `menu` for a right click.
+    Empty { menu: bool },
     Activate(usize),
     Sort(SortColumn),
     /// The in-place rename ended: `true` with Enter, `false` with Escape or a click elsewhere.
@@ -135,6 +137,9 @@ pub fn show(
                 });
                 count_cols(&mut row, &count_cells(entry, totals.get(&entry.name)));
                 let response = row.response();
+                if selected == Some(i) {
+                    response.ctx.data_mut(|d| d.insert_temp(cursor_row_id(), response.rect));
+                }
                 if response.secondary_clicked() {
                     event = Some(ListEvent::Menu(i));
                 } else if response.double_clicked() {
@@ -151,7 +156,26 @@ pub fn show(
                 }
             });
         });
+    // Whatever space the rows leave below them.
+    let rest = ui.available_rect_before_wrap();
+    if event.is_none() && rest.height() > 0.0 {
+        let response = ui.interact(rest, egui::Id::new("lumen_list_empty"), egui::Sense::click());
+        if response.clicked() {
+            event = Some(ListEvent::Empty { menu: false });
+        } else if response.secondary_clicked() {
+            event = Some(ListEvent::Empty { menu: true });
+        }
+    }
     event
+}
+
+fn cursor_row_id() -> egui::Id {
+    egui::Id::new("lumen_cursor_row")
+}
+
+/// Where the cursor row was last drawn: Shift+F10 opens its menu there.
+pub fn cursor_row_rect(ctx: &egui::Context) -> Option<egui::Rect> {
+    ctx.data(|d| d.get_temp(cursor_row_id()))
 }
 
 /// The entry's name, dimmed when hidden, cut with "…" when too long. The
@@ -387,6 +411,41 @@ mod tests {
             .map(|section| &galley.job.text[section.byte_range.start.0..section.byte_range.end.0])
             .collect();
         assert_eq!(coloured, ["Sli", "contenido"]);
+    }
+
+    fn press(pos: egui::Pos2, button: egui::PointerButton) -> Vec<egui::Event> {
+        let event = |pressed| egui::Event::PointerButton { pos, button, pressed, modifiers: egui::Modifiers::NONE };
+        vec![event(true), event(false)]
+    }
+
+    /// One entry listed, then a left and a right click well below it.
+    #[test]
+    fn a_click_below_the_rows_is_a_click_on_the_empty_space() {
+        use crate::ui::testing::frame;
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        (view.entries, view.rows, view.selected) = (vec![entry("a.txt")], vec![0], Some(0));
+        let below = egui::pos2(300.0, 500.0);
+        let mut draw = |ui: &mut egui::Ui| show(ui, &view, 0, None, None);
+        frame(&ctx, vec![egui::Event::PointerMoved(below)], &mut draw);
+        let left = frame(&ctx, press(below, egui::PointerButton::Primary), &mut draw);
+        assert!(matches!(left, Some(ListEvent::Empty { menu: false })), "left click");
+        let right = frame(&ctx, press(below, egui::PointerButton::Secondary), &mut draw);
+        assert!(matches!(right, Some(ListEvent::Empty { menu: true })), "right click");
+    }
+
+    #[test]
+    fn the_cursor_row_is_remembered_for_shift_f10() {
+        use crate::ui::testing::frame;
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        (view.entries, view.rows, view.selected) = (vec![entry("a.txt"), entry("b.txt")], vec![0, 1], Some(1));
+        frame(&ctx, vec![], |ui| show(ui, &view, 0, None, None));
+        let second = cursor_row_rect(&ctx).expect("drawn");
+        view.selected = Some(0);
+        frame(&ctx, vec![], |ui| show(ui, &view, 0, None, None));
+        let first = cursor_row_rect(&ctx).expect("drawn");
+        assert!(first.bottom() <= second.top() + 1.0, "{first:?} above {second:?}");
     }
 
     #[test]
