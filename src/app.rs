@@ -675,6 +675,10 @@ pub struct LumenApp {
     path_popup: PathPopup,
     /// The right-click menu, while open.
     context_menu: Option<ContextMenu>,
+    /// The open menu is a row's (not the folder's): its commands act on the selection.
+    context_on_entry: bool,
+    /// Where New ▸ finds templates (~/Templates or its translation).
+    templates: Option<PathBuf>,
     dialog: Option<Dialog>,
     rename: Option<RenameEdit>,
     clipboard: Option<Clip>,
@@ -735,6 +739,8 @@ impl LumenApp {
             window: None,
             path_popup: PathPopup::default(),
             context_menu: None,
+            context_on_entry: false,
+            templates: None,
             dialog: None,
             rename: None,
             clipboard: None,
@@ -768,6 +774,7 @@ impl LumenApp {
             let user_dirs = std::fs::read_to_string(config_home.join("user-dirs.dirs")).ok();
             let trash_place = cfg!(unix).then_some(trash.as_path());
             app.places = places::places(&home, user_dirs.as_deref(), trash_place);
+            app.templates = places::templates_dir(&home, user_dirs.as_deref());
             app.trash = cfg!(unix).then_some(trash);
         }
         app.navigate(ctx, start, None);
@@ -915,12 +922,15 @@ impl LumenApp {
             _ => Vec::new(),
         };
         self.context_menu = Some(ContextMenu::new(menu::entry_menu(&selection, bookmarked, &apps), pos));
+        self.context_on_entry = true;
     }
 
     /// Right click on the list's empty space: the menu for the folder itself.
     fn open_background_menu(&mut self, pos: egui::Pos2) {
-        let items = menu::background_menu(self.clipboard.is_some(), self.tab.view.sort);
+        let templates = self.templates.as_deref().map(places::templates).unwrap_or_default();
+        let items = menu::background_menu(self.clipboard.is_some(), self.tab.view.sort, &templates);
         self.context_menu = Some(ContextMenu::new(items, pos));
+        self.context_on_entry = false;
     }
 
     fn run_command(&mut self, ctx: &egui::Context, command: Command) {
@@ -966,6 +976,20 @@ impl LumenApp {
             }
             Command::Count => self.count_selected(ctx),
             Command::NewFolder => self.new_folder(ctx),
+            Command::NewFile(template) => self.new_file(ctx, template.as_deref()),
+            Command::OpenTerminal => {
+                // The folder clicked, else the one on screen.
+                let folder = match single {
+                    Some((path, true)) if self.context_on_entry => path,
+                    _ => self.tab.view.current.clone(),
+                };
+                #[cfg(not(windows))]
+                if let Err(err) = crate::apps::open_terminal(&folder) {
+                    self.tab.view.error = Some(err);
+                }
+                #[cfg(windows)]
+                let _ = folder;
+            }
             Command::Sort(column) => self.tab.view.sort_by(column),
             Command::Refresh => {
                 let keep = self.tab.view.selected_entry().map(|e| e.name.clone());
@@ -1058,6 +1082,18 @@ impl LumenApp {
     fn start_rename(&mut self) {
         let Some(entry) = self.tab.view.single() else { return };
         self.rename = Some(RenameEdit::new(entry.path.clone(), &entry.name, entry.is_dir));
+    }
+
+    /// New ▸ Empty File or a template: created here, then renamed in place.
+    fn new_file(&mut self, ctx: &egui::Context, template: Option<&Path>) {
+        match fs::ops::create_file(&self.tab.view.current, template) {
+            Ok(path) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+                self.tab.rename_after_load = Some(path);
+                self.reload(ctx, name);
+            }
+            Err(err) => self.tab.view.error = Some(err),
+        }
     }
 
     fn new_folder(&mut self, ctx: &egui::Context) {
@@ -2398,7 +2434,9 @@ mod tests {
         pick(&mut app, &["b.txt"]);
         app.open_background_menu(egui::pos2(10.0, 10.0));
         assert_eq!(selection_names(&app.tab.view), ["b.txt"]);
-        assert_eq!(menu_labels(&app), ["Paste", "New", "", "Sort by", "Refresh"]);
+        let mut expected = vec!["Paste", "New", "Open Terminal Here", "", "Sort by", "Refresh"];
+        expected.retain(|label| cfg!(not(windows)) || *label != "Open Terminal Here");
+        assert_eq!(menu_labels(&app), expected);
         let paste = &app.context_menu.as_ref().unwrap().items()[0];
         assert!(!paste.enabled, "nothing to paste yet");
     }
@@ -2415,6 +2453,15 @@ mod tests {
         assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub")));
         land(&mut app);
         assert_eq!(app.tab.view.current, dir.join("sub"));
+    }
+
+    #[test]
+    fn a_new_file_from_the_menu_is_created_and_renamed() {
+        let (ctx, mut app, dir) = app_in("app-menu-new-file");
+        app.run_command(&ctx, Command::NewFile(None));
+        assert!(dir.join("New File").is_file());
+        land(&mut app);
+        assert_eq!(app.rename.as_ref().map(|e| e.text.as_str()), Some("New File"), "named right away");
     }
 
     #[test]

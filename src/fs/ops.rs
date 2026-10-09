@@ -229,6 +229,42 @@ pub fn create_folder(parent: &Path) -> Result<PathBuf, String> {
     unreachable!("the name counter is unbounded")
 }
 
+/// Creates a file in `parent`: empty and called "New File", or a copy of
+/// `template` under its name. A taken name gets a number ("Report 2.odt");
+/// nothing existing is ever overwritten. Returns the created file.
+pub fn create_file(parent: &Path, template: Option<&Path>) -> Result<PathBuf, String> {
+    use std::io::Write;
+    let fail = |e: std::io::Error| format!("Cannot create a file in {}: {e}", parent.display());
+    let contents = match template {
+        Some(t) => std::fs::read(t).map_err(|e| format!("Cannot read the template {}: {e}", t.display()))?,
+        None => Vec::new(),
+    };
+    let name = template.and_then(|t| t.file_name()).map_or_else(|| NEW_FILE.to_owned(), |n| n.to_string_lossy().into_owned());
+    let (stem, ext) = match name.rfind('.').filter(|&dot| dot > 0) {
+        Some(dot) => name.split_at(dot),
+        None => (name.as_str(), ""),
+    };
+    for n in 1.. {
+        let path = parent.join(if n == 1 { name.clone() } else { format!("{stem} {n}{ext}") });
+        // `create_new` fails on a taken name, so there is no check-then-create race.
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(&contents) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                    return Err(fail(e));
+                }
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(fail(e)),
+        }
+    }
+    unreachable!("the name counter is unbounded")
+}
+
+pub const NEW_FILE: &str = "New File";
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -477,6 +513,30 @@ pub(crate) mod tests {
         assert_eq!(create_folder(&dir).unwrap(), dir.join("New Folder 4"));
         assert!(dir.join("New Folder").is_dir() && dir.join("New Folder 4").is_dir());
         assert!(dir.join("New Folder 3").is_file(), "existing file untouched");
+    }
+
+    #[test]
+    fn new_file_gets_a_free_name_and_never_overwrites() {
+        let dir = fresh_fixture("new-file");
+        assert_eq!(create_file(&dir, None).unwrap(), dir.join("New File"));
+        std::fs::write(dir.join("New File 2"), "KEEP").unwrap();
+        assert_eq!(create_file(&dir, None).unwrap(), dir.join("New File 3"));
+        assert_eq!(std::fs::read_to_string(dir.join("New File 2")).unwrap(), "KEEP");
+        assert_eq!(std::fs::read(dir.join("New File")).unwrap(), b"", "empty");
+    }
+
+    #[test]
+    fn a_new_file_from_a_template_copies_it_and_numbers_before_the_extension() {
+        let dir = fresh_fixture("new-file-template");
+        let templates = fresh_fixture("new-file-templates");
+        std::fs::write(templates.join("Report.odt"), "TEMPLATE").unwrap();
+        let template = templates.join("Report.odt");
+        assert_eq!(create_file(&dir, Some(&template)).unwrap(), dir.join("Report.odt"));
+        assert_eq!(create_file(&dir, Some(&template)).unwrap(), dir.join("Report 2.odt"));
+        assert_eq!(std::fs::read_to_string(dir.join("Report 2.odt")).unwrap(), "TEMPLATE");
+        let missing = templates.join("gone.txt");
+        assert!(create_file(&dir, Some(&missing)).is_err());
+        assert!(!dir.join("gone.txt").exists(), "nothing left behind");
     }
 
     #[test]

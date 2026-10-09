@@ -35,6 +35,10 @@ pub enum Command {
     ToggleBookmark,
     Count,
     NewFolder,
+    /// An empty file, or a copy of this template.
+    NewFile(Option<std::path::PathBuf>),
+    /// Open a terminal in the selected folder, or in the folder on screen.
+    OpenTerminal,
     Sort(SortColumn),
     Refresh,
 }
@@ -56,13 +60,15 @@ pub enum MenuIcon {
     Size,
     New,
     NewFolder,
+    NewFile,
+    Terminal,
     Sort,
     Refresh,
 }
 
 impl MenuIcon {
     #[cfg(test)]
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 18] = [
         Self::Open,
         Self::OpenWith,
         Self::NewTab,
@@ -77,6 +83,8 @@ impl MenuIcon {
         Self::Size,
         Self::New,
         Self::NewFolder,
+        Self::NewFile,
+        Self::Terminal,
         Self::Sort,
         Self::Refresh,
     ];
@@ -97,6 +105,8 @@ impl MenuIcon {
             Command::ToggleBookmark => Self::Bookmark,
             Command::Count => Self::Size,
             Command::NewFolder => Self::NewFolder,
+            Command::NewFile(_) => Self::NewFile,
+            Command::OpenTerminal => Self::Terminal,
             Command::Refresh => Self::Refresh,
             Command::Sort(_) => return None,
         })
@@ -344,12 +354,19 @@ pub fn entry_menu(selection: &[&Entry], bookmarked: bool, apps: &[App]) -> Vec<I
             Item::run(bookmark, None, true, Command::ToggleBookmark),
             Item::run("Calculate Size", Some("Alt+R"), true, Command::Count),
         ]);
+        if TERMINAL {
+            items.push(Item::run("Open Terminal Here", None, true, Command::OpenTerminal));
+        }
     }
     items
 }
 
-/// The menu for the folder's empty space. `can_paste`: the clipboard holds something.
-pub fn background_menu(can_paste: bool, sort: Sort) -> Vec<Item> {
+/// Lumen opens terminals itself only off Windows; there the shell's menu does.
+const TERMINAL: bool = cfg!(not(windows));
+
+/// The menu for the folder's empty space. `can_paste`: the clipboard holds
+/// something; `templates`: the files New ▸ offers copies of.
+pub fn background_menu(can_paste: bool, sort: Sort, templates: &[std::path::PathBuf]) -> Vec<Item> {
     let columns = COLUMNS
         .iter()
         .map(|&(label, column)| {
@@ -361,13 +378,24 @@ pub fn background_menu(can_paste: bool, sort: Sort) -> Vec<Item> {
             Item::run(label, None, true, Command::Sort(column))
         })
         .collect();
-    vec![
-        Item::run("Paste", Some("Ctrl+V"), can_paste, Command::Paste),
-        Item::sub("New", MenuIcon::New, vec![Item::run("Folder", Some("Ctrl+Shift+N"), true, Command::NewFolder)]),
-        Item::separator(),
-        Item::sub("Sort by", MenuIcon::Sort, columns),
-        Item::run("Refresh", None, true, Command::Refresh),
-    ]
+    let mut new = vec![
+        Item::run("Folder", Some("Ctrl+Shift+N"), true, Command::NewFolder),
+        Item::run("Empty File", None, true, Command::NewFile(None)),
+    ];
+    if !templates.is_empty() {
+        new.push(Item::separator());
+    }
+    new.extend(templates.iter().map(|t| {
+        // The name without its extension, as file managers list templates.
+        let label = t.file_stem().map_or_else(|| t.display().to_string(), |s| s.to_string_lossy().into_owned());
+        Item::run(label, None, true, Command::NewFile(Some(t.clone())))
+    }));
+    let mut items = vec![Item::run("Paste", Some("Ctrl+V"), can_paste, Command::Paste), Item::sub("New", MenuIcon::New, new)];
+    if TERMINAL {
+        items.push(Item::run("Open Terminal Here", None, true, Command::OpenTerminal));
+    }
+    items.extend([Item::separator(), Item::sub("Sort by", MenuIcon::Sort, columns), Item::run("Refresh", None, true, Command::Refresh)]);
+    items
 }
 
 #[cfg(test)]
@@ -464,6 +492,11 @@ mod tests {
         Entry { name: name.into(), path: format!("/x/{name}").into(), is_dir, size: None, modified: None, hidden: false }
     }
 
+    /// `expected` without the items Lumen adds only off Windows.
+    fn here(expected: &[&str]) -> Vec<String> {
+        expected.iter().filter(|line| TERMINAL || !line.contains("Open Terminal Here")).map(|s| s.to_string()).collect()
+    }
+
     /// Label and whether it is enabled, sub-items indented; separators as "-".
     fn outline(items: &[Item]) -> Vec<String> {
         let mut out = Vec::new();
@@ -502,7 +535,8 @@ mod tests {
     #[test]
     fn every_item_has_an_icon_except_the_sort_columns() {
         let (dir, file) = (entry("src", true), entry("a.txt", false));
-        for items in [entry_menu(&[&dir], false, &[]), entry_menu(&[&file], true, &[]), background_menu(true, Sort::default())] {
+        let templates = [std::path::PathBuf::from("/t/Report.odt")];
+        for items in [entry_menu(&[&dir], false, &[]), entry_menu(&[&file], true, &[]), background_menu(true, Sort::default(), &templates)] {
             assert_eq!(without_icon(&items), Vec::<String>::new());
         }
     }
@@ -531,7 +565,7 @@ mod tests {
         let dir = entry("src", true);
         assert_eq!(
             outline(&entry_menu(&[&dir], false, &[])),
-            [
+            here(&[
                 "Open [Enter]",
                 "Open in New Tab",
                 "-",
@@ -545,7 +579,8 @@ mod tests {
                 "-",
                 "Add to Bookmarks",
                 "Calculate Size [Alt+R]",
-            ]
+                "Open Terminal Here",
+            ])
         );
         assert!(outline(&entry_menu(&[&dir], true, &[])).contains(&"Remove from Bookmarks".to_owned()));
     }
@@ -583,12 +618,19 @@ mod tests {
     #[test]
     fn the_empty_space_offers_paste_new_sort_and_refresh() {
         let sort = Sort { column: SortColumn::Size, descending: true };
+        let templates = [std::path::PathBuf::from("/t/Report.odt"), std::path::PathBuf::from("/t/Note")];
+        let items = background_menu(true, sort, &templates);
         assert_eq!(
-            outline(&background_menu(true, sort)),
-            [
+            outline(&items),
+            here(&[
                 "Paste [Ctrl+V]",
                 "New",
                 "  Folder [Ctrl+Shift+N]",
+                "  Empty File",
+                "  -",
+                "  Report",
+                "  Note",
+                "Open Terminal Here",
                 "-",
                 "Sort by",
                 "  Name",
@@ -598,9 +640,15 @@ mod tests {
                 "  Files",
                 &format!("  Size {SORT_DESCENDING}"),
                 "Refresh",
-            ]
+            ])
         );
-        assert_eq!(outline(&background_menu(false, Sort::default()))[0], "Paste [Ctrl+V] (off)");
-        assert_eq!(outline(&background_menu(false, Sort::default()))[5], format!("  Name {SORT_ASCENDING}"));
+        let Kind::Sub(new) = &items[1].kind else { panic!("New is a submenu") };
+        assert_eq!(new[1].kind, Kind::Run(Command::NewFile(None)));
+        assert_eq!(new[3].kind, Kind::Run(Command::NewFile(Some(templates[0].clone()))));
+        let bare = outline(&background_menu(false, Sort::default(), &[]));
+        assert_eq!(bare[0], "Paste [Ctrl+V] (off)");
+        let shown = here(&["New", "  Folder [Ctrl+Shift+N]", "  Empty File", "Open Terminal Here", "-", "Sort by"]);
+        assert_eq!(bare[1..=shown.len()], shown, "no templates, no separator");
+        assert_eq!(bare[shown.len() + 1], format!("  Name {SORT_ASCENDING}"));
     }
 }
