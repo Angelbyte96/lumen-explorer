@@ -43,6 +43,9 @@ impl RenameEdit {
     }
 }
 
+/// How opaque a cut entry's icon and name are until it is pasted.
+const CUT_OPACITY: f32 = 0.5;
+
 /// Highest list zoom level (Ctrl+wheel, Ctrl+Plus); 0 is the normal size.
 pub const MAX_ZOOM: u8 = 4;
 
@@ -65,6 +68,7 @@ pub fn row_height(zoom: u8, text_height: f32) -> f32 {
 pub fn show(
     ui: &mut egui::Ui,
     view: &View,
+    cut: &[PathBuf],
     zoom: u8,
     scroll: Option<Scroll>,
     mut edit: Option<&mut RenameEdit>,
@@ -118,6 +122,10 @@ pub fn show(
                     // would hang below the row and be clipped (and the name with it).
                     let line = egui::vec2(ui.available_width(), row_height);
                     ui.allocate_ui_with_layout(line, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        // Cut and not pasted yet: faded, like other explorers.
+                        if cut.contains(&entry.path) {
+                            ui.set_opacity(CUT_OPACITY);
+                        }
                         icons::show(ui, entry, icon);
                         if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
                             if let Some(submit) = rename_field(ui, edit) {
@@ -343,7 +351,7 @@ mod tests {
         let mut shapes = Vec::new();
         for _ in 0..3 {
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                show(ui, &view, zoom, None, None);
+                show(ui, &view, &[], zoom, None, None);
             });
             output.textures_delta.clear();
             shapes = output.shapes;
@@ -390,7 +398,7 @@ mod tests {
         let mut shapes = Vec::new();
         for _ in 0..3 {
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                show(ui, &view, 0, None, None);
+                show(ui, &view, &[], 0, None, None);
             });
             output.textures_delta.clear();
             shapes = output.shapes;
@@ -426,12 +434,45 @@ mod tests {
         let mut view = View::default();
         (view.entries, view.rows, view.selected) = (vec![entry("a.txt")], vec![0], Some(0));
         let below = egui::pos2(300.0, 500.0);
-        let mut draw = |ui: &mut egui::Ui| show(ui, &view, 0, None, None);
+        let mut draw = |ui: &mut egui::Ui| show(ui, &view, &[], 0, None, None);
         frame(&ctx, vec![egui::Event::PointerMoved(below)], &mut draw);
         let left = frame(&ctx, press(below, egui::PointerButton::Primary), &mut draw);
         assert!(matches!(left, Some(ListEvent::Empty { menu: false })), "left click");
         let right = frame(&ctx, press(below, egui::PointerButton::Secondary), &mut draw);
         assert!(matches!(right, Some(ListEvent::Empty { menu: true })), "right click");
+    }
+
+    /// How opaque the first letter of `name` was painted, with `cut` waiting to be pasted.
+    fn name_opacity(name: &str, cut: &[PathBuf]) -> f32 {
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        (view.entries, view.rows) = (vec![entry("a.txt"), entry("b.txt")], vec![0, 1]);
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                show(ui, &view, cut, 0, None, None);
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == name => {
+                    let glyph = t.galley.rows[0].visuals.mesh.vertices[0].color;
+                    Some(f32::from(glyph.a()) / 255.0)
+                }
+                _ => None,
+            })
+            .expect("name painted")
+    }
+
+    #[test]
+    fn cut_entries_are_greyed_until_pasted() {
+        let cut = [PathBuf::from("/x/a.txt")];
+        assert!(name_opacity("a.txt", &cut) < 0.7, "the cut one is faded");
+        assert_eq!(name_opacity("b.txt", &cut), 1.0, "the others are not");
+        assert_eq!(name_opacity("a.txt", &[]), 1.0);
     }
 
     #[test]
@@ -440,10 +481,10 @@ mod tests {
         let ctx = egui::Context::default();
         let mut view = View::default();
         (view.entries, view.rows, view.selected) = (vec![entry("a.txt"), entry("b.txt")], vec![0, 1], Some(1));
-        frame(&ctx, vec![], |ui| show(ui, &view, 0, None, None));
+        frame(&ctx, vec![], |ui| show(ui, &view, &[], 0, None, None));
         let second = cursor_row_rect(&ctx).expect("drawn");
         view.selected = Some(0);
-        frame(&ctx, vec![], |ui| show(ui, &view, 0, None, None));
+        frame(&ctx, vec![], |ui| show(ui, &view, &[], 0, None, None));
         let first = cursor_row_rect(&ctx).expect("drawn");
         assert!(first.bottom() <= second.top() + 1.0, "{first:?} above {second:?}");
     }
@@ -459,7 +500,7 @@ mod tests {
         for _ in 0..2 {
             ctx.run_ui(egui::RawInput::default(), |ui| {
                 row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
-                show(ui, &view, 0, None, Some(&mut edit));
+                show(ui, &view, &[], 0, None, Some(&mut edit));
             })
             .drop_without_applying_deltas();
         }

@@ -96,12 +96,12 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 | Delete | Move the selected entries to the trash (asks once; Enter confirms, Esc cancels) |
 | F2 | Rename the selected entry in place (Enter to apply, Esc to cancel); does nothing with several selected |
 | Ctrl+Shift+N | Create "New Folder" here and rename it |
-| Ctrl+C / Ctrl+X | Copy / cut the selected entries |
+| Ctrl+C / Ctrl+X | Copy / cut the selected entries (cut ones are faded until pasted) |
 | Ctrl+V | Paste into the current folder, one entry after another in the background; a name already there asks to Replace (Enter, the old one goes to the trash) or Skip (Esc) |
 | Alt+R | Count the selected folder: its size and how many folders and files it holds, all the way down (runs in the background; symlinks are not followed and other disks are not entered). Folders show `--` until counted; the result stays while you are in this folder |
 | Ctrl+Plus / Ctrl+Minus, Ctrl+wheel | Bigger / smaller icons and rows in the list (5 sizes); the text, side panel and toolbar keep their size |
 | Ctrl+0 | Icons and rows back to the normal size |
-| Esc | Clear the filter; with an empty filter, drop a multiple selection, then stop the Alt+R count, then cancel the copy or move in progress with the entries still waiting (holding it stops at the first thing it undid) |
+| Esc | Clear the filter; with an empty filter, drop a multiple selection, then stop the Alt+R count, then cancel the copy or move in progress with the entries still waiting, then forget a cut waiting to be pasted (holding it stops at the first thing it undid) |
 
 Each tab keeps its own folder, history, filter and selection; a tab is reloaded when you come back to it.
 
