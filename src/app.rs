@@ -12,7 +12,9 @@ use crate::fs::count::{Count, Totals};
 use crate::fs::watch::Watcher;
 use crate::fs::{self, Entry, Lister, Listing};
 use crate::input::{self, Action, Confirm};
-use crate::menu::{self, Command};
+use crate::menu::Command;
+#[cfg(not(windows))]
+use crate::menu;
 use crate::places::{self, Bookmarks, Mount, Place, Recents, Usage};
 use crate::fs::ops::Renamed;
 use crate::fs::preview::Previewer;
@@ -677,6 +679,12 @@ pub struct LumenApp {
     context_menu: Option<ContextMenu>,
     /// The open menu is a row's (not the folder's): its commands act on the selection.
     context_on_entry: bool,
+    /// The shell's menu behind the open one, whose items it runs.
+    #[cfg(windows)]
+    shell_menu: Option<crate::shell_menu::native::ShellMenu>,
+    /// Lumen's window, for what the shell runs on its behalf.
+    #[cfg(windows)]
+    hwnd: Option<isize>,
     /// Where New ▸ finds templates (~/Templates or its translation).
     templates: Option<PathBuf>,
     dialog: Option<Dialog>,
@@ -740,6 +748,10 @@ impl LumenApp {
             path_popup: PathPopup::default(),
             context_menu: None,
             context_on_entry: false,
+            #[cfg(windows)]
+            shell_menu: None,
+            #[cfg(windows)]
+            hwnd: None,
             templates: None,
             dialog: None,
             rename: None,
@@ -916,19 +928,41 @@ impl LumenApp {
         }
         let selection = view.selection();
         let bookmarked = matches!(selection.as_slice(), [one] if one.is_dir && self.bookmarks.contains(&one.path));
-        let apps = match selection.as_slice() {
-            #[cfg(not(windows))]
-            [one] => crate::apps::apps_for(&crate::apps::Dirs::from_env(), &one.name, one.is_dir),
-            _ => Vec::new(),
+        #[cfg(not(windows))]
+        let items = {
+            let apps = match selection.as_slice() {
+                [one] => crate::apps::apps_for(&crate::apps::Dirs::from_env(), &one.name, one.is_dir),
+                _ => Vec::new(),
+            };
+            menu::entry_menu(&selection, bookmarked, &apps)
         };
-        self.context_menu = Some(ContextMenu::new(menu::entry_menu(&selection, bookmarked, &apps), pos));
+        // The shell's own items, as File Explorer shows them; Lumen's alone if it fails.
+        #[cfg(windows)]
+        let items = {
+            let paths: Vec<PathBuf> = selection.iter().map(|e| e.path.clone()).collect();
+            let shell = crate::shell_menu::native::for_entries(&paths, &view.current, self.hwnd);
+            let (shell_menu, shell_items) = shell.map_or((None, Vec::new()), |(menu, items)| (Some(menu), items));
+            self.shell_menu = shell_menu;
+            crate::shell_menu::entry_menu(shell_items, &selection, bookmarked)
+        };
+        self.context_menu = Some(ContextMenu::new(items, pos));
         self.context_on_entry = true;
     }
 
     /// Right click on the list's empty space: the menu for the folder itself.
     fn open_background_menu(&mut self, pos: egui::Pos2) {
-        let templates = self.templates.as_deref().map(places::templates).unwrap_or_default();
-        let items = menu::background_menu(self.clipboard.is_some(), self.tab.view.sort, &templates);
+        #[cfg(not(windows))]
+        let items = {
+            let templates = self.templates.as_deref().map(places::templates).unwrap_or_default();
+            menu::background_menu(self.clipboard.is_some(), self.tab.view.sort, &templates)
+        };
+        #[cfg(windows)]
+        let items = {
+            let shell = crate::shell_menu::native::for_folder(&self.tab.view.current, self.hwnd);
+            let (shell_menu, shell_items) = shell.map_or((None, Vec::new()), |(menu, items)| (Some(menu), items));
+            self.shell_menu = shell_menu;
+            crate::shell_menu::background_menu(shell_items, self.clipboard.is_some(), self.tab.view.sort)
+        };
         self.context_menu = Some(ContextMenu::new(items, pos));
         self.context_on_entry = false;
     }
@@ -989,6 +1023,16 @@ impl LumenApp {
                 }
                 #[cfg(windows)]
                 let _ = folder;
+            }
+            Command::Shell(offset) => {
+                #[cfg(windows)]
+                if let Some(shell) = self.shell_menu.take()
+                    && let Err(err) = shell.invoke(offset, self.hwnd)
+                {
+                    self.tab.view.error = Some(err);
+                }
+                #[cfg(not(windows))]
+                let _ = offset;
             }
             Command::Sort(column) => self.tab.view.sort_by(column),
             Command::Refresh => {
@@ -1648,7 +1692,18 @@ impl LumenApp {
 }
 
 impl eframe::App for LumenApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(handle) = frame.window_handle()
+                && let RawWindowHandle::Win32(win32) = handle.as_raw()
+            {
+                self.hwnd = Some(win32.hwnd.get());
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = frame;
         let ctx = ui.ctx().clone();
 
         if let Some(listing) = self.tab.lister.poll() {
@@ -1827,6 +1882,11 @@ impl eframe::App for LumenApp {
             self.context_menu = None;
             if let MenuEvent::Run(command) = event {
                 self.run_command(&ctx, command);
+            }
+            // Handlers expect their menu alive until an item runs or it closes.
+            #[cfg(windows)]
+            {
+                self.shell_menu = None;
             }
         }
 

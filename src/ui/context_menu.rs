@@ -22,6 +22,8 @@ pub struct ContextMenu {
     pos: egui::Pos2,
     /// Height of the rows as last laid out; the list is that tall up to a limit.
     content: Option<f32>,
+    /// Items' own pictures, uploaded once, by the item's place in the menu.
+    textures: std::collections::HashMap<Vec<usize>, egui::TextureHandle>,
 }
 
 /// What the open menu did this frame.
@@ -33,7 +35,7 @@ pub enum MenuEvent {
 
 impl ContextMenu {
     pub fn new(items: Vec<Item>, pos: egui::Pos2) -> Self {
-        Self { menu: Menu::new(items), pos, content: None }
+        Self { menu: Menu::new(items), pos, content: None, textures: std::collections::HashMap::new() }
     }
 
     #[cfg(test)]
@@ -164,7 +166,15 @@ impl ContextMenu {
                             // A fixed column, so labels line up with or without an icon.
                             let side = ui.text_style_height(&egui::TextStyle::Body);
                             let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
-                            if let Some(icon) = item.icon {
+                            if let Some(picture) = &item.picture {
+                                let texture = self.textures.entry(row.at.clone()).or_insert_with(|| {
+                                    let image = egui::ColorImage::from_rgba_premultiplied(picture.size, &picture.rgba);
+                                    ui.ctx().load_texture(format!("lumen_menu_picture_{:?}", row.at), image, egui::TextureOptions::LINEAR)
+                                });
+                                let tint = if item.enabled { egui::Color32::WHITE } else { egui::Color32::from_white_alpha(110) };
+                                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                                ui.painter().image(texture.id(), icon_rect.shrink(1.0), uv, tint);
+                            } else if let Some(icon) = item.icon {
                                 crate::ui::icons::menu_icon(ui.painter(), icon_rect.shrink(1.0), icon, color);
                             }
                             ui.add_space(4.0);
@@ -281,6 +291,28 @@ mod tests {
         }
         let shown = ctx.data(|d| d.get_temp::<egui::Rect>(list_id())).unwrap();
         assert!(shown.height() < 3.0 * row_rect(&ctx, 0).height(), "two items, no empty space: {shown:?}");
+    }
+
+    #[test]
+    fn an_item_with_its_own_picture_draws_it() {
+        let ctx = egui::Context::default();
+        let picture = std::sync::Arc::new(crate::menu::Bitmap { size: [2, 2], rgba: vec![255; 16] });
+        let item = Item::run("Open with Code", None, true, Command::Shell(0)).with_picture(Some(picture));
+        let mut menu = ContextMenu::new(vec![item], egui::pos2(100.0, 100.0));
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                menu.show(ui.ctx());
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let font = egui::TextureId::default();
+        let images = shapes
+            .iter()
+            .filter(|s| matches!(&s.shape, egui::Shape::Mesh(m) if m.texture_id != font))
+            .count();
+        assert_eq!(images, 1, "the picture is painted from its own texture");
     }
 
     #[test]
