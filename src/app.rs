@@ -1046,6 +1046,14 @@ impl LumenApp {
         }
     }
 
+    /// Entries cut and waiting to be pasted: the list greys them.
+    fn cut_paths(&self) -> &[PathBuf] {
+        match &self.clipboard {
+            Some(Clip { paths, mode: Mode::Move }) => paths,
+            _ => &[],
+        }
+    }
+
     fn set_clipboard(&mut self, mode: Mode) {
         let paths: Vec<PathBuf> = self.tab.view.selection().iter().map(|e| e.path.clone()).collect();
         if paths.is_empty() {
@@ -1536,7 +1544,13 @@ impl LumenApp {
                     self.hold_absorbed = true;
                 }
                 if !self.hold_absorbed {
-                    self.cancel_job();
+                    if self.job.is_some() {
+                        self.cancel_job();
+                    } else if self.clipboard.as_ref().is_some_and(|clip| clip.mode == Mode::Move) {
+                        // Last: a cut waiting to be pasted is forgotten, as in other explorers.
+                        self.clipboard = None;
+                        self.notice = Some("Cut cancelled".into());
+                    }
                 }
             }
             Action::CancelHeld => {
@@ -1685,7 +1699,8 @@ impl eframe::App for LumenApp {
 
         let list = egui::CentralPanel::default_margins().show(ui, |ui| {
             let scroll = self.tab.view.scroll.take();
-            let event = ui::file_list::show(ui, &self.tab.view, self.list_zoom, scroll, self.rename.as_mut());
+            let cut = self.cut_paths().to_vec();
+            let event = ui::file_list::show(ui, &self.tab.view, &cut, self.list_zoom, scroll, self.rename.as_mut());
             match event {
                 Some(ListEvent::Select(i)) => self.tab.view.select_row(i),
                 Some(ListEvent::Toggle(i)) => self.tab.view.toggle_pick(i),
@@ -2339,6 +2354,38 @@ mod tests {
         let b = Path::new("/x/b b.txt");
         assert_eq!(paths_text(&[a, b]), "/x/a.txt\n/x/b b.txt");
         assert_eq!(paths_text(&[a]), "/x/a.txt");
+    }
+
+    #[test]
+    fn escape_cancels_a_pending_cut_but_keeps_a_copy() {
+        let (ctx, mut app, dir) = app_in("app-escape-cut");
+        pick(&mut app, &["a.txt"]);
+        app.handle_action(&ctx, Action::Cut);
+        assert_eq!(app.cut_paths(), [dir.join("a.txt")], "shown greyed");
+        app.handle_action(&ctx, Action::TypeChar('b'));
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.clipboard.is_some(), "the filter goes first");
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.clipboard.is_none());
+        assert_eq!(app.notice.as_deref(), Some("Cut cancelled"));
+        assert!(app.cut_paths().is_empty());
+        app.handle_action(&ctx, Action::Copy);
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.clipboard.is_some(), "a copy is not undone by Esc");
+        assert!(app.cut_paths().is_empty(), "copies are not greyed");
+    }
+
+    #[test]
+    fn escape_stops_a_running_cut_paste_before_forgetting_the_cut() {
+        let (ctx, mut app, dir) = app_in("app-escape-cut-running");
+        pick(&mut app, &["a.txt"]);
+        app.handle_action(&ctx, Action::Cut);
+        app.navigate(&ctx, dir.join("sub"), None);
+        land(&mut app);
+        app.handle_action(&ctx, Action::Paste);
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.job.as_ref().unwrap().job.cancel_requested());
+        assert!(app.clipboard.is_some(), "one Esc, one thing undone");
     }
 
     #[test]
