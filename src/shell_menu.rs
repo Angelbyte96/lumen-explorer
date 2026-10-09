@@ -35,6 +35,7 @@ pub fn clean_label(raw: &str) -> String {
 /// anything else is run by the shell, by `offset` from the first id.
 pub fn command_for(verb: Option<&str>, offset: u32) -> Command {
     match verb.map(str::to_ascii_lowercase).as_deref() {
+        Some("open") => Command::Open,
         Some("cut") => Command::Cut,
         Some("copy") => Command::Copy,
         Some("paste") => Command::Paste,
@@ -103,21 +104,33 @@ fn with_lumen_rules(items: Vec<Item>, adjust: &impl Fn(&mut Item, &Command)) -> 
 
 /// The menu for the selection on Windows: the shell's items (`shell`, empty
 /// when the shell could not be asked), then what only Lumen offers.
-pub fn entry_menu(shell: Vec<Item>, selection: &[&Entry], bookmarked: bool) -> Vec<Item> {
+/// `can_paste`: Lumen's clipboard holds something, for a folder's own Paste.
+pub fn entry_menu(shell: Vec<Item>, selection: &[&Entry], bookmarked: bool, can_paste: bool) -> Vec<Item> {
     if shell.is_empty() {
         return menu::entry_menu(selection, bookmarked, &[]);
     }
     let single = selection.len() == 1;
     let folder = single && selection[0].is_dir;
-    let mut items = tidy(with_lumen_rules(shell, &|item, command| {
-        if *command == Command::Rename {
-            item.enabled &= single;
+    let mut items = tidy(with_lumen_rules(shell, &|item, command| match command {
+        Command::Rename | Command::Open => item.enabled &= single,
+        // A folder's Paste puts things in that folder, not in the one on screen.
+        Command::Paste if folder => {
+            item.kind = Kind::Run(Command::PasteInto);
+            item.enabled = can_paste;
         }
+        Command::Paste => item.enabled = false,
+        _ => {}
     }));
+    // Without CMF_CANRENAME's answer (or with a shell that leaves it out) Lumen's own.
+    if !contains(&items, &Command::Rename) {
+        items.push(Item::separator());
+        items.push(Item::run("Rename", Some("F2"), single, Command::Rename));
+    }
     items.push(Item::separator());
     if folder {
         items.push(Item::run("Open in New Tab", None, true, Command::OpenInNewTab));
     }
+    items.push(Item::run("Copy Path", None, true, Command::CopyPath));
     items.push(Item::run("Delete Permanently", Some("Shift+Delete"), true, Command::DeleteForever));
     if folder {
         let bookmark = if bookmarked { "Remove from Bookmarks" } else { "Add to Bookmarks" };
@@ -239,7 +252,7 @@ mod tests {
             shell("Properties", 4),
         ];
         assert_eq!(
-            outline(&entry_menu(items.clone(), &[&dir], false)),
+            outline(&entry_menu(items.clone(), &[&dir], false, false)),
             [
                 "Open",
                 "Cut [Ctrl+X]",
@@ -248,13 +261,14 @@ mod tests {
                 "Properties",
                 "-",
                 "Open in New Tab",
+                "Copy Path",
                 "Delete Permanently [Shift+Delete]",
                 "Add to Bookmarks",
                 "Calculate Size [Alt+R]",
             ]
         );
         let file = entry("a.txt", false);
-        let several = outline(&entry_menu(items, &[&dir, &file], false));
+        let several = outline(&entry_menu(items, &[&dir, &file], false, false));
         assert!(several.contains(&"Rename [F2] (off)".to_owned()), "{several:?}");
         assert_eq!(several.last().map(String::as_str), Some("Delete Permanently [Shift+Delete]"));
     }
@@ -262,7 +276,7 @@ mod tests {
     #[test]
     fn without_the_shell_the_windows_menu_is_lumens() {
         let file = entry("a.txt", false);
-        assert_eq!(entry_menu(Vec::new(), &[&file], false), menu::entry_menu(&[&file], false, &[]));
+        assert_eq!(entry_menu(Vec::new(), &[&file], false, false), menu::entry_menu(&[&file], false, &[]));
         let sort = Sort::default();
         assert_eq!(background_menu(Vec::new(), true, sort), menu::background_menu(true, sort, &[]));
     }
@@ -286,11 +300,59 @@ mod tests {
         assert_eq!(out.iter().filter(|l| l.as_str() == "Refresh").count(), 1, "{out:?}");
     }
 
+    fn runs(items: &[Item], command: &Command) -> Vec<(String, bool)> {
+        let mut out = Vec::new();
+        for item in items {
+            match &item.kind {
+                Kind::Run(c) if c == command => out.push((item.label.clone(), item.enabled)),
+                Kind::Sub(sub) => out.extend(runs(sub, command)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_windows_entry_menu_has_lumens_copy_path() {
+        let file = entry("a.txt", false);
+        let items = entry_menu(vec![shell("Open", 0), shell("Properties", 4)], &[&file], false, false);
+        assert_eq!(runs(&items, &Command::CopyPath).len(), 1, "{:?}", outline(&items));
+    }
+
+    #[test]
+    fn the_windows_entry_menu_keeps_a_rename_when_the_shell_gives_none() {
+        let file = entry("a.txt", false);
+        let items = entry_menu(vec![shell("Open", 0), Item::run("Delete", None, true, Command::Trash)], &[&file], false, false);
+        assert_eq!(runs(&items, &Command::Rename), [("Rename".to_owned(), true)], "{:?}", outline(&items));
+        let two = [&file, &file];
+        assert_eq!(runs(&entry_menu(vec![shell("Open", 0)], &two, false, false), &Command::Rename), [("Rename".to_owned(), false)]);
+    }
+
+    #[test]
+    fn paste_in_a_folders_menu_pastes_into_that_folder() {
+        let dir = entry("src", true);
+        let shell_items = vec![shell("Open", 0), Item::run("Paste", None, true, Command::Paste)];
+        let items = entry_menu(shell_items.clone(), &[&dir], false, true);
+        assert_eq!(runs(&items, &Command::Paste), []);
+        assert_eq!(runs(&items, &Command::PasteInto), [("Paste".to_owned(), true)], "{:?}", outline(&items));
+        let empty = entry_menu(shell_items.clone(), &[&dir], false, false);
+        assert_eq!(runs(&empty, &Command::PasteInto), [("Paste".to_owned(), false)], "Lumen's clipboard decides");
+        let file = entry("a.txt", false);
+        let on_file = entry_menu(shell_items, &[&file], false, true);
+        assert!(runs(&on_file, &Command::Paste).iter().chain(&runs(&on_file, &Command::PasteInto)).all(|(_, on)| !on));
+    }
+
+    #[test]
+    fn the_shells_open_runs_lumens_open() {
+        assert_eq!(command_for(Some("open"), 0), Command::Open);
+        assert_eq!(command_for(Some("Open"), 0), Command::Open);
+    }
+
     #[test]
     fn shell_items_keep_the_shells_icons_and_lumens_get_its_own() {
         let picture = std::sync::Arc::new(menu::Bitmap { size: [1, 1], rgba: vec![255, 0, 0, 255] });
         let open = shell("Open", 0).with_picture(Some(picture.clone()));
-        let items = entry_menu(vec![open], &[&entry("a.txt", false)], false);
+        let items = entry_menu(vec![open], &[&entry("a.txt", false)], false, false);
         assert_eq!(items[0].picture.as_ref(), Some(&picture));
         assert_eq!(items[0].icon, None, "the shell's picture, not a line icon");
         let delete = items.iter().find(|i| i.label == "Delete Permanently").unwrap();
@@ -315,7 +377,7 @@ pub mod native {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
-        BHID_SFObject, CMF_NORMAL, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, GCS_VERBW, IContextMenu, IContextMenu2,
+        BHID_SFObject, CMF_CANRENAME, CMF_NORMAL, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, GCS_VERBW, IContextMenu, IContextMenu2,
         IContextMenu3, ILFindLastID, ILFree, IShellFolder, IShellItem, SHBindToParent, SHCreateItemFromParsingName,
         SHParseDisplayName,
     };
@@ -415,7 +477,8 @@ pub mod native {
         unsafe {
             let hmenu = CreatePopupMenu().map_err(|e| fail("popup", e))?;
             let shell = ShellMenu { menu, hmenu, folder: folder.to_path_buf() };
-            shell.menu.QueryContextMenu(hmenu, 0, FIRST, LAST, CMF_NORMAL).ok().map_err(|e| fail("items", e))?;
+            // CMF_CANRENAME: Lumen can rename, so the shell lists Rename (Lumen's, by its verb).
+            shell.menu.QueryContextMenu(hmenu, 0, FIRST, LAST, CMF_NORMAL | CMF_CANRENAME).ok().map_err(|e| fail("items", e))?;
             let items = tidy(read(&shell.menu, hmenu, 0));
             Ok((shell, items))
         }

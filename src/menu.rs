@@ -28,6 +28,9 @@ pub enum Command {
     Copy,
     CopyPath,
     Paste,
+    /// Paste into the single selected folder (its own Paste, on Windows).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    PasteInto,
     Rename,
     Trash,
     DeleteForever,
@@ -101,7 +104,7 @@ impl MenuIcon {
             Command::Cut => Self::Cut,
             Command::Copy => Self::Copy,
             Command::CopyPath => Self::CopyPath,
-            Command::Paste => Self::Paste,
+            Command::Paste | Command::PasteInto => Self::Paste,
             Command::Rename => Self::Rename,
             Command::Trash => Self::Trash,
             Command::DeleteForever => Self::Delete,
