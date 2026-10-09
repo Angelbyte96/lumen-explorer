@@ -973,7 +973,7 @@ impl LumenApp {
             let shell = crate::shell_menu::native::for_entries(&paths, &view.current, self.hwnd);
             let (shell_menu, shell_items) = shell.map_or((None, Vec::new()), |(menu, items)| (Some(menu), items));
             self.shell_menu = shell_menu;
-            crate::shell_menu::entry_menu(shell_items, &selection, bookmarked)
+            crate::shell_menu::entry_menu(shell_items, &selection, bookmarked, self.clipboard.is_some())
         };
         self.context_menu = Some(ContextMenu::new(items, pos));
         self.context_on_entry = true;
@@ -1030,6 +1030,11 @@ impl LumenApp {
                 self.notice = Some(if paths.len() == 1 { "Path copied".into() } else { format!("{} paths copied", paths.len()) });
             }
             Command::Paste => self.paste(ctx),
+            Command::PasteInto => {
+                if let Some((folder, true)) = single {
+                    self.paste_into(ctx, folder);
+                }
+            }
             Command::Rename => self.start_rename(),
             Command::Trash => self.ask_trash(),
             Command::DeleteForever => self.ask_delete_forever(),
@@ -1223,6 +1228,12 @@ impl LumenApp {
     }
 
     fn paste(&mut self, ctx: &egui::Context) {
+        self.paste_into(ctx, self.tab.view.current.clone());
+    }
+
+    /// Pastes the clipboard into `dest`: the folder on screen, or a folder's
+    /// own Paste in the Windows menu.
+    fn paste_into(&mut self, ctx: &egui::Context, dest: PathBuf) {
         if self.job.is_some() || self.batch.is_some() {
             self.tab.view.error = Some("Another operation is still running".into());
             return;
@@ -1236,7 +1247,7 @@ impl LumenApp {
         let total = paths.len();
         self.batch = Some(Batch {
             mode,
-            dest: self.tab.view.current.clone(),
+            dest,
             sources: paths.clone(),
             parked: None,
             queue: paths.into(),
@@ -2663,6 +2674,18 @@ mod tests {
         assert!(dir.join("New File").is_file());
         land(&mut app);
         assert_eq!(app.rename.as_ref().map(|e| e.text.as_str()), Some("New File"), "named right away");
+    }
+
+    #[test]
+    fn paste_into_pastes_in_the_selected_folder_not_the_one_on_screen() {
+        let (ctx, mut app, dir) = app_in("app-paste-into");
+        pick(&mut app, &["a.txt"]);
+        app.handle_action(&ctx, Action::Copy);
+        pick(&mut app, &["sub"]);
+        app.run_command(&ctx, Command::PasteInto);
+        wait_paste(&ctx, &mut app);
+        assert_eq!(names_in(&dir.join("sub")), ["a.txt"]);
+        assert_eq!(names_in(&dir), ["a.txt", "b.txt", "sub"], "no copy here");
     }
 
     #[test]
