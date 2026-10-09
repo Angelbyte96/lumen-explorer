@@ -1293,7 +1293,9 @@ dependencies = [
  "libc",
  "notify",
  "open",
+ "raw-window-handle",
  "trash",
+ "windows",
  "windows-sys 0.61.2",
  "winit",
 ]

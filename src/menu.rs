@@ -39,6 +39,9 @@ pub enum Command {
     NewFile(Option<std::path::PathBuf>),
     /// Open a terminal in the selected folder, or in the folder on screen.
     OpenTerminal,
+    /// A Windows shell item, by its offset from the first command id.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Shell(u32),
     Sort(SortColumn),
     Refresh,
 }
@@ -108,7 +111,7 @@ impl MenuIcon {
             Command::NewFile(_) => Self::NewFile,
             Command::OpenTerminal => Self::Terminal,
             Command::Refresh => Self::Refresh,
-            Command::Sort(_) => return None,
+            Command::Sort(_) | Command::Shell(_) => return None,
         })
     }
 }
@@ -120,10 +123,20 @@ pub enum Kind {
     Separator,
 }
 
+/// A picture an item brings along (a Windows shell item's own icon), in
+/// premultiplied RGBA.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bitmap {
+    pub size: [usize; 2],
+    pub rgba: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub label: String,
     pub icon: Option<MenuIcon>,
+    /// Drawn instead of `icon` when set.
+    pub picture: Option<std::sync::Arc<Bitmap>>,
     pub shortcut: Option<&'static str>,
     pub enabled: bool,
     pub kind: Kind,
@@ -131,16 +144,27 @@ pub struct Item {
 
 impl Item {
     pub fn run(label: impl Into<String>, shortcut: Option<&'static str>, enabled: bool, command: Command) -> Self {
-        Self { label: label.into(), icon: MenuIcon::of(&command), shortcut, enabled, kind: Kind::Run(command) }
+        Self { label: label.into(), icon: MenuIcon::of(&command), picture: None, shortcut, enabled, kind: Kind::Run(command) }
     }
 
     pub fn sub(label: impl Into<String>, icon: MenuIcon, items: Vec<Item>) -> Self {
         let enabled = items.iter().any(|item| item.enabled);
-        Self { label: label.into(), icon: Some(icon), shortcut: None, enabled, kind: Kind::Sub(items) }
+        Self { label: label.into(), icon: Some(icon), picture: None, shortcut: None, enabled, kind: Kind::Sub(items) }
+    }
+
+    /// A submenu without a line icon (the shell's).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn sub_plain(label: impl Into<String>, items: Vec<Item>) -> Self {
+        Self { icon: None, ..Self::sub(label, MenuIcon::New, items) }
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn with_picture(self, picture: Option<std::sync::Arc<Bitmap>>) -> Self {
+        Self { picture, ..self }
     }
 
     pub fn separator() -> Self {
-        Self { label: String::new(), icon: None, shortcut: None, enabled: false, kind: Kind::Separator }
+        Self { label: String::new(), icon: None, picture: None, shortcut: None, enabled: false, kind: Kind::Separator }
     }
 }
 
@@ -364,9 +388,8 @@ pub fn entry_menu(selection: &[&Entry], bookmarked: bool, apps: &[App]) -> Vec<I
 /// Lumen opens terminals itself only off Windows; there the shell's menu does.
 const TERMINAL: bool = cfg!(not(windows));
 
-/// The menu for the folder's empty space. `can_paste`: the clipboard holds
-/// something; `templates`: the files New ▸ offers copies of.
-pub fn background_menu(can_paste: bool, sort: Sort, templates: &[std::path::PathBuf]) -> Vec<Item> {
+/// "Sort by" with the list's columns, the one sorted by marked with its direction.
+pub fn sort_menu(sort: Sort) -> Item {
     let columns = COLUMNS
         .iter()
         .map(|&(label, column)| {
@@ -378,6 +401,12 @@ pub fn background_menu(can_paste: bool, sort: Sort, templates: &[std::path::Path
             Item::run(label, None, true, Command::Sort(column))
         })
         .collect();
+    Item::sub("Sort by", MenuIcon::Sort, columns)
+}
+
+/// The menu for the folder's empty space. `can_paste`: the clipboard holds
+/// something; `templates`: the files New ▸ offers copies of.
+pub fn background_menu(can_paste: bool, sort: Sort, templates: &[std::path::PathBuf]) -> Vec<Item> {
     let mut new = vec![
         Item::run("Folder", Some("Ctrl+Shift+N"), true, Command::NewFolder),
         Item::run("Empty File", None, true, Command::NewFile(None)),
@@ -394,12 +423,12 @@ pub fn background_menu(can_paste: bool, sort: Sort, templates: &[std::path::Path
     if TERMINAL {
         items.push(Item::run("Open Terminal Here", None, true, Command::OpenTerminal));
     }
-    items.extend([Item::separator(), Item::sub("Sort by", MenuIcon::Sort, columns), Item::run("Refresh", None, true, Command::Refresh)]);
+    items.extend([Item::separator(), sort_menu(sort), Item::run("Refresh", None, true, Command::Refresh)]);
     items
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn run(label: &str, command: Command) -> Item {
@@ -488,7 +517,7 @@ mod tests {
         assert_eq!(menu.key(Key::Enter), None);
     }
 
-    fn entry(name: &str, is_dir: bool) -> Entry {
+    pub(crate) fn entry(name: &str, is_dir: bool) -> Entry {
         Entry { name: name.into(), path: format!("/x/{name}").into(), is_dir, size: None, modified: None, hidden: false }
     }
 
@@ -498,7 +527,7 @@ mod tests {
     }
 
     /// Label and whether it is enabled, sub-items indented; separators as "-".
-    fn outline(items: &[Item]) -> Vec<String> {
+    pub(crate) fn outline(items: &[Item]) -> Vec<String> {
         let mut out = Vec::new();
         fn walk(items: &[Item], depth: usize, out: &mut Vec<String>) {
             for item in items {

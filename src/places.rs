@@ -135,6 +135,8 @@ pub fn templates_dir(home: &Path, user_dirs: Option<&str>) -> Option<PathBuf> {
 }
 
 /// The visible files in `dir`, by name; none when it cannot be read.
+/// Windows' own New ▸ (the shell's) lists its templates instead.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn templates(dir: &Path) -> Vec<PathBuf> {
     let Ok(read) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut files: Vec<PathBuf> = read

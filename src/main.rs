@@ -10,6 +10,7 @@ mod format;
 mod fs;
 mod input;
 mod menu;
+mod shell_menu;
 mod places;
 mod ui;
 
