@@ -20,12 +20,74 @@ pub enum Command {
     Paste,
     Rename,
     Trash,
+    DeleteForever,
     /// Bookmark the selected folder, or remove its bookmark.
     ToggleBookmark,
     Count,
     NewFolder,
     Sort(SortColumn),
     Refresh,
+}
+
+/// The line icon drawn left of an item (see `ui::icons::menu_icon`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuIcon {
+    Open,
+    NewTab,
+    Cut,
+    Copy,
+    CopyPath,
+    Paste,
+    Rename,
+    Trash,
+    Delete,
+    Bookmark,
+    Size,
+    New,
+    NewFolder,
+    Sort,
+    Refresh,
+}
+
+impl MenuIcon {
+    #[cfg(test)]
+    pub const ALL: [Self; 15] = [
+        Self::Open,
+        Self::NewTab,
+        Self::Cut,
+        Self::Copy,
+        Self::CopyPath,
+        Self::Paste,
+        Self::Rename,
+        Self::Trash,
+        Self::Delete,
+        Self::Bookmark,
+        Self::Size,
+        Self::New,
+        Self::NewFolder,
+        Self::Sort,
+        Self::Refresh,
+    ];
+
+    /// The icon a command shows; sort columns have none, like Dolphin's.
+    fn of(command: &Command) -> Option<Self> {
+        Some(match command {
+            Command::Open => Self::Open,
+            Command::OpenInNewTab => Self::NewTab,
+            Command::Cut => Self::Cut,
+            Command::Copy => Self::Copy,
+            Command::CopyPath => Self::CopyPath,
+            Command::Paste => Self::Paste,
+            Command::Rename => Self::Rename,
+            Command::Trash => Self::Trash,
+            Command::DeleteForever => Self::Delete,
+            Command::ToggleBookmark => Self::Bookmark,
+            Command::Count => Self::Size,
+            Command::NewFolder => Self::NewFolder,
+            Command::Refresh => Self::Refresh,
+            Command::Sort(_) => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +100,7 @@ pub enum Kind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub label: String,
+    pub icon: Option<MenuIcon>,
     pub shortcut: Option<&'static str>,
     pub enabled: bool,
     pub kind: Kind,
@@ -45,16 +108,16 @@ pub struct Item {
 
 impl Item {
     pub fn run(label: impl Into<String>, shortcut: Option<&'static str>, enabled: bool, command: Command) -> Self {
-        Self { label: label.into(), shortcut, enabled, kind: Kind::Run(command) }
+        Self { label: label.into(), icon: MenuIcon::of(&command), shortcut, enabled, kind: Kind::Run(command) }
     }
 
-    pub fn sub(label: impl Into<String>, items: Vec<Item>) -> Self {
+    pub fn sub(label: impl Into<String>, icon: MenuIcon, items: Vec<Item>) -> Self {
         let enabled = items.iter().any(|item| item.enabled);
-        Self { label: label.into(), shortcut: None, enabled, kind: Kind::Sub(items) }
+        Self { label: label.into(), icon: Some(icon), shortcut: None, enabled, kind: Kind::Sub(items) }
     }
 
     pub fn separator() -> Self {
-        Self { label: String::new(), shortcut: None, enabled: false, kind: Kind::Separator }
+        Self { label: String::new(), icon: None, shortcut: None, enabled: false, kind: Kind::Separator }
     }
 }
 
@@ -254,6 +317,7 @@ pub fn entry_menu(selection: &[&Entry], bookmarked: bool) -> Vec<Item> {
         Item::separator(),
         Item::run("Rename", Some("F2"), single, Command::Rename),
         Item::run("Move to Trash", Some("Delete"), true, Command::Trash),
+        Item::run("Delete Permanently", Some("Shift+Delete"), true, Command::DeleteForever),
     ]);
     if folder {
         let bookmark = if bookmarked { "Remove from Bookmarks" } else { "Add to Bookmarks" };
@@ -281,9 +345,9 @@ pub fn background_menu(can_paste: bool, sort: Sort) -> Vec<Item> {
         .collect();
     vec![
         Item::run("Paste", Some("Ctrl+V"), can_paste, Command::Paste),
-        Item::sub("New", vec![Item::run("Folder", Some("Ctrl+Shift+N"), true, Command::NewFolder)]),
+        Item::sub("New", MenuIcon::New, vec![Item::run("Folder", Some("Ctrl+Shift+N"), true, Command::NewFolder)]),
         Item::separator(),
-        Item::sub("Sort by", columns),
+        Item::sub("Sort by", MenuIcon::Sort, columns),
         Item::run("Refresh", None, true, Command::Refresh),
     ]
 }
@@ -301,7 +365,7 @@ mod tests {
         Menu::new(vec![
             run("Open", Command::Open),
             Item::separator(),
-            Item::sub("Sort by", vec![run("Name", Command::Sort(SortColumn::Name)), run("Size", Command::Sort(SortColumn::Size))]),
+            Item::sub("Sort by", MenuIcon::Sort, vec![run("Name", Command::Sort(SortColumn::Name)), run("Size", Command::Sort(SortColumn::Size))]),
             Item::run("Paste", Some("Ctrl+V"), false, Command::Paste),
         ])
     }
@@ -400,6 +464,31 @@ mod tests {
         out
     }
 
+    /// Every item has an icon but the sort columns, which Dolphin leaves bare too.
+    fn without_icon(items: &[Item]) -> Vec<String> {
+        let mut out = Vec::new();
+        for item in items {
+            match &item.kind {
+                Kind::Separator => {}
+                Kind::Run(Command::Sort(_)) => {}
+                _ if item.icon.is_none() => out.push(item.label.clone()),
+                _ => {}
+            }
+            if let Kind::Sub(sub) = &item.kind {
+                out.extend(without_icon(sub));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_item_has_an_icon_except_the_sort_columns() {
+        let (dir, file) = (entry("src", true), entry("a.txt", false));
+        for items in [entry_menu(&[&dir], false), entry_menu(&[&file], true), background_menu(true, Sort::default())] {
+            assert_eq!(without_icon(&items), Vec::<String>::new());
+        }
+    }
+
     #[test]
     fn a_file_offers_open_clipboard_rename_and_trash() {
         let file = entry("a.txt", false);
@@ -414,6 +503,7 @@ mod tests {
                 "-",
                 "Rename [F2]",
                 "Move to Trash [Delete]",
+                "Delete Permanently [Shift+Delete]",
             ]
         );
     }
@@ -433,6 +523,7 @@ mod tests {
                 "-",
                 "Rename [F2]",
                 "Move to Trash [Delete]",
+                "Delete Permanently [Shift+Delete]",
                 "-",
                 "Add to Bookmarks",
                 "Calculate Size [Alt+R]",
@@ -455,6 +546,7 @@ mod tests {
                 "-",
                 "Rename [F2] (off)",
                 "Move to Trash [Delete]",
+                "Delete Permanently [Shift+Delete]",
             ]
         );
     }

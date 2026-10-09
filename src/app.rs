@@ -943,6 +943,7 @@ impl LumenApp {
             Command::Paste => self.paste(ctx),
             Command::Rename => self.start_rename(),
             Command::Trash => self.ask_trash(),
+            Command::DeleteForever => self.ask_delete_forever(),
             Command::ToggleBookmark => {
                 if let Some((path, true)) = single {
                     self.toggle_bookmark(path);

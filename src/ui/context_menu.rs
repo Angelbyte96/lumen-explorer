@@ -161,6 +161,13 @@ impl ContextMenu {
                         ui.set_min_width(ui.available_width());
                         ui.horizontal(|ui| {
                             ui.add_space(row.depth as f32 * 16.0);
+                            // A fixed column, so labels line up with or without an icon.
+                            let side = ui.text_style_height(&egui::TextStyle::Body);
+                            let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+                            if let Some(icon) = item.icon {
+                                crate::ui::icons::menu_icon(ui.painter(), icon_rect.shrink(1.0), icon, color);
+                            }
+                            ui.add_space(4.0);
                             ui.add(egui::Label::new(job).selectable(false).truncate());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.add(egui::Label::new(egui::RichText::new(shortcut).weak()).selectable(false));
@@ -206,7 +213,7 @@ mod tests {
         ContextMenu::new(
             vec![
                 Item::run("Open", Some("Enter"), true, Command::Open),
-                Item::sub("Sort by", vec![Item::run("Size", None, true, Command::Sort(SortColumn::Size))]),
+                Item::sub("Sort by", crate::menu::MenuIcon::Sort, vec![Item::run("Size", None, true, Command::Sort(SortColumn::Size))]),
             ],
             egui::pos2(100.0, 100.0),
         )

@@ -93,6 +93,106 @@ pub fn magnifier(ui: &mut egui::Ui) -> egui::Response {
     response
 }
 
+/// The line icons of the right-click menu, in `color`, inside `rect`.
+pub fn menu_icon(painter: &egui::Painter, rect: Rect, icon: crate::menu::MenuIcon, color: Color32) {
+    use crate::menu::MenuIcon as I;
+    let s = rect.width();
+    let stroke = Stroke::new((s * 0.09).max(1.0), color);
+    // Points in a 0..1 box, so each icon reads like a little drawing.
+    let p = |x: f32, y: f32| rect.min + vec2(x * s, y * s);
+    let line = |points: &[(f32, f32)]| {
+        let points: Vec<Pos2> = points.iter().map(|&(x, y)| p(x, y)).collect();
+        painter.add(Shape::line(points, stroke));
+    };
+    let frame = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        painter.rect_stroke(Rect::from_min_max(p(x0, y0), p(x1, y1)), s * 0.08, stroke, egui::StrokeKind::Inside);
+    };
+    match icon {
+        I::Open => {
+            line(&[(0.55, 0.15), (0.15, 0.15), (0.15, 0.85), (0.85, 0.85), (0.85, 0.45)]);
+            line(&[(0.45, 0.55), (0.85, 0.15)]);
+            line(&[(0.6, 0.15), (0.85, 0.15), (0.85, 0.4)]);
+        }
+        I::NewTab => {
+            frame(0.1, 0.2, 0.9, 0.85);
+            line(&[(0.1, 0.38), (0.9, 0.38)]);
+            line(&[(0.5, 0.5), (0.5, 0.75)]);
+            line(&[(0.38, 0.62), (0.62, 0.62)]);
+        }
+        I::Cut => {
+            painter.circle_stroke(p(0.28, 0.75), s * 0.13, stroke);
+            painter.circle_stroke(p(0.72, 0.75), s * 0.13, stroke);
+            line(&[(0.36, 0.64), (0.75, 0.1)]);
+            line(&[(0.64, 0.64), (0.25, 0.1)]);
+        }
+        I::Copy => {
+            frame(0.12, 0.12, 0.62, 0.68);
+            line(&[(0.75, 0.32), (0.88, 0.32), (0.88, 0.88), (0.38, 0.88), (0.38, 0.8)]);
+        }
+        I::CopyPath => {
+            frame(0.15, 0.1, 0.85, 0.9);
+            line(&[(0.62, 0.25), (0.38, 0.75)]);
+        }
+        I::Paste => {
+            frame(0.18, 0.18, 0.82, 0.9);
+            frame(0.35, 0.1, 0.65, 0.28);
+            line(&[(0.32, 0.5), (0.68, 0.5)]);
+            line(&[(0.32, 0.68), (0.6, 0.68)]);
+        }
+        I::Rename => {
+            line(&[(0.15, 0.85), (0.2, 0.62), (0.7, 0.12), (0.88, 0.3), (0.38, 0.8), (0.15, 0.85)]);
+            line(&[(0.6, 0.22), (0.78, 0.4)]);
+        }
+        I::Trash => {
+            line(&[(0.12, 0.25), (0.88, 0.25)]);
+            line(&[(0.38, 0.25), (0.42, 0.1), (0.58, 0.1), (0.62, 0.25)]);
+            line(&[(0.22, 0.25), (0.28, 0.9), (0.72, 0.9), (0.78, 0.25)]);
+            line(&[(0.42, 0.4), (0.42, 0.75)]);
+            line(&[(0.58, 0.4), (0.58, 0.75)]);
+        }
+        I::Delete => {
+            painter.circle_stroke(p(0.5, 0.5), s * 0.4, stroke);
+            line(&[(0.34, 0.34), (0.66, 0.66)]);
+            line(&[(0.66, 0.34), (0.34, 0.66)]);
+        }
+        I::Bookmark => line(&[(0.25, 0.1), (0.75, 0.1), (0.75, 0.9), (0.5, 0.68), (0.25, 0.9), (0.25, 0.1)]),
+        I::Size => {
+            line(&[(0.1, 0.9), (0.9, 0.9)]);
+            line(&[(0.25, 0.9), (0.25, 0.55)]);
+            line(&[(0.5, 0.9), (0.5, 0.3)]);
+            line(&[(0.75, 0.9), (0.75, 0.12)]);
+        }
+        I::New => {
+            line(&[(0.5, 0.12), (0.5, 0.88)]);
+            line(&[(0.12, 0.5), (0.88, 0.5)]);
+        }
+        I::NewFolder => {
+            line(&[(0.1, 0.85), (0.1, 0.15), (0.4, 0.15), (0.5, 0.28), (0.9, 0.28), (0.9, 0.85), (0.1, 0.85)]);
+            line(&[(0.5, 0.42), (0.5, 0.72)]);
+            line(&[(0.35, 0.57), (0.65, 0.57)]);
+        }
+        I::Sort => {
+            line(&[(0.3, 0.85), (0.3, 0.15)]);
+            line(&[(0.15, 0.3), (0.3, 0.15), (0.45, 0.3)]);
+            line(&[(0.7, 0.15), (0.7, 0.85)]);
+            line(&[(0.55, 0.7), (0.7, 0.85), (0.85, 0.7)]);
+        }
+        I::Refresh => {
+            let center = p(0.5, 0.5);
+            let r = s * 0.35;
+            let arc: Vec<Pos2> = (0..=16)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (0.25 + 1.5 * i as f32 / 16.0);
+                    center + vec2(a.cos(), -a.sin()) * r
+                })
+                .collect();
+            let end = *arc.last().expect("points");
+            painter.add(Shape::line(arc, stroke));
+            painter.add(Shape::line(vec![end + vec2(-s * 0.18, 0.0), end, end + vec2(0.0, -s * 0.18)], stroke));
+        }
+    }
+}
+
 const FOLDER: Color32 = Color32::from_rgb(0xF2, 0xC1, 0x4E);
 const FOLDER_TAB: Color32 = Color32::from_rgb(0xD9, 0xA2, 0x2E);
 const PAGE: Color32 = Color32::from_rgb(0xE8, 0xEA, 0xED);
@@ -213,6 +313,23 @@ mod tests {
 
     fn kind(name: &str) -> IconKind {
         kind_of(&entry(name, false))
+    }
+
+    #[test]
+    fn every_menu_icon_draws_strokes_inside_its_box() {
+        use crate::menu::MenuIcon;
+        let ctx = egui::Context::default();
+        let side = 16.0;
+        let rect = Rect::from_min_size(pos2(40.0, 40.0), vec2(side, side));
+        for icon in MenuIcon::ALL {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                menu_icon(ui.painter(), rect, icon, Color32::WHITE);
+            });
+            output.textures_delta.clear();
+            let bounds = output.shapes.iter().map(|s| s.shape.visual_bounding_rect()).fold(Rect::NOTHING, |a, b| a.union(b));
+            assert!(!output.shapes.is_empty(), "{icon:?} draws nothing");
+            assert!(rect.expand(1.5).contains_rect(bounds), "{icon:?} spills out: {bounds:?}");
+        }
     }
 
     #[test]
