@@ -19,7 +19,8 @@ use eframe::egui;
 fn main() -> eframe::Result {
     // LUMEN_LOG=1 prints how long every folder listing takes to stderr.
     let log = std::env::var_os("LUMEN_LOG").is_some_and(|v| v != "0");
-    let start = app::start_dir(std::env::args().nth(1));
+    let start = app::start(&std::env::args().skip(1).collect::<Vec<_>>());
+    let home = fs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
     let config_home = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
     let config_path = config::default_path(fs::home_dir().as_deref(), config_home.as_deref());
     let settings = config::open(config_path);
@@ -37,7 +38,7 @@ fn main() -> eframe::Result {
         "Lumen",
         options,
         Box::new(move |cc| {
-            Ok(Box::new(app::LumenApp::with_config(&cc.egui_ctx, start, log, settings)))
+            Ok(Box::new(app::LumenApp::start(&cc.egui_ctx, start, &home, log, settings)))
         }),
     )
 }
@@ -70,7 +71,7 @@ mod tests {
     #[test]
     fn the_desktop_entry_is_named_after_the_app_id() {
         let entry = include_str!("../assets/lumen.desktop");
-        for line in ["Exec=lumen %f", "Icon=lumen", "StartupWMClass=lumen", "MimeType=inode/directory;"] {
+        for line in ["Exec=lumen --restore %f", "Icon=lumen", "StartupWMClass=lumen", "MimeType=inode/directory;"] {
             assert!(entry.lines().any(|l| l == line), "missing {line}");
         }
     }

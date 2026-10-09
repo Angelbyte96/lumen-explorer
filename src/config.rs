@@ -18,6 +18,10 @@ pub struct Config {
     pub bookmarks: Vec<PathBuf>,
     /// Icon and row size in the list, 0 (normal) to `MAX_ZOOM`.
     pub list_zoom: u8,
+    /// The tabs' folders of the last window closed, in bar order, and the
+    /// one on screen: what `--restore` opens.
+    pub tabs: Vec<PathBuf>,
+    pub active_tab: usize,
 }
 
 impl Default for Config {
@@ -30,6 +34,8 @@ impl Default for Config {
             window: None,
             bookmarks: Vec::new(),
             list_zoom: 0,
+            tabs: Vec::new(),
+            active_tab: 0,
         }
     }
 }
@@ -56,6 +62,8 @@ impl Config {
                     config.list_zoom = value.parse().ok().filter(|z| *z <= MAX_ZOOM).unwrap_or(config.list_zoom)
                 }
                 "bookmark" if !value.is_empty() => config.bookmarks.push(PathBuf::from(value)),
+                "tab" if !value.is_empty() => config.tabs.push(PathBuf::from(value)),
+                "active_tab" => config.active_tab = value.parse().unwrap_or(config.active_tab),
                 _ => {}
             }
         }
@@ -75,12 +83,14 @@ impl Config {
             text += &format!("window = {}x{}\n", w.round(), h.round());
         }
         text += &format!("list_zoom = {}\n", self.list_zoom);
-        for path in &self.bookmarks {
-            // A value is the rest of its line, trimmed: it must not hold a break
-            // or start/end with spaces.
-            if let Some(path) = path.to_str().filter(|p| !p.contains(['\n', '\r']) && p.trim() == *p) {
-                text += &format!("bookmark = {path}\n");
+        for path in self.bookmarks.iter().filter_map(|p| one_line(p)) {
+            text += &format!("bookmark = {path}\n");
+        }
+        if !self.tabs.is_empty() {
+            for path in self.tabs.iter().filter_map(|p| one_line(p)) {
+                text += &format!("tab = {path}\n");
             }
+            text += &format!("active_tab = {}\n", self.active_tab);
         }
         text
     }
@@ -118,6 +128,9 @@ impl Config {
         if before.list_zoom != after.list_zoom {
             merged.list_zoom = after.list_zoom;
         }
+        if (&before.tabs, before.active_tab) != (&after.tabs, after.active_tab) {
+            (merged.tabs, merged.active_tab) = (after.tabs.clone(), after.active_tab);
+        }
         merged.bookmarks.retain(|p| !before.bookmarks.contains(p) || after.bookmarks.contains(p));
         for path in &after.bookmarks {
             if !before.bookmarks.contains(path) && !merged.bookmarks.contains(path) {
@@ -139,6 +152,12 @@ impl Config {
         std::fs::write(&tmp, self.to_text())?;
         std::fs::rename(&tmp, path)
     }
+}
+
+/// A path as a value: the rest of its line, trimmed, so it must not hold a
+/// break or start/end with spaces.
+fn one_line(path: &Path) -> Option<&str> {
+    path.to_str().filter(|p| !p.contains(['\n', '\r']) && p.trim() == *p)
 }
 
 /// The settings to start with and where to save them.
@@ -237,6 +256,8 @@ mod tests {
             window: Some([1200.0, 800.0]),
             bookmarks: vec![PathBuf::from("/home/u/Descargas"), PathBuf::from("/srv/my files")],
             list_zoom: 2,
+            tabs: vec![PathBuf::from("/home/u"), PathBuf::from("/srv/my files")],
+            active_tab: 1,
         }
     }
 
@@ -248,8 +269,17 @@ mod tests {
         assert!(text.contains("window = 1200x800\n"), "{text}");
         assert!(text.contains("list_zoom = 2\n"), "{text}");
         assert!(text.contains("bookmark = /srv/my files\n"), "{text}");
+        assert!(text.contains("tab = /home/u\ntab = /srv/my files\nactive_tab = 1\n"), "{text}");
         assert_eq!(Config::parse(&text), sample());
         assert_eq!(Config::parse(&Config::default().to_text()), Config::default());
+    }
+
+    #[test]
+    fn the_session_is_written_only_when_there_is_one() {
+        let text = Config::default().to_text();
+        assert!(!text.contains("tab ="), "{text}");
+        assert_eq!(Config::parse("tab = /a\nactive_tab = x\ntab =\n").tabs, [PathBuf::from("/a")], "empty lines skipped");
+        assert_eq!(Config::parse("tab = /a\nactive_tab = x\n").active_tab, 0, "a bad number keeps the first");
     }
 
     #[test]

@@ -14,7 +14,7 @@ export XDG_DATA_HOME="$t/data dir" LUMEN_BIN_DIR="$t/bin & dir|x"
 "$install" >/dev/null
 entry=$XDG_DATA_HOME/applications/lumen.desktop
 desktop-file-validate "$entry" || fail "installed entry does not validate"
-grep -qxF "Exec=\"$LUMEN_BIN_DIR/lumen\" %f" "$entry" || fail "Exec: $(grep Exec "$entry")"
+grep -qxF "Exec=\"$LUMEN_BIN_DIR/lumen\" --restore %f" "$entry" || fail "Exec: $(grep Exec "$entry")"
 cmp -s "$LUMEN_BIN_DIR/lumen" "${CARGO_TARGET_DIR:-$root/target}/release/lumen" || fail "binary differs"
 
 # Extra arguments are refused and change nothing.
@@ -28,7 +28,7 @@ left=$(find "$t" -name 'lumen*' -o -name 'icon-theme.cache')
 
 # A relative LUMEN_BIN_DIR still gives an absolute Exec.
 (cd "$t" && LUMEN_BIN_DIR=rel "$install" >/dev/null)
-grep -qxF "Exec=\"$t/rel/lumen\" %f" "$entry" || fail "relative Exec: $(grep Exec "$entry")"
+grep -qxF "Exec=\"$t/rel/lumen\" --restore %f" "$entry" || fail "relative Exec: $(grep Exec "$entry")"
 (cd "$t" && LUMEN_BIN_DIR=rel "$install" --uninstall >/dev/null)
 
 echo "install-desktop.sh: all checks passed"

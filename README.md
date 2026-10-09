@@ -43,9 +43,12 @@ cargo check --target x86_64-pc-windows-gnu --all-targets
 
 On Windows:
 
-- Started without a folder, Lumen opens your user folder (Windows hands apps
-  a working directory such as `C:\Windows\System32`). On Linux it opens the
-  folder it was started from.
+- Started without a folder, Lumen reopens the tabs of the last window you
+  closed (a folder that is gone opens its nearest parent, else your user
+  folder), never the working directory Windows hands apps (such as
+  `C:\Windows\System32`). On Linux the app menu entry does the same
+  (`lumen --restore`), while `lumen` from a terminal opens the folder it was
+  started from. A folder given to Lumen always opens alone.
 - Storage in the side panel lists local and USB drives with their free space;
   network and CD drives are left out.
 - Files open as a double-click in File Explorer does: Windows asks before

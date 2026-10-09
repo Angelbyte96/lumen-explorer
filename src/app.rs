@@ -812,8 +812,32 @@ impl LumenApp {
         app
     }
 
-    /// The settings as they are now. The window size is the one last saved
-    /// unless `with_window`: resizing alone writes nothing until Lumen closes.
+    /// Opens what `start` says with the saved settings: one folder, or the
+    /// last session's tabs (`home` stands in for folders that are gone).
+    pub fn start(ctx: &egui::Context, start: Start, home: &Path, log: bool, settings: Settings) -> Self {
+        let (tabs, active) = match start {
+            Start::Folder(path) => (vec![path], 0),
+            Start::Restore => restore_tabs(&settings.config.tabs, settings.config.active_tab, home),
+        };
+        let mut app = Self::with_config(ctx, tabs[active].clone(), log, settings);
+        // The others list when they are first shown (see `select_tab`).
+        app.tabs = tabs
+            .iter()
+            .enumerate()
+            .map(|(i, path)| (i != active).then(|| Tab::new(path.clone(), Some(&app.tab.view), log)))
+            .collect();
+        app.active = active;
+        app
+    }
+
+    /// The tabs' folders in bar order and which one is on screen.
+    fn session(&self) -> (Vec<PathBuf>, usize) {
+        let folders = self.tabs.iter().map(|slot| slot.as_ref().unwrap_or(&self.tab).view.current.clone()).collect();
+        (folders, self.active)
+    }
+
+    /// The settings as they are now. The window size and the session are
+    /// the ones last saved unless `with_window`: they are written when Lumen closes.
     fn settings(&self, with_window: bool) -> Config {
         Config {
             sort: self.tab.view.sort,
@@ -823,6 +847,8 @@ impl LumenApp {
             window: if with_window { self.window } else { self.saved.window },
             bookmarks: self.bookmarks.paths().to_vec(),
             list_zoom: self.list_zoom,
+            tabs: if with_window { self.session().0 } else { self.saved.tabs.clone() },
+            active_tab: if with_window { self.session().1 } else { self.saved.active_tab },
         }
     }
 
@@ -832,11 +858,15 @@ impl LumenApp {
     fn save_settings(&mut self, with_window: bool) {
         let Some(path) = self.config_path.clone() else { return };
         let settings = self.settings(with_window);
-        if settings == self.saved {
+        // Closing always writes: the last window closed leaves its session.
+        if settings == self.saved && !with_window {
             return;
         }
         let merged = Config::load(&path).and_then(|disk| {
-            let merged = Config::merge(&disk, &self.saved, &settings);
+            let mut merged = Config::merge(&disk, &self.saved, &settings);
+            if with_window {
+                (merged.tabs, merged.active_tab) = (settings.tabs.clone(), settings.active_tab);
+            }
             merged.save(&path).map(|()| merged)
         });
         match merged {
@@ -1923,12 +1953,46 @@ impl eframe::App for LumenApp {
     }
 }
 
-/// Folder to open at startup: first CLI argument, else the working directory
-/// (Linux) or home (Windows).
-pub fn start_dir(arg: Option<String>) -> PathBuf {
+/// What Lumen opens at startup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Start {
+    Folder(PathBuf),
+    /// The tabs of the last window closed.
+    Restore,
+}
+
+/// From the command line (without the program name): a folder argument
+/// opens it; otherwise `--restore` (the desktop entry) or Windows restores
+/// the last session, and Linux opens the working directory (a terminal's).
+pub fn start(args: &[String]) -> Start {
+    start_from(args, std::env::current_dir().ok(), fs::home_dir(), cfg!(windows))
+}
+
+fn start_from(args: &[String], cwd: Option<PathBuf>, home: Option<PathBuf>, windows: bool) -> Start {
+    let folder = args.iter().find(|a| *a != RESTORE).cloned();
+    if folder.is_none() && (windows || args.iter().any(|a| a == RESTORE)) {
+        return Start::Restore;
+    }
     // Windows hands a GUI app whatever working directory its launcher had
     // (often C:\Windows\System32), not one the user chose.
-    start_dir_from(arg, std::env::current_dir().ok(), fs::home_dir(), !cfg!(windows))
+    Start::Folder(start_dir_from(folder, cwd, home, !windows))
+}
+
+/// The flag the desktop entry passes.
+const RESTORE: &str = "--restore";
+
+/// The saved tabs as they can open now: a folder that is gone gives way to
+/// its nearest parent still there, else `home`; no tabs at all is `home`.
+pub fn restore_tabs(tabs: &[PathBuf], active: usize, home: &Path) -> (Vec<PathBuf>, usize) {
+    if tabs.is_empty() {
+        return (vec![home.to_path_buf()], 0);
+    }
+    let usable = |path: &PathBuf| {
+        path.ancestors()
+            .find(|p| p.is_absolute() && p.is_dir())
+            .map_or_else(|| home.to_path_buf(), Path::to_path_buf)
+    };
+    (tabs.iter().map(usable).collect(), active.min(tabs.len() - 1))
 }
 
 fn start_dir_from(arg: Option<String>, cwd: Option<PathBuf>, home: Option<PathBuf>, use_cwd: bool) -> PathBuf {
@@ -1950,6 +2014,81 @@ mod tests {
     use crate::fs::preview::Content;
     use std::path::Path;
     use std::time::Instant;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_session_is_restored_on_windows_and_with_restore_and_never_over_a_folder() {
+        let cwd = Some(PathBuf::from("/srv/work"));
+        let home = Some(PathBuf::from("/home/u"));
+        let start = |list: &[&str], windows| start_from(&args(list), cwd.clone(), home.clone(), windows);
+        assert_eq!(start(&[], true), Start::Restore, "Windows without a folder");
+        assert_eq!(start(&["--restore"], false), Start::Restore, "the desktop entry on Linux");
+        assert_eq!(start(&[], false), Start::Folder("/srv/work".into()), "a terminal on Linux");
+        assert_eq!(start(&["--restore", "docs"], false), Start::Folder("/srv/work/docs".into()), "a folder opened with Lumen");
+        assert_eq!(start(&["docs"], true), Start::Folder("/srv/work/docs".into()));
+    }
+
+    #[test]
+    fn restored_tabs_fall_back_to_the_nearest_folder_left_then_home() {
+        let dir = crate::fs::ops::tests::fresh_fixture("app-restore-tabs");
+        std::fs::create_dir_all(dir.join("kept/inner")).unwrap();
+        let home = dir.join("kept");
+        let tabs = vec![dir.join("kept/inner"), dir.join("kept/gone/deeper"), PathBuf::from("relative/nowhere")];
+        assert_eq!(restore_tabs(&tabs, 1, &home), (vec![dir.join("kept/inner"), dir.join("kept"), home.clone()], 1));
+        assert_eq!(restore_tabs(&tabs, 9, &home).1, 2, "an active tab past the end is the last");
+        assert_eq!(restore_tabs(&[], 0, &home), (vec![home.clone()], 0), "no session: home");
+    }
+
+    #[test]
+    fn a_restored_session_opens_its_tabs_and_lists_the_active_one() {
+        let dir = crate::fs::ops::tests::fresh_fixture("app-restore-start");
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        let ctx = egui::Context::default();
+        let config = Config { tabs: vec![dir.join("a"), dir.join("b")], active_tab: 1, ..Config::default() };
+        let settings = Settings { config, path: None, error: None };
+        let app = LumenApp::start(&ctx, Start::Restore, &dir, false, settings);
+        assert_eq!(app.tab_labels(), ["a", "b"]);
+        assert_eq!(app.active, 1);
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("b")));
+        assert_eq!(app.session(), (vec![dir.join("a"), dir.join("b")], 1));
+    }
+
+    #[test]
+    fn a_folder_start_ignores_the_saved_session() {
+        let dir = crate::fs::ops::tests::fresh_fixture("app-restore-folder");
+        let ctx = egui::Context::default();
+        let config = Config { tabs: vec![dir.join("x"), dir.join("y")], active_tab: 1, ..Config::default() };
+        let app = LumenApp::start(&ctx, Start::Folder(dir.clone()), &dir, false, Settings { config, path: None, error: None });
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tab.lister.last_requested(), Some(dir));
+    }
+
+    #[test]
+    fn closing_saves_this_windows_tabs_over_any_other_windows() {
+        let (ctx, mut app, dir) = app_in("app-session-save");
+        let path = dir.join("config");
+        app.config_path = Some(path.clone());
+        app.saved = app.settings(true);
+        app.handle_action(&ctx, Action::NewTab);
+        land(&mut app);
+        app.navigate(&ctx, dir.join("sub"), None);
+        land(&mut app);
+        app.save_settings(false);
+        assert!(!std::fs::read_to_string(&path).unwrap_or_default().contains("tab ="), "not while running");
+        // Another window closed meanwhile and saved its own session.
+        std::fs::write(&path, "tab = /elsewhere\nactive_tab = 0\n").unwrap();
+        app.save_settings(true);
+        let saved = Config::load(&path).unwrap();
+        assert_eq!((saved.tabs, saved.active_tab), (vec![dir.clone(), dir.join("sub")], 1), "the last window closed wins");
+        // Even with nothing changed since the start.
+        std::fs::write(&path, "tab = /elsewhere\n").unwrap();
+        app.save_settings(true);
+        assert_eq!(Config::load(&path).unwrap().tabs, [dir.clone(), dir.join("sub")]);
+    }
 
     #[test]
     fn without_an_argument_windows_starts_in_home_and_linux_where_it_was_launched() {
@@ -2718,6 +2857,7 @@ mod tests {
             window: Some([1000.0, 700.0]),
             bookmarks: vec![PathBuf::from("/srv"), PathBuf::from("/srv")],
             list_zoom: 3,
+            ..Config::default()
         }
     }
 
