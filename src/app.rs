@@ -1492,6 +1492,17 @@ impl LumenApp {
             Action::Move(_) | Action::First | Action::Last => self.tab.view.move_selection(action),
             Action::Extend(rows) => self.tab.view.extend_by(rows),
             Action::SelectAll => self.tab.view.select_all(),
+            Action::Menu => {
+                let at = ui::file_list::cursor_row_rect(ctx).map_or(egui::pos2(40.0, 120.0), |r| r.left_bottom() + egui::vec2(24.0, 0.0));
+                match self.tab.view.selected {
+                    Some(row) if self.tab.view.picked_count() == 0 || self.tab.view.is_picked(row) => self.open_entry_menu(row, at),
+                    Some(_) => {
+                        let row = (0..self.tab.view.rows.len()).find(|&r| self.tab.view.is_picked(r)).unwrap_or(0);
+                        self.open_entry_menu(row, at);
+                    }
+                    None => self.open_background_menu(at),
+                }
+            }
             // A leading Space is the preview key; after other text it is just a space.
             Action::TypeChar(' ') if self.tab.view.filter().is_empty() => {
                 self.preview_open = !self.preview_open;
@@ -1696,14 +1707,17 @@ impl eframe::App for LumenApp {
                         self.finish_rename(&ctx, edit, false);
                     }
                 }
-                None => {
-                    // A right click below the rows: the menu for the folder.
-                    if let Some(pos) = ctx.input(|i| i.pointer.interact_pos().filter(|_| i.pointer.secondary_clicked()))
-                        && ui.max_rect().contains(pos)
-                    {
+                // Below the rows: a click ends a multiple selection, a right click
+                // opens the folder's menu.
+                Some(ListEvent::Empty { menu: false }) => {
+                    self.tab.view.drop_picks();
+                }
+                Some(ListEvent::Empty { menu: true }) => {
+                    if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
                         self.open_background_menu(pos);
                     }
                 }
+                None => {}
             }
         });
 
@@ -2262,6 +2276,15 @@ mod tests {
         app.open_entry_menu(0, egui::pos2(10.0, 10.0));
         assert_eq!(selection_names(&app.tab.view), ["sub"]);
         assert!(menu_labels(&app).contains(&"Open in New Tab".to_owned()), "the menu of a folder");
+    }
+
+    #[test]
+    fn shift_f10_opens_the_menu_of_the_selection() {
+        let (ctx, mut app, _dir) = app_in("app-menu-key");
+        pick(&mut app, &["a.txt", "b.txt"]);
+        app.handle_action(&ctx, Action::Menu);
+        assert_eq!(selection_names(&app.tab.view), ["a.txt", "b.txt"], "the picks stay");
+        assert!(menu_labels(&app).contains(&"Move to Trash".to_owned()));
     }
 
     #[test]
