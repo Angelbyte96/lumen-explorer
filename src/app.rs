@@ -2614,6 +2614,13 @@ mod tests {
         app.context_menu.as_ref().expect("menu open").items().iter().map(|item| item.label.clone()).collect()
     }
 
+    /// The open menu's top-level item that runs `command`. Its label is the
+    /// shell's on Windows ("Delete", "Eliminar"), so tests look for commands.
+    fn menu_item<'a>(app: &'a LumenApp, command: &Command) -> Option<&'a crate::menu::Item> {
+        let items = app.context_menu.as_ref().expect("menu open").items();
+        items.iter().find(|item| item.kind == crate::menu::Kind::Run(command.clone()))
+    }
+
     #[test]
     fn a_right_click_outside_the_selection_selects_that_row_first() {
         let (_ctx, mut app, _dir) = app_in("app-menu-row"); // sub, a.txt, b.txt
@@ -2629,7 +2636,7 @@ mod tests {
         pick(&mut app, &["a.txt", "b.txt"]);
         app.handle_action(&ctx, Action::Menu);
         assert_eq!(selection_names(&app.tab.view), ["a.txt", "b.txt"], "the picks stay");
-        assert!(menu_labels(&app).contains(&"Move to Trash".to_owned()));
+        assert!(menu_item(&app, &Command::Trash).is_some(), "{:?}", menu_labels(&app));
     }
 
     #[test]
@@ -2646,10 +2653,12 @@ mod tests {
         pick(&mut app, &["b.txt"]);
         app.open_background_menu(egui::pos2(10.0, 10.0));
         assert_eq!(selection_names(&app.tab.view), ["b.txt"]);
-        let mut expected = vec!["Paste", "New", "Open Terminal Here", "", "Sort by", "Refresh"];
-        expected.retain(|label| cfg!(not(windows)) || *label != "Open Terminal Here");
-        assert_eq!(menu_labels(&app), expected);
-        let paste = &app.context_menu.as_ref().unwrap().items()[0];
+        #[cfg(not(windows))]
+        assert_eq!(menu_labels(&app), ["Paste", "New", "Open Terminal Here", "", "Sort by", "Refresh"]);
+        // On Windows the shell's own items come first, whatever the PC has.
+        let labels = menu_labels(&app);
+        assert!(labels.contains(&"Sort by".to_owned()) && labels.contains(&"Refresh".to_owned()), "{labels:?}");
+        let paste = menu_item(&app, &Command::Paste).expect("Paste is always offered");
         assert!(!paste.enabled, "nothing to paste yet");
     }
 
