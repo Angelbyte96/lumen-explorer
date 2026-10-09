@@ -66,6 +66,16 @@ mod tests {
         assert_eq!(alpha(128, 128), 255);
     }
 
+    /// The Menu key reaches Lumen only through vendor/egui-winit (it arrives as
+    /// Shift+F10). Cargo ignores a [patch] whose version no longer matches,
+    /// with just a warning: after an egui update this fails until it is redone.
+    #[test]
+    fn the_patched_egui_winit_is_the_one_built() {
+        let lock = include_str!("../Cargo.lock");
+        let entry = lock.split("[[package]]").find(|p| p.contains("name = \"egui-winit\"")).expect("egui-winit is locked");
+        assert!(!entry.contains("source = "), "egui-winit comes from the registry, not vendor/: {entry}");
+    }
+
     /// GNOME matches the window to its menu entry by app_id, so the entry,
     /// its icon and its window class are all "lumen".
     #[test]
