@@ -567,11 +567,22 @@ pub mod native {
         if bitmap.0.is_null() || bitmap == HBMMENU_CALLBACK || (1..=11).contains(&raw) {
             return None;
         }
+        // SAFETY: a bitmap of the live menu.
+        let (size, rgba) = unsafe { pixels(bitmap, MAX_PICTURE) }?;
+        Some(Arc::new(Bitmap { size, rgba }))
+    }
+
+    /// A bitmap's pixels as RGBA (BGRA turned around; no alpha at all is
+    /// opaque), when neither side is over `max_side`.
+    ///
+    /// # Safety
+    /// `bitmap` must be a valid HBITMAP for the whole call.
+    pub(crate) unsafe fn pixels(bitmap: HBITMAP, max_side: i32) -> Option<([usize; 2], Vec<u8>)> {
         let mut info = BITMAP::default();
         // SAFETY: `info` is a BITMAP of the size stated.
         let read = unsafe { GetObjectW(HGDIOBJ(bitmap.0), size_of::<BITMAP>() as i32, Some((&mut info as *mut BITMAP).cast())) };
         let (w, h) = (info.bmWidth, info.bmHeight.abs());
-        if read == 0 || !(1..=MAX_PICTURE).contains(&w) || !(1..=MAX_PICTURE).contains(&h) {
+        if read == 0 || !(1..=max_side).contains(&w) || !(1..=max_side).contains(&h) {
             return None;
         }
         let mut header = BITMAPINFO {
@@ -598,7 +609,7 @@ pub mod native {
         if lines != h {
             return None;
         }
-        Some(Arc::new(Bitmap { size: [w as usize, h as usize], rgba: to_rgba(bgra) }))
+        Some(([w as usize, h as usize], to_rgba(bgra)))
     }
 
     impl ShellMenu {
