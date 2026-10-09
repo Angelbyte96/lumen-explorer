@@ -112,7 +112,7 @@ The toolbar has back, forward and up buttons, the bookmark star and the current 
 
 The list and the folder preview show Name, Type, Date Modified, Folders, Files and Size. Click a header to sort by that column; click it again to reverse. Folders always stay on top; counted folders sort by their totals.
 
-Lumen never deletes permanently: Delete moves entries to the system trash, and renaming or pasting onto an existing name asks first and sends the old entry to the trash.
+Lumen deletes permanently only with Shift+Delete, after asking: Delete moves entries to the system trash, and renaming or pasting onto an existing name asks first and sends the old entry to the trash.
 
 Copy and paste use Lumen's own clipboard (not shared with other apps). Pasting into the same folder creates "name (copy)", "name (copy 2)"... Cut + paste moves: a rename on the same disk, or a copy followed by moving the original to the trash across disks. Copies and moves run in the background with progress in the status bar; cancelling keeps what was already copied and removes the half-written file.
 
