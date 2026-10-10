@@ -214,7 +214,7 @@ const FOLDER_TAB: Color32 = Color32::from_rgb(0xD9, 0xA2, 0x2E);
 const PAGE: Color32 = Color32::from_rgb(0xE8, 0xEA, 0xED);
 const FOLD: Color32 = Color32::from_rgb(0xB8, 0xBC, 0xC2);
 
-fn paint(painter: &egui::Painter, rect: Rect, kind: IconKind) {
+pub fn paint(painter: &egui::Painter, rect: Rect, kind: IconKind) {
     let rect = rect.shrink(rect.width() * 0.08);
     if kind == IconKind::Folder {
         paint_folder(painter, rect);

@@ -7,6 +7,7 @@ pub mod preview;
 pub mod sidebar;
 pub mod status_bar;
 pub mod tabs;
+pub mod theme;
 pub mod toolbar;
 
 /// Drives egui frame by frame, with real pointer events, for UI tests.
@@ -96,6 +97,7 @@ mod tests {
             ("menu.rs", include_str!("../menu.rs")),
             ("ui/context_menu.rs", include_str!("context_menu.rs")),
             ("ui/confirm.rs", include_str!("confirm.rs")),
+            ("ui/theme.rs", include_str!("theme.rs")),
             ("ui/file_list.rs", include_str!("file_list.rs")),
             ("ui/path_popup.rs", include_str!("path_popup.rs")),
             ("ui/preview.rs", include_str!("preview.rs")),

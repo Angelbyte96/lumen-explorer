@@ -513,9 +513,9 @@ fn came_from(current: &Path, target: &Path) -> Option<String> {
 /// A destructive operation waiting for the user's Enter or Escape.
 enum Dialog {
     /// The selected entries; `select` is the row to land on once they are gone.
-    Trash { paths: Vec<PathBuf>, select: Option<String> },
+    Trash { paths: Vec<PathBuf>, select: Option<String>, subject: ui::confirm::Subject },
     /// Shift+Delete: the same, deleted for good.
-    Delete { paths: Vec<PathBuf>, select: Option<String> },
+    Delete { paths: Vec<PathBuf>, select: Option<String>, subject: ui::confirm::Subject },
     /// Renaming onto an existing name; the edit resumes if the user says no.
     Replace(RenameEdit),
     /// Pasting onto an existing name.
@@ -523,6 +523,27 @@ enum Dialog {
 }
 
 impl Dialog {
+    fn title(&self) -> &'static str {
+        match self {
+            Self::Trash { .. } => "Move to Trash",
+            Self::Delete { .. } => "Delete Permanently",
+            Self::Replace(_) | Self::Paste { .. } => "Replace",
+        }
+    }
+
+    /// What a trash or delete removes, shown under the message.
+    fn subject(&self) -> Option<&ui::confirm::Subject> {
+        match self {
+            Self::Trash { subject, .. } | Self::Delete { subject, .. } => Some(subject),
+            Self::Replace(_) | Self::Paste { .. } => None,
+        }
+    }
+
+    /// It cannot be undone.
+    fn danger(&self) -> bool {
+        matches!(self, Self::Delete { .. })
+    }
+
     fn message(&self) -> String {
         match self {
             Self::Trash { paths, .. } => match paths.as_slice() {
@@ -1110,22 +1131,25 @@ impl LumenApp {
     }
 
     fn ask_trash(&mut self) {
-        if let Some((paths, select)) = self.removable_selection() {
-            self.dialog = Some(Dialog::Trash { paths, select });
+        if let Some((paths, select, subject)) = self.removable_selection() {
+            self.dialog = Some(Dialog::Trash { paths, select, subject });
         }
     }
 
     /// Shift+Delete: the same question, for deleting without the trash.
     fn ask_delete_forever(&mut self) {
-        if let Some((paths, select)) = self.removable_selection() {
-            self.dialog = Some(Dialog::Delete { paths, select });
+        if let Some((paths, select, subject)) = self.removable_selection() {
+            self.dialog = Some(Dialog::Delete { paths, select, subject });
         }
     }
 
-    /// The selection to remove and the row to land on after it, unless it is
-    /// empty or something in it is already in the trash.
-    fn removable_selection(&mut self) -> Option<(Vec<PathBuf>, Option<String>)> {
-        let paths: Vec<PathBuf> = self.tab.view.selection().iter().map(|e| e.path.clone()).collect();
+    /// The selection to remove, the row to land on after it and what the
+    /// question shows about it, unless it is empty or something in it is
+    /// already in the trash.
+    fn removable_selection(&mut self) -> Option<(Vec<PathBuf>, Option<String>, ui::confirm::Subject)> {
+        let selection = self.tab.view.selection();
+        let paths: Vec<PathBuf> = selection.iter().map(|e| e.path.clone()).collect();
+        let subject = ui::confirm::Subject::of(&selection);
         if paths.is_empty() {
             return None;
         }
@@ -1136,7 +1160,7 @@ impl LumenApp {
             self.tab.view.error = Some("This is already in the trash".into());
             return None;
         }
-        Some((paths, self.tab.view.name_after_removal()))
+        Some((paths, self.tab.view.name_after_removal(), subject))
     }
 
     /// Trashes or deletes `paths` in order, stopping at the first failure; the
@@ -1388,8 +1412,8 @@ impl LumenApp {
             return;
         }
         match dialog {
-            Dialog::Trash { paths, select } => self.remove_all(ctx, paths, select, fs::ops::trash),
-            Dialog::Delete { paths, select } => self.remove_all(ctx, paths, select, fs::ops::delete_forever),
+            Dialog::Trash { paths, select, .. } => self.remove_all(ctx, paths, select, fs::ops::trash),
+            Dialog::Delete { paths, select, .. } => self.remove_all(ctx, paths, select, fs::ops::delete_forever),
             Dialog::Replace(edit) => self.finish_rename(ctx, edit, true),
             Dialog::Paste { source, target, mode } => {
                 self.start_job(ctx, source, target, mode, true);
@@ -1948,7 +1972,18 @@ impl eframe::App for LumenApp {
 
         self.raise_parked_question();
         if let Some(dialog) = &self.dialog
-            && let Some(answer) = ui::confirm::show(&ctx, &dialog.message(), dialog.hint(), dialog.yes_label(), dialog.no_label())
+            && let Some(answer) = ui::confirm::show(
+                &ctx,
+                &ui::confirm::Prompt {
+                    title: dialog.title(),
+                    message: &dialog.message(),
+                    subject: dialog.subject(),
+                    hint: dialog.hint(),
+                    yes: dialog.yes_label(),
+                    no: dialog.no_label(),
+                    danger: dialog.danger(),
+                },
+            )
         {
             self.answer_dialog(&ctx, answer);
         }
@@ -2471,7 +2506,8 @@ mod tests {
 
     #[test]
     fn the_dialogs_say_what_enter_and_escape_do() {
-        let trash = Dialog::Trash { paths: vec![PathBuf::from("/x/a")], select: None };
+        let subject = ui::confirm::Subject::of(&[]);
+        let trash = Dialog::Trash { paths: vec![PathBuf::from("/x/a")], select: None, subject };
         assert_eq!(trash.hint(), "Enter to confirm · Esc to cancel", "as before");
         let paste = Dialog::Paste { source: "/x/a".into(), target: "/y/a".into(), mode: Mode::Copy };
         assert_eq!(paste.hint(), "Enter to replace · Esc to skip");
@@ -2551,6 +2587,24 @@ mod tests {
         assert_eq!(names_in(&dir), ["sub"]);
         assert_eq!(crate::fs::ops::tests::trashed_names_from(&dir), crate::fs::ops::tests::as_trashed(&["a.txt", "b.txt"]));
         crate::fs::ops::tests::purge_trashed_from(&dir);
+    }
+
+    #[test]
+    fn the_trash_and_delete_questions_say_what_they_remove() {
+        let (ctx, mut app, _dir) = app_in("app-dialog-subject");
+        pick(&mut app, &["a.txt"]);
+        app.handle_action(&ctx, Action::Trash);
+        let dialog = app.dialog.as_ref().expect("asks first");
+        assert_eq!((dialog.title(), dialog.danger()), ("Move to Trash", false));
+        let subject = dialog.subject().expect("what it removes");
+        assert_eq!((subject.name.as_str(), &subject.facts[0]), ("a.txt", &("Type", "TXT file".to_owned())));
+        app.answer_dialog(&ctx, Confirm::No);
+        pick(&mut app, &["a.txt", "sub"]);
+        app.handle_action(&ctx, Action::DeleteForever);
+        let dialog = app.dialog.as_ref().expect("asks first");
+        assert_eq!((dialog.title(), dialog.danger()), ("Delete Permanently", true));
+        assert_eq!(dialog.subject().unwrap().name, "2 items");
+        app.answer_dialog(&ctx, Confirm::No);
     }
 
     #[test]
