@@ -10,6 +10,8 @@ use crate::ui::path_popup::marked_name;
 
 /// Width of the menu, search box included.
 const WIDTH: f32 = 340.0;
+/// The widest the menu grows for long items; longer ones are cut.
+const MAX_WIDTH: f32 = 640.0;
 /// Lines shown before the list scrolls.
 const VISIBLE_ROWS: f32 = 18.0;
 /// Marks a closed / open submenu.
@@ -60,7 +62,8 @@ impl ContextMenu {
             .frame(egui::Frame::popup(&ctx.global_style()))
             .backdrop_color(egui::Color32::TRANSPARENT)
             .show(ctx, |ui| {
-                ui.set_width(WIDTH);
+                let width = self.width(ui);
+                ui.set_width(width);
                 ui.horizontal(|ui| {
                     crate::ui::icons::magnifier(ui);
                     let mut query = self.menu.query.clone();
@@ -136,6 +139,28 @@ impl ContextMenu {
             return Some(MenuEvent::Closed);
         }
         keys.into_iter().find_map(|key| self.menu.key(key)).map(MenuEvent::Run)
+    }
+
+    /// As wide as the widest line shown (indent, icon, label, shortcut), at
+    /// least [`WIDTH`] and at most [`MAX_WIDTH`] or the screen.
+    fn width(&self, ui: &egui::Ui) -> f32 {
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let side = ui.text_style_height(&egui::TextStyle::Body);
+        let spacing = ui.spacing().item_spacing.x;
+        let measure = |text: &str| ui.fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE).size().x);
+        let widest = self
+            .menu
+            .rows()
+            .iter()
+            .map(|row| {
+                let item = self.menu.item(&row.at);
+                let shortcut = item.shortcut.map_or(measure(CLOSED), measure);
+                // Row margin, indent, icon column, its gap, the label, a gap, the shortcut.
+                8.0 + row.depth as f32 * 16.0 + side + 4.0 + measure(&row.label) + 3.0 * spacing + 16.0 + shortcut
+            })
+            .fold(WIDTH, f32::max);
+        let screen = ui.ctx().content_rect().width() - 32.0;
+        widest.min(MAX_WIDTH).min(screen).max(WIDTH.min(screen))
     }
 
     /// Draws the lines; a click on one returns its command.
@@ -343,6 +368,30 @@ mod tests {
         step(&ctx, &mut menu, vec![key(K::ArrowUp)]);
         step(&ctx, &mut menu, vec![]);
         assert_eq!(menu.menu.cursor(), Some(0), "a pointer resting on a row does not pull the cursor back");
+    }
+
+    fn list_width(ctx: &egui::Context, menu: &mut ContextMenu) -> f32 {
+        for _ in 0..3 {
+            step(ctx, menu, vec![]);
+        }
+        ctx.data(|d| d.get_temp::<egui::Rect>(list_id())).expect("list drawn").width()
+    }
+
+    #[test]
+    fn the_menu_widens_for_a_long_item_up_to_a_limit() {
+        let ctx = egui::Context::default();
+        let short = list_width(&ctx, &mut sample());
+        assert!((short - WIDTH).abs() < 1.0, "short items keep the usual width: {short}");
+        let long = "Add to archive and email with a long 7-Zip name";
+        let mut menu = ContextMenu::new(vec![Item::run(long, Some("Ctrl+Shift+E"), true, Command::Open)], egui::pos2(10.0, 10.0));
+        let wide = list_width(&ctx, &mut menu);
+        let font = egui::FontId::proportional(14.0);
+        let text = ctx.fonts_mut(|f| f.layout_no_wrap(format!("{long}Ctrl+Shift+E"), font, egui::Color32::WHITE).size().x);
+        assert!(wide > WIDTH && wide >= text, "{wide} fits the {text} of label and shortcut");
+        let huge = "x".repeat(400);
+        let mut menu = ContextMenu::new(vec![Item::run(huge, None, true, Command::Open)], egui::pos2(10.0, 10.0));
+        let capped = list_width(&ctx, &mut menu);
+        assert!(capped <= MAX_WIDTH + 1.0, "never wider than {MAX_WIDTH}: {capped}");
     }
 
     #[test]
