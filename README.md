@@ -98,7 +98,7 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 | Space | Open / close the preview panel (with text in the filter, Space starts another word) |
 | Delete | Move the selected entries to the trash (asks once; Enter confirms, Esc cancels) |
 | Shift+Delete | Delete the selected entries for good, without the trash (asks once: "This cannot be undone"; a link is removed, never what it points to) |
-| F2 | Rename the selected entry in place (Enter to apply, Esc to cancel); does nothing with several selected |
+| F2 | Rename the selected entry in place (Enter to apply, Esc to cancel); does nothing with several selected. Characters a name cannot hold are not typed (`/` on Linux; `\ / : * ? " < > |` on Windows), and a pasted name keeps the rest |
 | Ctrl+Shift+N | Create "New Folder" here and rename it |
 | Ctrl+C / Ctrl+X | Copy / cut the selected entries (cut ones are faded until pasted) |
 | Ctrl+V | Paste into the current folder, one entry after another in the background; a name already there asks to Replace (Enter, the old one goes to the trash) or Skip (Esc) |
