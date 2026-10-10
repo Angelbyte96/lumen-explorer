@@ -313,6 +313,15 @@ impl Menu {
         None
     }
 
+    /// Swaps the items (the shell's arrived): the search stays, and the
+    /// cursor stays on the line with the same label if there still is one.
+    pub fn replace(&mut self, items: Vec<Item>) {
+        let label = self.cursor.and_then(|row| self.rows().get(row).map(|line| line.label.clone()));
+        self.items = items;
+        self.expanded.clear();
+        self.cursor = label.and_then(|label| self.rows().iter().position(|line| line.label == label));
+    }
+
     /// The pointer moved onto row `row`: it becomes the cursor's line.
     pub fn hover(&mut self, row: usize) {
         let rows = self.rows();
@@ -469,6 +478,22 @@ pub(crate) mod tests {
         assert_eq!(labels(&menu), ["Open", "", "Sort by", "  Name", "  Size", "Paste"]);
         menu.click(2);
         assert_eq!(labels(&menu), ["Open", "", "Sort by", "Paste"], "a second click closes it");
+    }
+
+    #[test]
+    fn new_items_keep_the_search_and_the_cursors_line() {
+        let mut menu = sample();
+        menu.key(Key::Down);
+        menu.key(Key::Down);
+        assert_eq!(menu.rows()[menu.cursor().unwrap()].label, "Sort by");
+        menu.replace(vec![run("Properties", Command::Shell(0)), Item::separator(), sample().items.remove(2)]);
+        assert_eq!(menu.rows()[menu.cursor().unwrap()].label, "Sort by", "the same line, moved");
+        menu.replace(vec![run("Open", Command::Open)]);
+        assert_eq!(menu.cursor(), None, "gone: nothing picked");
+        menu.set_query("prop".into());
+        menu.replace(vec![run("Open", Command::Open), run("Properties", Command::Shell(1))]);
+        assert_eq!(menu.query, "prop");
+        assert_eq!(menu.rows().iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["Properties"]);
     }
 
     #[test]

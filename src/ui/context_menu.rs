@@ -43,6 +43,15 @@ impl ContextMenu {
         Self { menu: Menu::new(items), pos, content: None, textures: std::collections::HashMap::new(), pointer: None }
     }
 
+    /// New items for the open menu (the shell's arrived); the search and the
+    /// cursor's line stay.
+    pub fn replace(&mut self, items: Vec<Item>) {
+        self.menu.replace(items);
+        // Pictures and height belonged to the old items' places.
+        self.textures.clear();
+        self.content = None;
+    }
+
     #[cfg(test)]
     pub fn items(&self) -> &[Item] {
         &self.menu.items
