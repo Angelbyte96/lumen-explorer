@@ -402,7 +402,6 @@ pub mod native {
         BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC, GetDIBits, GetObjectW, HBITMAP, HGDIOBJ,
         ReleaseDC,
     };
-    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
         BHID_SFObject, CMF_CANRENAME, CMF_NORMAL, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, GCS_VERBW, IContextMenu, IContextMenu2,
@@ -465,12 +464,12 @@ pub mod native {
         format!("The system menu is not available ({what}: {e})")
     }
 
-    /// The shell's menu for `paths`, which share one folder.
+    /// The shell's menu for `paths`, which share one folder. The caller's
+    /// thread has COM (the loader's has OLE).
     pub fn for_entries(paths: &[PathBuf], folder: &Path, window: Option<isize>) -> Result<(ShellMenu, Vec<Item>), String> {
         // SAFETY: every pointer handed to the shell outlives the call; ids are
         // freed by `Pidls`, after GetUIObjectOf copied what it needs.
         unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let mut pidls = Pidls(Vec::with_capacity(paths.len()));
             for path in paths {
                 let mut pidl = std::ptr::null_mut();
@@ -486,11 +485,10 @@ pub mod native {
         }
     }
 
-    /// The shell's menu for the empty space of `folder`.
+    /// The shell's menu for the empty space of `folder`; COM as above.
     pub fn for_folder(folder: &Path, window: Option<isize>) -> Result<(ShellMenu, Vec<Item>), String> {
         // SAFETY: plain COM calls on interfaces the shell returned.
         unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let item: IShellItem =
                 SHCreateItemFromParsingName(&HSTRING::from(folder.as_os_str()), None).map_err(|e| fail("folder", e))?;
             let shell_folder: IShellFolder = item.BindToHandler(None, &BHID_SFObject).map_err(|e| fail("folder", e))?;
@@ -693,18 +691,20 @@ pub mod native {
     impl Loader {
         /// The menu for `paths`, which share `folder`. `wake` runs on the
         /// loader's thread once the items are ready (or failed).
-        pub fn entries(paths: Vec<PathBuf>, folder: PathBuf, window: Option<isize>, wake: impl Fn() + Send + 'static) -> Self {
+        pub fn entries(paths: Vec<PathBuf>, folder: PathBuf, window: Option<isize>, wake: impl Fn() + Send + Sync + 'static) -> Self {
             Self::start(Target::Entries(paths, folder), window, wake)
         }
 
         /// The menu for the empty space of `folder`.
-        pub fn folder(folder: PathBuf, window: Option<isize>, wake: impl Fn() + Send + 'static) -> Self {
+        pub fn folder(folder: PathBuf, window: Option<isize>, wake: impl Fn() + Send + Sync + 'static) -> Self {
             Self::start(Target::Folder(folder), window, wake)
         }
 
-        fn start(target: Target, window: Option<isize>, wake: impl Fn() + Send + 'static) -> Self {
+        fn start(target: Target, window: Option<isize>, wake: impl Fn() + Send + Sync + 'static) -> Self {
             let (items_tx, items) = std::sync::mpsc::channel();
             let (invoke, requests) = std::sync::mpsc::channel::<Run>();
+            let wake = std::sync::Arc::new(wake);
+            let woken = wake.clone();
             let spawned = std::thread::Builder::new().name("lumen-shell-menu".into()).spawn(move || {
                 // SAFETY: OLE for this thread (handlers may use the clipboard or
                 // drag and drop); undone below, after the menu is gone.
@@ -723,13 +723,15 @@ pub mod native {
                         None
                     }
                 };
-                wake();
+                (*wake)();
                 if let Some(shell) = shell {
                     loop {
                         pump();
                         match requests.recv_timeout(PUMP) {
                             Ok((offset, window, done)) => {
                                 let _ = done.send(shell.invoke(offset, window));
+                                // Its error, if any, shows without waiting for input.
+                                (*wake)();
                                 drop(shell);
                                 // A window the item left open on this thread (not a
                                 // modal dialog: those return first) lives as long as it.
@@ -756,6 +758,7 @@ pub mod native {
             if let Err(e) = spawned {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let _ = tx.send(Err(format!("The system menu is not available (thread: {e})")));
+                (*woken)();
                 return Self { items: rx, invoke: std::sync::mpsc::channel().0 };
             }
             Self { items, invoke }
