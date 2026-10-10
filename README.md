@@ -25,8 +25,9 @@ No sudo: the binary goes to `~/.local/bin/lumen`, the menu entry to
 app grid, and can be pinned to the dock.
 
 The icon is `assets/lumen.svg`; after editing it, run
-`python3 scripts/render_icon.py` to regenerate `assets/lumen.png`, which the
-binary uses as its window icon.
+`python3 scripts/render_icon.py` (needs Pillow) to regenerate `assets/lumen.png`,
+which the binary uses as its window icon, and `assets/lumen.ico`, which
+`build.rs` puts into the Windows `.exe` so File Explorer shows it for the file.
 
 ## Windows
 
