@@ -113,12 +113,15 @@ fn pdf_page_with(program: &str, path: &Path) -> Content {
     }
 }
 
-/// A PDF's first page as Windows draws it for File Explorer.
+/// A PDF's first page, drawn by Windows' own PDF renderer.
 #[cfg(windows)]
 fn pdf_page(path: &Path) -> Content {
-    match crate::fs::thumbnail::of(path, PDF_SIDE) {
-        Ok(picture) => Content::Image(picture),
-        Err(reason) => Content::Info(reason),
+    let picture = crate::fs::pdf::first_page_png(path, PDF_SIDE)
+        .ok()
+        .and_then(|png| decode_reader(image::ImageReader::new(std::io::Cursor::new(png))).ok());
+    match picture {
+        Some(picture) => Content::Image(picture),
+        None => Content::Info("Cannot preview this PDF".into()),
     }
 }
 
@@ -320,7 +323,6 @@ mod tests {
         std::fs::write(path, pdf).unwrap();
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn a_pdf_shows_its_first_page() {
         let dir = fresh_fixture("preview-pdf");
@@ -333,25 +335,6 @@ mod tests {
         assert_eq!(pixel(3 * w / 4, h / 2), [255, 255, 255, 255], "the blank half");
     }
 
-    /// Windows CI: the shell is asked for real. A runner without a PDF
-    /// thumbnail handler gets the reason; with one, the page's shape.
-    #[cfg(windows)]
-    #[test]
-    fn a_pdf_gives_its_windows_thumbnail_or_says_why() {
-        let dir = fresh_fixture("preview-pdf-windows");
-        write_pdf(&dir.join("page.pdf"));
-        match load(&dir.join("page.pdf")) {
-            Content::Image(picture) => {
-                let [w, h] = picture.size;
-                assert!(w > h && w as u32 <= PDF_SIDE, "{w}x{h}");
-            }
-            Content::Info(reason) => {
-                assert_eq!(reason, "No thumbnail for this PDF: install a PDF app that gives File Explorer one");
-            }
-            _ => panic!("a PDF is an image or a reason"),
-        }
-    }
-
     #[cfg(not(windows))]
     #[test]
     fn a_broken_pdf_or_no_poppler_says_why() {
@@ -360,6 +343,14 @@ mod tests {
         assert_eq!(info_of(load(&dir.join("bad.pdf"))), "Cannot preview this PDF");
         write_pdf(&dir.join("good.pdf"));
         assert_eq!(info_of(pdf_page_with("lumen-no-such-pdftoppm", &dir.join("good.pdf"))), "Install poppler-utils to preview PDFs");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_broken_pdf_says_why() {
+        let dir = fresh_fixture("preview-pdf-broken-windows");
+        std::fs::write(dir.join("bad.pdf"), "not a pdf").unwrap();
+        assert_eq!(info_of(load(&dir.join("bad.pdf"))), "Cannot preview this PDF");
     }
 
     #[cfg(not(windows))]

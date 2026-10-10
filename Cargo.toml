@@ -35,9 +35,11 @@ open = "5"
 # identities for renames; opening files as File Explorer does. The same
 # windows-sys eframe already uses: only adds the feature.
 [target.'cfg(windows)'.dependencies]
-# The shell's right-click menu (COM). The same windows crate `trash` already
+# The shell's right-click menu (COM) and PDF pages (Windows.Data.Pdf). The same windows crate `trash` already
 # uses: only adds features.
 windows = { version = "0.62", features = [
+    "Data_Pdf",
+    "Storage_Streams",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
