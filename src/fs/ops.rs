@@ -283,12 +283,16 @@ pub(crate) mod tests {
         dir
     }
 
-    /// Removes this fixture's items from the trash so test runs do not pile up there.
+    /// Removes the items trashed from this fixture, or from a folder inside it,
+    /// so test runs do not pile up in the trash.
     pub(crate) fn purge_trashed_from(dir: &Path) {
         let items: Vec<_> = trash::os_limited::list()
             .unwrap_or_default()
             .into_iter()
-            .filter(|item| item.original_parent == dir)
+        // A run that failed or was stopped before its own purge left items in the
+        // trash; tests that count this fixture's trashed items would see them.
+        purge_trashed_from(&dir);
+            .filter(|item| item.original_parent.starts_with(dir))
             .collect();
         let _ = trash::os_limited::purge_all(items);
     }
