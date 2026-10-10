@@ -22,8 +22,9 @@ fn main() -> eframe::Result {
     let start = app::start(&std::env::args().skip(1).collect::<Vec<_>>());
     let home = fs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
     let config_home = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
-    let config_path = config::default_path(fs::home_dir().as_deref(), config_home.as_deref());
-    let settings = config::open(config_path);
+    let appdata = std::env::var_os("APPDATA").filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
+    let location = config::location(cfg!(windows), fs::home_dir().as_deref(), config_home.as_deref(), appdata.as_deref());
+    let settings = config::open(location.map(config::Location::resolve));
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
