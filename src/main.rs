@@ -67,6 +67,20 @@ mod tests {
         assert_eq!(alpha(128, 128), 255);
     }
 
+    /// build.rs puts assets/lumen.ico into the Windows .exe, the icon File
+    /// Explorer shows for it; it needs every size Explorer's views ask for.
+    #[test]
+    fn the_exe_icon_holds_every_size_file_explorer_uses() {
+        let ico = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/lumen.ico")).expect("assets/lumen.ico");
+        assert_eq!(&ico[..4], &[0, 0, 1, 0], "an icon file");
+        let count = u16::from_le_bytes([ico[4], ico[5]]) as usize;
+        // Each 16-byte entry starts with its width; 0 means 256.
+        let mut sizes: Vec<u32> =
+            (0..count).map(|i| ico[6 + i * 16]).map(|w| if w == 0 { 256 } else { w.into() }).collect();
+        sizes.sort();
+        assert_eq!(sizes, [16, 24, 32, 48, 64, 128, 256]);
+    }
+
     /// The Menu key reaches Lumen only through vendor/egui-winit (it arrives as
     /// Shift+F10). Cargo ignores a [patch] whose version no longer matches,
     /// with just a warning: after an egui update this fails until it is redone.
