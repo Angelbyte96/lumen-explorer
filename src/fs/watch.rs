@@ -139,6 +139,10 @@ mod tests {
         assert!(w.take_changed());
     }
 
+    /// Not on Windows: there a write inside a subfolder changes the
+    /// subfolder's own date, which the folder reports (sometimes, as NTFS
+    /// updates it lazily), and reloading for it is right: the list shows that date.
+    #[cfg(not(windows))]
     #[test]
     fn subfolders_are_not_watched() {
         let dir = fresh_fixture("watch-shallow");
