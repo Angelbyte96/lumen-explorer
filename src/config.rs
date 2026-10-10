@@ -224,7 +224,8 @@ impl Location {
         let moved = self.path.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok())
             && std::fs::rename(&old, &self.path).is_ok();
         if !moved {
-            return old;
+            // Another window starting at the same time may have moved it first.
+            return if self.path.exists() { self.path } else { old };
         }
         // Only removed when empty: the old `lumen` folder, never `.config`.
         if let Some(dir) = old.parent() {
@@ -501,6 +502,30 @@ bookmark =
         let new = dir.join("appdata/lumen/config");
         assert_eq!(Location { path: new.clone(), old: Some(dir.join("old/config")) }.resolve(), new);
         assert!(!dir.join("appdata").exists(), "written on the first save, as before");
+    }
+
+    #[test]
+    fn a_window_that_loses_the_move_race_uses_the_new_file() {
+        for i in 0..50 {
+            let dir = crate::fs::ops::tests::fresh_fixture(&format!("config-race-{i}"));
+            let (old, new) = (dir.join("old/lumen/config"), dir.join("appdata/lumen/config"));
+            std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+            std::fs::write(&old, "bookmark = /r\n").unwrap();
+            let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let windows: Vec<_> = (0..2)
+                .map(|_| {
+                    let (start, old, new) = (start.clone(), old.clone(), new.clone());
+                    std::thread::spawn(move || {
+                        start.wait();
+                        Location { path: new, old: Some(old) }.resolve()
+                    })
+                })
+                .collect();
+            for window in windows {
+                assert_eq!(window.join().unwrap(), new, "both windows read the moved file");
+            }
+            assert_eq!(std::fs::read_to_string(&new).unwrap(), "bookmark = /r\n");
+        }
     }
 
     #[test]
