@@ -510,6 +510,28 @@ fn came_from(current: &Path, target: &Path) -> Option<String> {
         .map(|n| n.to_string_lossy().into_owned())
 }
 
+/// What a Windows menu was opened on, kept to build it again once the
+/// shell's items arrive.
+#[cfg(windows)]
+enum MenuBasis {
+    Entries { selection: Vec<Entry>, bookmarked: bool, can_paste: bool },
+    Background { can_paste: bool, sort: Sort },
+}
+
+#[cfg(windows)]
+impl MenuBasis {
+    /// The menu with these shell items (none: Lumen's own).
+    fn items(&self, shell: Vec<crate::menu::Item>) -> Vec<crate::menu::Item> {
+        match self {
+            Self::Entries { selection, bookmarked, can_paste } => {
+                let selection: Vec<&Entry> = selection.iter().collect();
+                crate::shell_menu::entry_menu(shell, &selection, *bookmarked, *can_paste)
+            }
+            Self::Background { can_paste, sort } => crate::shell_menu::background_menu(shell, *can_paste, *sort),
+        }
+    }
+}
+
 /// A destructive operation waiting for the user's Enter or Escape.
 enum Dialog {
     /// The selected entries; `select` is the row to land on once they are gone.
@@ -700,9 +722,18 @@ pub struct LumenApp {
     context_menu: Option<ContextMenu>,
     /// The open menu is a row's (not the folder's): its commands act on the selection.
     context_on_entry: bool,
-    /// The shell's menu behind the open one, whose items it runs.
+    /// The shell's menu behind the open one, loading or loaded, whose items it runs.
     #[cfg(windows)]
-    shell_menu: Option<crate::shell_menu::native::ShellMenu>,
+    shell_menu: Option<crate::shell_menu::native::Loader>,
+    /// What the open menu was built from, to build it again with the shell's items.
+    #[cfg(windows)]
+    menu_basis: Option<MenuBasis>,
+    /// A shell item running on the menu's thread: its error, once it ran.
+    #[cfg(windows)]
+    shell_run: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// Wakes the UI from the shell menu's thread.
+    #[cfg(windows)]
+    repaint: egui::Context,
     /// Lumen's window, for what the shell runs on its behalf.
     #[cfg(windows)]
     hwnd: Option<isize>,
@@ -771,6 +802,12 @@ impl LumenApp {
             context_on_entry: false,
             #[cfg(windows)]
             shell_menu: None,
+            #[cfg(windows)]
+            menu_basis: None,
+            #[cfg(windows)]
+            shell_run: None,
+            #[cfg(windows)]
+            repaint: ctx.clone(),
             #[cfg(windows)]
             hwnd: None,
             templates: None,
@@ -987,14 +1024,23 @@ impl LumenApp {
             };
             menu::entry_menu(&selection, bookmarked, &apps)
         };
-        // The shell's own items, as File Explorer shows them; Lumen's alone if it fails.
+        // Lumen's items at once; the shell's own, as File Explorer shows them,
+        // join when its thread has them (see `poll_shell_menu`).
         #[cfg(windows)]
         let items = {
             let paths: Vec<PathBuf> = selection.iter().map(|e| e.path.clone()).collect();
-            let shell = crate::shell_menu::native::for_entries(&paths, &view.current, self.hwnd);
-            let (shell_menu, shell_items) = shell.map_or((None, Vec::new()), |(menu, items)| (Some(menu), items));
-            self.shell_menu = shell_menu;
-            crate::shell_menu::entry_menu(shell_items, &selection, bookmarked, self.clipboard.is_some())
+            let repaint = self.repaint.clone();
+            self.shell_menu = Some(crate::shell_menu::native::Loader::entries(paths, view.current.clone(), self.hwnd, move || {
+                repaint.request_repaint()
+            }));
+            let basis = MenuBasis::Entries {
+                selection: selection.iter().map(|&e| e.clone()).collect(),
+                bookmarked,
+                can_paste: self.clipboard.is_some(),
+            };
+            let items = crate::shell_menu::loading(basis.items(Vec::new()));
+            self.menu_basis = Some(basis);
+            items
         };
         self.context_menu = Some(ContextMenu::new(items, pos));
         self.context_on_entry = true;
@@ -1009,13 +1055,46 @@ impl LumenApp {
         };
         #[cfg(windows)]
         let items = {
-            let shell = crate::shell_menu::native::for_folder(&self.tab.view.current, self.hwnd);
-            let (shell_menu, shell_items) = shell.map_or((None, Vec::new()), |(menu, items)| (Some(menu), items));
-            self.shell_menu = shell_menu;
-            crate::shell_menu::background_menu(shell_items, self.clipboard.is_some(), self.tab.view.sort)
+            let repaint = self.repaint.clone();
+            self.shell_menu = Some(crate::shell_menu::native::Loader::folder(self.tab.view.current.clone(), self.hwnd, move || {
+                repaint.request_repaint()
+            }));
+            let basis = MenuBasis::Background { can_paste: self.clipboard.is_some(), sort: self.tab.view.sort };
+            let items = crate::shell_menu::loading(basis.items(Vec::new()));
+            self.menu_basis = Some(basis);
+            items
         };
         self.context_menu = Some(ContextMenu::new(items, pos));
         self.context_on_entry = false;
+    }
+
+    /// The shell's items arrived: the open menu becomes the full one. When
+    /// the shell failed, Lumen's own stay, without the loading line.
+    #[cfg(windows)]
+    fn poll_shell_menu(&mut self) {
+        if let Some(run) = &self.shell_run {
+            match run.try_recv() {
+                Ok(result) => {
+                    self.shell_run = None;
+                    if let Err(err) = result {
+                        self.tab.view.error = Some(err);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.shell_run = None,
+            }
+        }
+        let (Some(loader), Some(menu), Some(basis)) = (&self.shell_menu, &mut self.context_menu, &self.menu_basis) else {
+            return;
+        };
+        match loader.items() {
+            None => {}
+            Some(Ok(shell)) => menu.replace(basis.items(shell)),
+            Some(Err(_)) => {
+                menu.replace(basis.items(Vec::new()));
+                self.shell_menu = None;
+            }
+        }
     }
 
     fn run_command(&mut self, ctx: &egui::Context, command: Command) {
@@ -1082,10 +1161,8 @@ impl LumenApp {
             }
             Command::Shell(offset) => {
                 #[cfg(windows)]
-                if let Some(shell) = self.shell_menu.take()
-                    && let Err(err) = shell.invoke(offset, self.hwnd)
-                {
-                    self.tab.view.error = Some(err);
+                if let Some(shell) = self.shell_menu.take() {
+                    self.shell_run = Some(shell.invoke(offset, self.hwnd));
                 }
                 #[cfg(not(windows))]
                 let _ = offset;
@@ -1941,6 +2018,8 @@ impl eframe::App for LumenApp {
             }
         });
 
+        #[cfg(windows)]
+        self.poll_shell_menu();
         if let Some(menu) = self.context_menu.as_mut()
             && let Some(event) = menu.show(&ctx)
         {
@@ -1952,6 +2031,7 @@ impl eframe::App for LumenApp {
             #[cfg(windows)]
             {
                 self.shell_menu = None;
+                self.menu_basis = None;
             }
         }
 
@@ -2673,6 +2753,44 @@ mod tests {
     fn menu_item<'a>(app: &'a LumenApp, command: &Command) -> Option<&'a crate::menu::Item> {
         let items = app.context_menu.as_ref().expect("menu open").items();
         items.iter().find(|item| item.kind == crate::menu::Kind::Run(command.clone()))
+    }
+
+    /// Polls until the shell's items replace the loading line, or 20 s pass.
+    #[cfg(windows)]
+    fn wait_for_shell_items(app: &mut LumenApp) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while menu_labels(app).contains(&crate::shell_menu::LOADING.to_owned()) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            app.poll_shell_menu();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_menus_open_at_once_and_the_shells_items_follow() {
+        let (_ctx, mut app, _dir) = app_in("app-menu-async");
+        let shell_item = |app: &LumenApp| {
+            let items = app.context_menu.as_ref().expect("menu open").items();
+            items.iter().any(|item| matches!(item.kind, crate::menu::Kind::Run(Command::Shell(_))))
+        };
+        for background in [false, true] {
+            let started = std::time::Instant::now();
+            if background {
+                app.open_background_menu(egui::pos2(10.0, 10.0));
+            } else {
+                app.open_entry_menu(1, egui::pos2(10.0, 10.0));
+            }
+            let took = started.elapsed();
+            assert!(took < Duration::from_millis(100), "opened in {took:?}");
+            assert!(menu_labels(&app).contains(&crate::shell_menu::LOADING.to_owned()), "{:?}", menu_labels(&app));
+            let own = if background { Command::Refresh } else { Command::Trash };
+            assert!(menu_item(&app, &own).is_some(), "Lumen's own items at once: {:?}", menu_labels(&app));
+            wait_for_shell_items(&mut app);
+            assert!(!menu_labels(&app).contains(&crate::shell_menu::LOADING.to_owned()), "the shell answered");
+            assert!(shell_item(&app), "the shell's items arrived: {:?}", menu_labels(&app));
+            app.context_menu = None;
+            app.shell_menu = None;
+        }
     }
 
     #[test]

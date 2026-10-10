@@ -10,6 +10,16 @@ use crate::app::Sort;
 use crate::fs::Entry;
 use crate::menu::{self, Command, Item, Kind};
 
+/// The line shown while the shell's items load.
+pub const LOADING: &str = "Loading system items…";
+
+/// Lumen's items with the loading line on top, until the shell's arrive.
+pub fn loading(items: Vec<Item>) -> Vec<Item> {
+    let mut out = vec![Item::run(LOADING, None, false, Command::Refresh), Item::separator()];
+    out.extend(items);
+    out
+}
+
 /// A shell label without its accelerator marks ("&Open" -> "Open", "&&" ->
 /// "&") and without a shortcut after a tab.
 pub fn clean_label(raw: &str) -> String {
@@ -652,6 +662,172 @@ pub mod native {
                 // A prompt the user declined is not an error.
                 Err(e) if e.code() == windows::Win32::Foundation::ERROR_CANCELLED.to_hresult() => Ok(()),
                 Err(e) => Err(format!("The command did not run: {e}")),
+            }
+        }
+    }
+
+    /// Messages the shell's handlers expect on their thread while their menu
+    /// is alive, and after one of its items ran.
+    const PUMP: std::time::Duration = std::time::Duration::from_millis(15);
+    /// How long the thread keeps pumping after an item ran, for handlers that
+    /// finish their work through its messages.
+    const AFTER_INVOKE: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// A request to run the item at an offset, and where its outcome goes.
+    type Run = (u32, Option<isize>, std::sync::mpsc::Sender<Result<(), String>>);
+
+    enum Target {
+        Entries(Vec<PathBuf>, PathBuf),
+        Folder(PathBuf),
+    }
+
+    /// The shell's menu, asked for on a thread of its own: installed
+    /// extensions take up to seconds to answer, and Lumen's menu shows at
+    /// once meanwhile. The menu lives on that thread, where its items run,
+    /// until one runs or this is dropped.
+    pub struct Loader {
+        items: std::sync::mpsc::Receiver<Result<Vec<Item>, String>>,
+        invoke: std::sync::mpsc::Sender<Run>,
+    }
+
+    impl Loader {
+        /// The menu for `paths`, which share `folder`. `wake` runs on the
+        /// loader's thread once the items are ready (or failed).
+        pub fn entries(paths: Vec<PathBuf>, folder: PathBuf, window: Option<isize>, wake: impl Fn() + Send + 'static) -> Self {
+            Self::start(Target::Entries(paths, folder), window, wake)
+        }
+
+        /// The menu for the empty space of `folder`.
+        pub fn folder(folder: PathBuf, window: Option<isize>, wake: impl Fn() + Send + 'static) -> Self {
+            Self::start(Target::Folder(folder), window, wake)
+        }
+
+        fn start(target: Target, window: Option<isize>, wake: impl Fn() + Send + 'static) -> Self {
+            let (items_tx, items) = std::sync::mpsc::channel();
+            let (invoke, requests) = std::sync::mpsc::channel::<Run>();
+            let spawned = std::thread::Builder::new().name("lumen-shell-menu".into()).spawn(move || {
+                // SAFETY: OLE for this thread (handlers may use the clipboard or
+                // drag and drop); undone below, after the menu is gone.
+                let _ = unsafe { windows::Win32::System::Ole::OleInitialize(None) };
+                let built = match &target {
+                    Target::Entries(paths, folder) => for_entries(paths, folder, window),
+                    Target::Folder(folder) => for_folder(folder, window),
+                };
+                let shell = match built {
+                    Ok((shell, list)) => {
+                        let _ = items_tx.send(Ok(list));
+                        Some(shell)
+                    }
+                    Err(e) => {
+                        let _ = items_tx.send(Err(e));
+                        None
+                    }
+                };
+                wake();
+                if let Some(shell) = shell {
+                    loop {
+                        pump();
+                        match requests.recv_timeout(PUMP) {
+                            Ok((offset, window, done)) => {
+                                let _ = done.send(shell.invoke(offset, window));
+                                drop(shell);
+                                // A window the item left open on this thread (not a
+                                // modal dialog: those return first) lives as long as it.
+                                let until = std::time::Instant::now() + AFTER_INVOKE;
+                                while std::time::Instant::now() < until || thread_has_windows() {
+                                    pump();
+                                    std::thread::sleep(PUMP);
+                                }
+                                break;
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                            // The menu closed without running a shell item.
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    }
+                }
+                // SAFETY: what this thread put on the clipboard outlives it;
+                // then OLE ends, nothing of the shell's is left on this thread.
+                unsafe {
+                    let _ = windows::Win32::System::Ole::OleFlushClipboard();
+                    windows::Win32::System::Ole::OleUninitialize();
+                }
+            });
+            if let Err(e) = spawned {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let _ = tx.send(Err(format!("The system menu is not available (thread: {e})")));
+                return Self { items: rx, invoke: std::sync::mpsc::channel().0 };
+            }
+            Self { items, invoke }
+        }
+
+        /// The shell's items once they are ready; `None` while loading.
+        pub fn items(&self) -> Option<Result<Vec<Item>, String>> {
+            match self.items.try_recv() {
+                Ok(items) => Some(items),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err("The system menu is not available".into())),
+            }
+        }
+
+        /// Runs the item at `offset` on the menu's thread. The answer comes
+        /// once it ran (a dialog it opens may take a while).
+        pub fn invoke(self, offset: u32, window: Option<isize>) -> std::sync::mpsc::Receiver<Result<(), String>> {
+            let (done, answer) = std::sync::mpsc::channel();
+            if let Err(std::sync::mpsc::SendError((_, _, done))) = self.invoke.send((offset, window, done)) {
+                let _ = done.send(Err("The system menu is no longer available".into()));
+            }
+            answer
+        }
+    }
+
+    /// Whether this thread shows a window (OLE's own hidden ones do not count).
+    fn thread_has_windows() -> bool {
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        use windows::Win32::UI::WindowsAndMessaging::{EnumThreadWindows, IsWindowVisible};
+        unsafe extern "system" fn found(window: HWND, any: LPARAM) -> windows::core::BOOL {
+            // SAFETY: `window` comes from the enumeration; `any` points at the
+            // bool below, alive during it.
+            unsafe {
+                if IsWindowVisible(window).as_bool() {
+                    *(any.0 as *mut bool) = true;
+                    return windows::core::BOOL(0);
+                }
+            }
+            windows::core::BOOL(1)
+        }
+        let mut any = false;
+        // SAFETY: the callback writes only through the pointer given here.
+        let _ = unsafe { EnumThreadWindows(GetCurrentThreadId(), Some(found), LPARAM(&mut any as *mut bool as isize)) };
+        any
+    }
+
+    #[test]
+    fn a_thread_with_ole_and_a_built_menu_shows_no_window_so_it_can_end() {
+        let dir = crate::fs::ops::tests::fresh_fixture("shell-menu-thread");
+        std::thread::spawn(move || {
+            // SAFETY: as the loader's thread does.
+            let _ = unsafe { windows::Win32::System::Ole::OleInitialize(None) };
+            let menu = for_folder(&dir, None).expect("the shell answers");
+            pump();
+            assert!(!thread_has_windows(), "OLE's and the menu's hidden windows do not keep it alive");
+            drop(menu);
+            // SAFETY: undoes the call above.
+            unsafe { windows::Win32::System::Ole::OleUninitialize() };
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// Hands this thread's waiting messages to their windows.
+    fn pump() {
+        use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage};
+        let mut msg = MSG::default();
+        // SAFETY: the plain message loop, for this thread's own windows.
+        unsafe {
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
         }
     }
