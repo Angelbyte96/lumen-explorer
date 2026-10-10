@@ -86,14 +86,23 @@ fn skip_zone_check(dangerous: Option<bool>) -> bool {
     dangerous == Some(false)
 }
 
+/// Whether the system allows `c` in a file name: never "/" or NUL; on Windows
+/// also \ : * ? " < > | and control characters.
+pub fn allowed_in_name(c: char) -> bool {
+    if c == '/' || c == '\0' {
+        return false;
+    }
+    !(cfg!(windows) && (c.is_ascii_control() || matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')))
+}
+
 /// Checks a name typed by the user for a new or renamed entry.
 pub fn validate_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
         Err("Name cannot be empty".into())
-    } else if name.contains('/') {
-        Err("Name cannot contain “/”".into())
     } else if name.contains('\0') {
         Err("Name cannot contain a NUL character".into())
+    } else if let Some(c) = name.chars().find(|&c| !allowed_in_name(c)) {
+        Err(format!("Name cannot contain “{c}”"))
     } else if name == "." || name == ".." {
         Err(format!("“{name}” is not a valid name"))
     } else {
@@ -279,6 +288,9 @@ pub(crate) mod tests {
             .join("ops")
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
+        // A run that failed or was stopped before its own purge left items in the
+        // trash; tests that count this fixture's trashed items would see them.
+        purge_trashed_from(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -289,9 +301,6 @@ pub(crate) mod tests {
         let items: Vec<_> = trash::os_limited::list()
             .unwrap_or_default()
             .into_iter()
-        // A run that failed or was stopped before its own purge left items in the
-        // trash; tests that count this fixture's trashed items would see them.
-        purge_trashed_from(&dir);
             .filter(|item| item.original_parent.starts_with(dir))
             .collect();
         let _ = trash::os_limited::purge_all(items);
@@ -403,6 +412,27 @@ pub(crate) mod tests {
         for good in ["notes.txt", ".hidden", " spaced name ", "ñandú", "a..b"] {
             assert_eq!(validate_name(good), Ok(()), "{good:?} should be valid");
         }
+    }
+
+    #[test]
+    fn the_characters_a_name_cannot_hold_follow_the_system() {
+        for c in ['/', '\0'] {
+            assert!(!allowed_in_name(c), "{c:?} is never allowed");
+        }
+        for c in ['a', 'ñ', ' ', '.', '-', '(', 'é'] {
+            assert!(allowed_in_name(c), "{c:?} is always allowed");
+        }
+        let windows_only = ['\\', ':', '*', '?', '"', '<', '>', '|', '\u{1}', '\u{1f}'];
+        for c in windows_only {
+            assert_eq!(allowed_in_name(c), cfg!(not(windows)), "{c:?}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rejects_its_forbidden_characters_on_confirm() {
+        assert_eq!(validate_name("a:b").unwrap_err(), "Name cannot contain “:”");
+        assert_eq!(validate_name("a\\b").unwrap_err(), "Name cannot contain “\\”");
     }
 
     #[test]

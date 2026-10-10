@@ -251,6 +251,18 @@ pub fn rename_id() -> egui::Id {
 /// The text field drawn in place of the name while renaming.
 fn rename_field(ui: &mut egui::Ui, edit: &mut RenameEdit) -> Option<bool> {
     let id = rename_id();
+    // Characters a name cannot hold are dropped before the field reads them, as
+    // File Pilot does: typing one does nothing, a pasted name keeps the rest.
+    if ui.memory(|m| m.has_focus(id)) {
+        ui.input_mut(|i| {
+            for event in &mut i.events {
+                if let egui::Event::Text(text) | egui::Event::Paste(text) = event {
+                    text.retain(crate::fs::ops::allowed_in_name);
+                }
+            }
+            i.events.retain(|e| !matches!(e, egui::Event::Text(t) | egui::Event::Paste(t) if t.is_empty()));
+        });
+    }
     let mut output = egui::TextEdit::singleline(&mut edit.text)
         .id(id)
         .desired_width(f32::INFINITY)
@@ -310,6 +322,33 @@ mod tests {
         assert_eq!(stem_chars(".bashrc", false), 7);
         assert_eq!(stem_chars("Makefile", false), 8);
         assert_eq!(stem_chars("v1.2", true), 4, "folders have no extension");
+    }
+
+    /// Focuses the rename field (name selected), then sends these events to it.
+    fn type_into_rename(name: &str, events: Vec<egui::Event>) -> String {
+        let ctx = egui::Context::default();
+        let mut edit = RenameEdit { path: PathBuf::from("/x").join(name), is_dir: false, text: name.into(), focus: true };
+        for events in [Vec::new(), events] {
+            let input = egui::RawInput { events, ..egui::RawInput::default() };
+            ctx.run_ui(input, |ui| {
+                rename_field(ui, &mut edit);
+            })
+            .drop_without_applying_deltas();
+        }
+        edit.text
+    }
+
+    #[test]
+    fn forbidden_characters_are_never_typed_into_the_rename_field() {
+        let typed = type_into_rename("notes.txt", vec![egui::Event::Text("a/b".into())]);
+        assert_eq!(typed, "ab.txt", "the slash is dropped, the rest is typed");
+        let pasted = type_into_rename("notes.txt", vec![egui::Event::Paste("x/y\0z".into())]);
+        assert_eq!(pasted, "xyz.txt", "pasted text keeps its other characters");
+        let windows = type_into_rename("notes.txt", vec![egui::Event::Text("a:b*c?".into())]);
+        let expected = if cfg!(windows) { "abc.txt" } else { "a:b*c?.txt" };
+        assert_eq!(windows, expected, "Windows' own forbidden characters");
+        let only_forbidden = type_into_rename("notes.txt", vec![egui::Event::Text("/".into())]);
+        assert_eq!(only_forbidden, "notes.txt", "a forbidden key leaves the selected name alone");
     }
 
     fn entry(name: &str) -> Entry {
