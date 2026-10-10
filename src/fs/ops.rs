@@ -295,11 +295,23 @@ pub(crate) mod tests {
         dir
     }
 
+    /// Everything in the trash. Tests run in parallel, and the trash crate panics
+    /// when it reads an item's .trashinfo while another test is still writing it
+    /// ("Absolute path to trashed item should have a parent"): read it again.
+    fn trash_items() -> Vec<trash::TrashItem> {
+        for _ in 0..50 {
+            if let Ok(items) = std::panic::catch_unwind(trash::os_limited::list) {
+                return items.unwrap_or_default();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the trash could not be listed");
+    }
+
     /// Removes the items trashed from this fixture, or from a folder inside it,
     /// so test runs do not pile up in the trash.
     pub(crate) fn purge_trashed_from(dir: &Path) {
-        let items: Vec<_> = trash::os_limited::list()
-            .unwrap_or_default()
+        let items: Vec<_> = trash_items()
             .into_iter()
             .filter(|item| item.original_parent.starts_with(dir))
             .collect();
@@ -308,7 +320,7 @@ pub(crate) mod tests {
 
     /// Names of this fixture's items in the trash, sorted, as `as_trashed` gives them.
     pub(crate) fn trashed_names_from(dir: &Path) -> Vec<String> {
-        let items = trash::os_limited::list().unwrap_or_default();
+        let items = trash_items();
         let names = items.iter().filter(|item| item.original_parent == dir).map(|item| item.name.to_string_lossy());
         as_trashed(&names.collect::<Vec<_>>())
     }
