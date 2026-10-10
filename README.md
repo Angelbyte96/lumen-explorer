@@ -54,7 +54,9 @@ On Windows:
 - Files open as a double-click in File Explorer does: Windows asks before
   opening a downloaded file only when its type is dangerous (`.exe`, `.bat`…),
   not for a downloaded image or document.
-- Settings are saved in `%USERPROFILE%\.config\lumen\config`.
+- Settings are saved in `%APPDATA%\lumen\config`. A settings file left by
+  Lumen 0.1 in `%USERPROFILE%\.config\lumen\config` is moved there the first
+  time; if it cannot be moved, Lumen keeps using it where it is.
 
 ## Releases
 
@@ -123,7 +125,7 @@ The preview panel follows the selection: a folder shows its contents, text and c
 
 The open folder reloads by itself when something changes on disk, keeping the selection and the sort order.
 
-Settings are kept in `~/.config/lumen/config` (or `$XDG_CONFIG_HOME/lumen/config`): bookmarks, sort order, Ctrl+H, whether the side panel and the preview are open, the list zoom and the window size. They are written as soon as they change (the window size when Lumen closes). It is a plain `key = value` file; lines Lumen does not understand are ignored. If the file exists but cannot be read, Lumen says so and saves nothing that session, so the file is never overwritten. With two Lumen windows open, each one writes only what it changed, so neither loses the other's bookmarks. The folders of the open tabs are saved when a window closes (`tab = …` and `active_tab = …`): the last window closed is the one reopened.
+Settings are kept in `~/.config/lumen/config` (or `$XDG_CONFIG_HOME/lumen/config`; on Windows `%APPDATA%\lumen\config`): bookmarks, sort order, Ctrl+H, whether the side panel and the preview are open, the list zoom and the window size. They are written as soon as they change (the window size when Lumen closes). It is a plain `key = value` file; lines Lumen does not understand are ignored. If the file exists but cannot be read, Lumen says so and saves nothing that session, so the file is never overwritten. With two Lumen windows open, each one writes only what it changed, so neither loses the other's bookmarks. The folders of the open tabs are saved when a window closes (`tab = …` and `active_tab = …`): the last window closed is the one reopened.
 
 The status bar shows the filter on the left ("Filter 9 files…" while empty, with a text cursor after the typed text), how long the last listing took, how many rows are selected ("5 selected") while you pick several, and on the right the folders shown and the selected row out of the rows shown ("1/9").
 Listing always runs on a background thread, so the window never freezes.

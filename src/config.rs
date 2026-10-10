@@ -1,4 +1,5 @@
-//! Settings kept between runs, in a plain text file (`~/.config/lumen/config`):
+//! Settings kept between runs, in a plain text file (`~/.config/lumen/config`,
+//! `%APPDATA%\lumen\config` on Windows):
 //! one `key = value` per line, readable and editable by hand.
 //! Unknown keys and broken lines are ignored, so a bad edit never stops Lumen.
 
@@ -192,6 +193,45 @@ pub fn default_path(home: Option<&Path>, config_home: Option<&Path>) -> Option<P
         None => home?.join(".config"),
     };
     Some(base.join("lumen/config"))
+}
+
+/// Where the settings file lives, and on Windows where older versions kept it.
+#[derive(Debug, PartialEq)]
+pub struct Location {
+    pub path: PathBuf,
+    /// Where Lumen 0.1 kept it (`%USERPROFILE%\.config\lumen\config`, or under
+    /// %XDG_CONFIG_HOME%), moved to `path` once.
+    pub old: Option<PathBuf>,
+}
+
+/// Windows: `%APPDATA%\lumen\config`, where Windows apps keep their settings.
+/// Elsewhere, or without %APPDATA%: [`default_path`].
+pub fn location(windows: bool, home: Option<&Path>, config_home: Option<&Path>, appdata: Option<&Path>) -> Option<Location> {
+    match appdata.filter(|_| windows) {
+        Some(appdata) => Some(Location { path: appdata.join("lumen/config"), old: default_path(home, config_home) }),
+        None => default_path(home, config_home).map(|path| Location { path, old: None }),
+    }
+}
+
+impl Location {
+    /// The file to use: `path`, after moving the old file there if `path` does
+    /// not exist yet. If the move fails the old file stays where it was and is
+    /// the one used, so no bookmark or tab is lost.
+    pub fn resolve(self) -> PathBuf {
+        let Some(old) = self.old.filter(|old| !self.path.exists() && old.is_file()) else {
+            return self.path;
+        };
+        let moved = self.path.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok())
+            && std::fs::rename(&old, &self.path).is_ok();
+        if !moved {
+            return old;
+        }
+        // Only removed when empty: the old `lumen` folder, never `.config`.
+        if let Some(dir) = old.parent() {
+            let _ = std::fs::remove_dir(dir);
+        }
+        self.path
+    }
 }
 
 fn parse_bool(value: &str) -> Option<bool> {
@@ -409,5 +449,70 @@ bookmark =
         assert_eq!(default_path(Some(home), None), Some(PathBuf::from("/home/u/.config/lumen/config")));
         assert_eq!(default_path(Some(home), Some(Path::new("/cfg"))), Some(PathBuf::from("/cfg/lumen/config")));
         assert_eq!(default_path(None, None), None);
+    }
+
+    #[test]
+    fn windows_keeps_the_file_in_appdata_and_linux_under_the_config_home() {
+        let home = Path::new("/home/u");
+        let appdata = Path::new("/appdata");
+        let linux = location(false, Some(home), Some(Path::new("/cfg")), Some(appdata));
+        assert_eq!(linux, Some(Location { path: PathBuf::from("/cfg/lumen/config"), old: None }));
+        let windows = location(true, Some(home), Some(Path::new("/cfg")), Some(appdata));
+        let old = Some(PathBuf::from("/cfg/lumen/config"));
+        assert_eq!(windows, Some(Location { path: PathBuf::from("/appdata/lumen/config"), old }), "where 0.1 kept it");
+        let old = Some(PathBuf::from("/home/u/.config/lumen/config"));
+        let windows = location(true, Some(home), None, Some(appdata));
+        assert_eq!(windows, Some(Location { path: PathBuf::from("/appdata/lumen/config"), old }));
+        assert_eq!(location(true, Some(home), None, None), location(false, Some(home), None, None), "no %APPDATA%");
+    }
+
+    #[test]
+    fn the_old_file_moves_to_the_new_place_once() {
+        let dir = crate::fs::ops::tests::fresh_fixture("config-move");
+        let old = dir.join("profile/.config/lumen/config");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "bookmark = /x\n").unwrap();
+        let new = dir.join("appdata/lumen/config");
+
+        let at = Location { path: new.clone(), old: Some(old.clone()) }.resolve();
+        assert_eq!(at, new);
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "bookmark = /x\n", "bookmarks and tabs kept");
+        assert!(!old.exists(), "moved, not copied");
+        assert!(!dir.join("profile/.config/lumen").exists(), "its emptied folder goes too");
+        assert!(dir.join("profile/.config").exists(), ".config may hold other apps' settings");
+    }
+
+    #[test]
+    fn an_existing_new_file_wins_and_the_old_one_stays() {
+        let dir = crate::fs::ops::tests::fresh_fixture("config-both");
+        let (old, new) = (dir.join("old/config"), dir.join("new/config"));
+        for (path, text) in [(&old, "sidebar = false\n"), (&new, "sidebar = true\n")] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        assert_eq!(Location { path: new.clone(), old: Some(old.clone()) }.resolve(), new);
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "sidebar = true\n");
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "sidebar = false\n", "left alone");
+    }
+
+    #[test]
+    fn without_an_old_file_nothing_is_created() {
+        let dir = crate::fs::ops::tests::fresh_fixture("config-fresh");
+        let new = dir.join("appdata/lumen/config");
+        assert_eq!(Location { path: new.clone(), old: Some(dir.join("old/config")) }.resolve(), new);
+        assert!(!dir.join("appdata").exists(), "written on the first save, as before");
+    }
+
+    #[test]
+    fn a_failed_move_keeps_reading_the_old_file() {
+        let dir = crate::fs::ops::tests::fresh_fixture("config-move-fails");
+        let old = dir.join("old/config");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "sidebar = false\n").unwrap();
+        std::fs::write(dir.join("appdata"), "a file where the folder should be").unwrap();
+        let new = dir.join("appdata/lumen/config");
+
+        assert_eq!(Location { path: new, old: Some(old.clone()) }.resolve(), old);
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "sidebar = false\n", "untouched");
     }
 }
