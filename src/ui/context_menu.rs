@@ -45,6 +45,7 @@ impl ContextMenu {
 
     /// New items for the open menu (the shell's arrived); the search and the
     /// cursor's line stay.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn replace(&mut self, items: Vec<Item>) {
         self.menu.replace(items);
         // Pictures and height belonged to the old items' places.
