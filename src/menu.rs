@@ -313,6 +313,14 @@ impl Menu {
         None
     }
 
+    /// The pointer moved onto row `row`: it becomes the cursor's line.
+    pub fn hover(&mut self, row: usize) {
+        let rows = self.rows();
+        if rows.get(row).is_some_and(|line| self.item(&line.at).kind != Kind::Separator) {
+            self.cursor = Some(row);
+        }
+    }
+
     /// A click on row `row`: runs it, or opens / closes a submenu.
     pub fn click(&mut self, row: usize) -> Option<Command> {
         let at = self.rows().get(row)?.at.clone();
@@ -461,6 +469,19 @@ pub(crate) mod tests {
         assert_eq!(labels(&menu), ["Open", "", "Sort by", "  Name", "  Size", "Paste"]);
         menu.click(2);
         assert_eq!(labels(&menu), ["Open", "", "Sort by", "Paste"], "a second click closes it");
+    }
+
+    #[test]
+    fn hovering_a_line_moves_the_cursor_but_not_onto_a_separator() {
+        let mut menu = sample();
+        menu.hover(2);
+        assert_eq!(menu.cursor(), Some(2));
+        menu.hover(1);
+        assert_eq!(menu.cursor(), Some(2), "a separator is not a line");
+        menu.hover(9);
+        assert_eq!(menu.cursor(), Some(2), "past the end");
+        menu.key(Key::Down);
+        assert_eq!(menu.cursor(), Some(3), "the keys go on from the hovered line");
     }
 
     #[test]

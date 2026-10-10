@@ -24,6 +24,9 @@ pub struct ContextMenu {
     content: Option<f32>,
     /// Items' own pictures, uploaded once, by the item's place in the menu.
     textures: std::collections::HashMap<Vec<usize>, egui::TextureHandle>,
+    /// Where the pointer was last frame (`None` before the first one): a
+    /// row takes the highlight only when the pointer moves onto it.
+    pointer: Option<Option<egui::Pos2>>,
 }
 
 /// What the open menu did this frame.
@@ -35,7 +38,7 @@ pub enum MenuEvent {
 
 impl ContextMenu {
     pub fn new(items: Vec<Item>, pos: egui::Pos2) -> Self {
-        Self { menu: Menu::new(items), pos, content: None, textures: std::collections::HashMap::new() }
+        Self { menu: Menu::new(items), pos, content: None, textures: std::collections::HashMap::new(), pointer: None }
     }
 
     #[cfg(test)]
@@ -138,6 +141,12 @@ impl ContextMenu {
     /// Draws the lines; a click on one returns its command.
     fn rows(&mut self, ui: &mut egui::Ui) -> Option<Command> {
         let mut clicked = None;
+        let mut hovered = None;
+        // Only a moving pointer takes the highlight: one resting on a row
+        // (where the right click was, or after the arrow keys) must not.
+        let now = ui.input(|i| i.pointer.latest_pos());
+        let moving = self.pointer.is_some_and(|before| before != now);
+        self.pointer = Some(now);
         let cursor = self.menu.cursor();
         let font = egui::TextStyle::Body.resolve(ui.style());
         for (index, row) in self.menu.rows().into_iter().enumerate() {
@@ -189,10 +198,17 @@ impl ContextMenu {
             if cursor == Some(index) {
                 response.scroll_to_me(None);
             }
+            if moving && response.hovered() && cursor != Some(index) {
+                hovered = Some(index);
+            }
             ui.ctx().data_mut(|d| d.insert_temp(row_id(index), response.rect));
             if response.clicked() {
                 clicked = Some(index);
             }
+        }
+        if let Some(row) = hovered {
+            self.menu.hover(row);
+            ui.ctx().request_repaint();
         }
         clicked.and_then(|row| self.menu.click(row))
     }
@@ -313,6 +329,20 @@ mod tests {
             .filter(|s| matches!(&s.shape, egui::Shape::Mesh(m) if m.texture_id != font))
             .count();
         assert_eq!(images, 1, "the picture is painted from its own texture");
+    }
+
+    #[test]
+    fn moving_the_pointer_over_a_row_highlights_it_and_a_still_pointer_leaves_the_keys_alone() {
+        let ctx = egui::Context::default();
+        let mut menu = sample();
+        step(&ctx, &mut menu, vec![]);
+        let sort = row_rect(&ctx, 1).center();
+        step(&ctx, &mut menu, vec![Event::PointerMoved(sort)]);
+        step(&ctx, &mut menu, vec![]);
+        assert_eq!(menu.menu.cursor(), Some(1), "the hovered row is the highlighted one");
+        step(&ctx, &mut menu, vec![key(K::ArrowUp)]);
+        step(&ctx, &mut menu, vec![]);
+        assert_eq!(menu.menu.cursor(), Some(0), "a pointer resting on a row does not pull the cursor back");
     }
 
     #[test]
