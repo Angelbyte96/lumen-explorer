@@ -718,6 +718,8 @@ pub struct LumenApp {
     /// Inner window size in points, saved when Lumen closes.
     window: Option<[f32; 2]>,
     path_popup: PathPopup,
+    /// Files' own icons (an .exe's), loaded off the UI thread.
+    file_icons: crate::ui::file_icons::FileIcons,
     /// The right-click menu, while open.
     context_menu: Option<ContextMenu>,
     /// The open menu is a row's (not the folder's): its commands act on the selection.
@@ -802,6 +804,7 @@ impl LumenApp {
             saved: Config::default(),
             window: None,
             path_popup: PathPopup::default(),
+            file_icons: Default::default(),
             context_menu: None,
             context_on_entry: false,
             #[cfg(windows)]
@@ -2018,7 +2021,9 @@ impl eframe::App for LumenApp {
         let list = egui::CentralPanel::default_margins().show(ui, |ui| {
             let scroll = self.tab.view.scroll.take();
             let cut = self.cut_paths().to_vec();
-            let event = ui::file_list::show(ui, &self.tab.view, &cut, self.list_zoom, scroll, self.rename.as_mut());
+            let event = ui::file_list::show(ui, &self.tab.view, &cut, self.list_zoom, scroll, self.rename.as_mut(), &self.file_icons);
+            // After drawing: the icons the list just asked for go out this frame.
+            self.file_icons.poll(&ctx);
             match event {
                 Some(ListEvent::Select(i)) => self.tab.view.select_row(i),
                 Some(ListEvent::Toggle(i)) => self.tab.view.toggle_pick(i),
