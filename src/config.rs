@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::app::{Sort, SortColumn};
-use crate::ui::file_list::MAX_ZOOM;
+use crate::ui::file_list::{DEFAULT_WIDTHS, MAX_ZOOM, MIN_WIDTH, Widths};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -23,6 +23,8 @@ pub struct Config {
     /// one on screen: what `--restore` opens.
     pub tabs: Vec<PathBuf>,
     pub active_tab: usize,
+    /// The list's column widths, in the list's column order.
+    pub columns: Widths,
 }
 
 impl Default for Config {
@@ -37,6 +39,7 @@ impl Default for Config {
             list_zoom: 0,
             tabs: Vec::new(),
             active_tab: 0,
+            columns: DEFAULT_WIDTHS,
         }
     }
 }
@@ -65,6 +68,7 @@ impl Config {
                 "bookmark" if !value.is_empty() => config.bookmarks.push(PathBuf::from(value)),
                 "tab" if !value.is_empty() => config.tabs.push(PathBuf::from(value)),
                 "active_tab" => config.active_tab = value.parse().unwrap_or(config.active_tab),
+                "columns" => config.columns = parse_widths(value).unwrap_or(config.columns),
                 _ => {}
             }
         }
@@ -84,6 +88,8 @@ impl Config {
             text += &format!("window = {}x{}\n", w.round(), h.round());
         }
         text += &format!("list_zoom = {}\n", self.list_zoom);
+        let columns: Vec<String> = self.columns.iter().map(|w| w.round().to_string()).collect();
+        text += &format!("columns = {}\n", columns.join(" "));
         for path in self.bookmarks.iter().filter_map(|p| one_line(p)) {
             text += &format!("bookmark = {path}\n");
         }
@@ -128,6 +134,9 @@ impl Config {
         }
         if before.list_zoom != after.list_zoom {
             merged.list_zoom = after.list_zoom;
+        }
+        if before.columns != after.columns {
+            merged.columns = after.columns;
         }
         if (&before.tabs, before.active_tab) != (&after.tabs, after.active_tab) {
             (merged.tabs, merged.active_tab) = (after.tabs.clone(), after.active_tab);
@@ -266,6 +275,13 @@ fn parse_sort(value: &str) -> Option<Sort> {
 }
 
 /// "1200x800", at least the window's minimum size.
+/// One width per column, separated by spaces; one too narrow gets the minimum.
+fn parse_widths(value: &str) -> Option<Widths> {
+    let widths: Vec<f32> = value.split_whitespace().map(|w| w.parse().ok()).collect::<Option<_>>()?;
+    let widths: Widths = widths.try_into().ok()?;
+    widths.iter().all(|w| w.is_finite()).then(|| widths.map(|w| w.max(MIN_WIDTH)))
+}
+
 fn parse_window(value: &str) -> Option<[f32; 2]> {
     let (w, h) = value.split_once('x')?;
     let size = [w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?];
@@ -299,6 +315,7 @@ mod tests {
             list_zoom: 2,
             tabs: vec![PathBuf::from("/home/u"), PathBuf::from("/srv/my files")],
             active_tab: 1,
+            columns: [250.0, 90.0, 140.0, 55.0, 60.0, 95.0],
         }
     }
 
@@ -309,6 +326,7 @@ mod tests {
         assert!(text.contains("show_hidden = true\n"), "{text}");
         assert!(text.contains("window = 1200x800\n"), "{text}");
         assert!(text.contains("list_zoom = 2\n"), "{text}");
+        assert!(text.contains("columns = 250 90 140 55 60 95\n"), "{text}");
         assert!(text.contains("bookmark = /srv/my files\n"), "{text}");
         assert!(text.contains("tab = /home/u\ntab = /srv/my files\nactive_tab = 1\n"), "{text}");
         assert_eq!(Config::parse(&text), sample());
@@ -379,6 +397,20 @@ bookmark =
     }
 
     #[test]
+    fn column_widths_that_are_missing_short_or_broken_keep_the_defaults() {
+        assert_eq!(Config::parse("list_zoom = 1\n").columns, DEFAULT_WIDTHS, "an older file");
+        for bad in ["columns = 250 90 140", "columns = 250 90 140 55 60 95 7", "columns = 250 x 140 55 60 95", "columns = 250 inf 140 55 60 95"] {
+            assert_eq!(Config::parse(bad).columns, DEFAULT_WIDTHS, "{bad:?}");
+        }
+        assert_eq!(
+            Config::parse("columns = 250 10 140 55 60 95\n").columns,
+            [250.0, MIN_WIDTH, 140.0, 55.0, 60.0, 95.0],
+            "a column too narrow gets the minimum"
+        );
+        assert!(Config::default().to_text().contains("columns = 320 110 130 60 60 80\n"));
+    }
+
+    #[test]
     fn save_then_load_and_a_missing_file_gives_defaults() {
         let dir = crate::fs::ops::tests::fresh_fixture("config-save");
         let path = dir.join("lumen/config");
@@ -442,6 +474,10 @@ bookmark =
         assert_eq!(merged.sort.column, SortColumn::Size, "untouched here: the other window's sort stays");
         let resized = Config { window: Some([900.0, 600.0]), ..before.clone() };
         assert_eq!(Config::merge(&disk, &before, &resized).window, Some([900.0, 600.0]));
+        let columns = Config { columns: [200.0, 90.0, 140.0, 55.0, 60.0, 95.0], ..before.clone() };
+        assert_eq!(Config::merge(&disk, &before, &columns).columns, columns.columns, "resized here");
+        let other = Config { columns: [500.0, 90.0, 140.0, 55.0, 60.0, 95.0], ..disk.clone() };
+        assert_eq!(Config::merge(&other, &before, &after).columns, other.columns, "resized in another window");
     }
 
     #[test]
