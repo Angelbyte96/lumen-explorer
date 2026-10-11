@@ -254,7 +254,7 @@ impl PathPopup {
                                     egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(4, 1)).show(ui, |ui| {
                                         ui.set_min_width(ui.available_width());
                                         ui.horizontal(|ui| {
-                                            crate::ui::icons::show(ui, entry, ui.text_style_height(&egui::TextStyle::Body));
+                                            crate::ui::icons::show(ui, entry, ui.text_style_height(&egui::TextStyle::Body), None);
                                             crate::ui::file_list::name_label(ui, entry, &typed);
                                         });
                                     });

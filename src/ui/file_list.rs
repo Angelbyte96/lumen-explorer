@@ -9,6 +9,7 @@ use crate::app::{Scroll, Sort, SortColumn, View};
 use crate::format::{format_size, format_time};
 use crate::fs::Entry;
 use crate::fs::count::Totals;
+use crate::ui::file_icons::FileIcons;
 use crate::ui::icons;
 use crate::ui::path_popup::{marked_name, word_ranges};
 
@@ -72,6 +73,7 @@ pub fn show(
     zoom: u8,
     scroll: Option<Scroll>,
     mut edit: Option<&mut RenameEdit>,
+    file_icons: &FileIcons,
 ) -> Option<ListEvent> {
     let View { entries, rows, totals, selected, sort, .. } = view;
     let (selected, sort) = (*selected, *sort);
@@ -128,7 +130,7 @@ pub fn show(
                         if cut.contains(&entry.path) {
                             ui.set_opacity(CUT_OPACITY);
                         }
-                        icons::show(ui, entry, icon);
+                        icons::show(ui, entry, icon, file_icons.texture(entry));
                         if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
                             if let Some(submit) = rename_field(ui, edit) {
                                 event = Some(ListEvent::RenameEnded(submit));
@@ -392,12 +394,47 @@ mod tests {
         let mut shapes = Vec::new();
         for _ in 0..3 {
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                show(ui, &view, &[], zoom, None, None);
+                show(ui, &view, &[], zoom, None, None, &FileIcons::default());
             });
             output.textures_delta.clear();
             shapes = output.shapes;
         }
         shapes
+    }
+
+    #[test]
+    fn a_file_whose_own_icon_is_loaded_shows_it_and_other_files_keep_the_painted_one() {
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        (view.entries, view.rows) = (vec![entry("setup.exe"), entry("notes.txt")], vec![0, 1]);
+        let mut icons = FileIcons::default();
+        let image = egui::ColorImage::new([4, 4], vec![egui::Color32::RED; 16]);
+        let texture = ctx.load_texture("test icon", image, egui::TextureOptions::LINEAR);
+        icons.insert(&view.entries[0], texture.clone());
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                show(ui, &view, &[], 0, None, None, &icons);
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let drawn: Vec<egui::Rect> = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Mesh(mesh) if mesh.texture_id == texture.id() => Some(s.shape.visual_bounding_rect()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(drawn.len(), 1, "the .exe's icon, once: {drawn:?}");
+        let row = |text: &str| {
+            shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos.y + t.galley.rect.center().y),
+                _ => None,
+            })
+        };
+        let (exe, txt) = (row("setup.exe").unwrap(), row("notes.txt").unwrap());
+        assert!((drawn[0].center().y - exe).abs() < 2.0, "on the .exe's row, not on {txt}");
     }
 
     #[test]
@@ -439,7 +476,7 @@ mod tests {
         let mut shapes = Vec::new();
         for _ in 0..3 {
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                show(ui, &view, &[], 0, None, None);
+                show(ui, &view, &[], 0, None, None, &FileIcons::default());
             });
             output.textures_delta.clear();
             shapes = output.shapes;
@@ -475,7 +512,7 @@ mod tests {
         let mut view = View::default();
         (view.entries, view.rows, view.selected) = (vec![entry("a.txt")], vec![0], Some(0));
         let below = egui::pos2(300.0, 500.0);
-        let mut draw = |ui: &mut egui::Ui| show(ui, &view, &[], 0, None, None);
+        let mut draw = |ui: &mut egui::Ui| show(ui, &view, &[], 0, None, None, &FileIcons::default());
         frame(&ctx, vec![egui::Event::PointerMoved(below)], &mut draw);
         let left = frame(&ctx, press(below, egui::PointerButton::Primary), &mut draw);
         assert!(matches!(left, Some(ListEvent::Empty { menu: false })), "left click");
@@ -491,7 +528,7 @@ mod tests {
         let mut shapes = Vec::new();
         for _ in 0..2 {
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                show(ui, &view, cut, 0, None, None);
+                show(ui, &view, cut, 0, None, None, &FileIcons::default());
             });
             output.textures_delta.clear();
             shapes = output.shapes;
@@ -522,17 +559,17 @@ mod tests {
         let ctx = egui::Context::default();
         let mut view = View::default();
         (view.entries, view.rows, view.selected) = (vec![entry("a.txt"), entry("b.txt")], vec![0, 1], Some(1));
-        frame(&ctx, vec![], |ui| show(ui, &view, &[], 0, None, None));
+        frame(&ctx, vec![], |ui| show(ui, &view, &[], 0, None, None, &FileIcons::default()));
         let second = cursor_row_rect(&ctx).expect("drawn");
         view.selected = Some(0);
-        frame(&ctx, vec![], |ui| show(ui, &view, &[], 0, None, None));
+        frame(&ctx, vec![], |ui| show(ui, &view, &[], 0, None, None, &FileIcons::default()));
         let first = cursor_row_rect(&ctx).expect("drawn");
         assert!(first.bottom() <= second.top() + 1.0, "{first:?} above {second:?}");
         // A cursor row scrolled out of view was not drawn: no stale place.
         view.entries = (0..300).map(|i| entry(&format!("f{i}"))).collect();
         view.rows = (0..300).collect();
         view.selected = Some(250);
-        frame(&ctx, vec![], |ui| show(ui, &view, &[], 0, None, None));
+        frame(&ctx, vec![], |ui| show(ui, &view, &[], 0, None, None, &FileIcons::default()));
         assert_eq!(cursor_row_rect(&ctx), None);
     }
 
@@ -547,7 +584,7 @@ mod tests {
         for _ in 0..2 {
             ctx.run_ui(egui::RawInput::default(), |ui| {
                 row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
-                show(ui, &view, &[], 0, None, Some(&mut edit));
+                show(ui, &view, &[], 0, None, Some(&mut edit), &FileIcons::default());
             })
             .drop_without_applying_deltas();
         }

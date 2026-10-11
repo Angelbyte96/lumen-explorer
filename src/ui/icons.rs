@@ -54,11 +54,18 @@ const ARCHIVE: &[&str] = &[
     "zip", "tar", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "deb", "rpm", "appimage", "iso", "jar",
 ];
 
-/// Draws the entry's icon in a square `side` points wide.
-pub fn show(ui: &mut egui::Ui, entry: &Entry, side: f32) -> egui::Response {
+/// Draws the entry's icon in a square `side` points wide: the file's own
+/// (`own`, an .exe's) when it is loaded, else the painted one for its type.
+pub fn show(ui: &mut egui::Ui, entry: &Entry, side: f32, own: Option<egui::TextureId>) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
     if ui.is_rect_visible(rect) {
-        paint(ui.painter(), rect, kind_of(entry));
+        match own {
+            Some(texture) => {
+                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                ui.painter().image(texture, rect, uv, Color32::WHITE);
+            }
+            None => paint(ui.painter(), rect, kind_of(entry)),
+        }
     }
     response
 }
