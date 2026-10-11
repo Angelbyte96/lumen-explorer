@@ -44,6 +44,8 @@ struct Node {
     start: u32,
     len: u32,
     parent: u32,
+    /// Folders up to the root; 16 bytes a node with or without it.
+    depth: u16,
     flags: u8,
 }
 
@@ -87,12 +89,17 @@ impl Index {
 
     /// How many folders up to its root.
     pub fn depth(&self, id: u32) -> usize {
-        std::iter::successors(self.parent(id), |&p| self.parent(p)).count()
+        self.nodes[id as usize].depth as usize
     }
 
-    fn push(&mut self, parent: u32, name: &str, flags: u8) -> u32 {
+    /// Adds an entry below `parent` (a root without one, named by its whole
+    /// path). Inside a hidden folder an entry counts as hidden too.
+    pub fn add(&mut self, parent: Option<u32>, name: &str, is_dir: bool) -> u32 {
+        let hidden = parent.is_some_and(|p| self.is_hidden(p) || is_hidden_name(name));
+        let flags = if is_dir { DIR } else { 0 } | if hidden { HIDDEN } else { 0 };
+        let depth = parent.map_or(0, |p| self.nodes[p as usize].depth.saturating_add(1));
         let id = self.nodes.len() as u32;
-        self.nodes.push(Node { start: self.names.len() as u32, len: name.len() as u32, parent, flags });
+        self.nodes.push(Node { start: self.names.len() as u32, len: name.len() as u32, parent: parent.unwrap_or(ROOT), depth, flags });
         self.names.push_str(name);
         id
     }
@@ -128,9 +135,10 @@ fn device(_meta: &std::fs::Metadata) -> Option<u64> {
     None
 }
 
-/// A folder's entries, read before taking the index's lock: name, flags and,
+/// A folder's entries, read before taking the index's lock: name, whether a
+/// folder and,
 /// for a folder to crawl next, its path and device.
-type Found = Vec<(String, u8, Option<(PathBuf, Option<u64>)>)>;
+type Found = Vec<(String, bool, Option<(PathBuf, Option<u64>)>)>;
 
 fn read_folder(path: &Path, parent_dev: Option<u64>, rules: &Rules) -> Found {
     let Ok(items) = std::fs::read_dir(path) else { return Vec::new() };
@@ -138,14 +146,14 @@ fn read_folder(path: &Path, parent_dev: Option<u64>, rules: &Rules) -> Found {
     for item in items.flatten() {
         let Ok(kind) = item.file_type() else { continue };
         let name = item.file_name().to_string_lossy().into_owned();
-        let mut flags = if is_hidden_name(&name) { HIDDEN } else { 0 };
+        let mut is_dir = false;
         let mut next = None;
         let child = item.path();
         if kind.is_dir() {
             if rules.skip_names.contains(&name) || rules.skip_paths.contains(&child) {
                 continue;
             }
-            flags |= DIR;
+            is_dir = true;
             // Another device's folder (tmpfs, a network share) is found but
             // not crawled, unless it is one of the disks.
             let dev = item.metadata().ok().and_then(|m| device(&m));
@@ -154,9 +162,9 @@ fn read_folder(path: &Path, parent_dev: Option<u64>, rules: &Rules) -> Found {
             }
         } else if kind.is_symlink() && std::fs::metadata(&child).is_ok_and(|m| m.is_dir()) {
             // Found as the folder it points to, never followed: no loops.
-            flags |= DIR;
+            is_dir = true;
         }
-        found.push((name, flags, next));
+        found.push((name, is_dir, next));
     }
     found
 }
@@ -170,7 +178,7 @@ pub fn crawl(roots: &[PathBuf], rules: &Rules, index: &RwLock<Index>, cancel: &A
         if !meta.is_dir() || rules.skip_paths.contains(root) {
             continue;
         }
-        let id = index.write().expect("index lock").push(ROOT, &root.to_string_lossy(), DIR);
+        let id = index.write().expect("index lock").add(None, &root.to_string_lossy(), true);
         queue.push_back((id, root.clone(), device(&meta)));
     }
     while let Some((parent, path, dev)) = queue.pop_front() {
@@ -179,8 +187,8 @@ pub fn crawl(roots: &[PathBuf], rules: &Rules, index: &RwLock<Index>, cancel: &A
         }
         let found = read_folder(&path, dev, rules);
         let mut index = index.write().expect("index lock");
-        for (name, flags, next) in found {
-            let id = index.push(parent, &name, flags);
+        for (name, is_dir, next) in found {
+            let id = index.add(Some(parent), &name, is_dir);
             if let Some((path, dev)) = next {
                 queue.push_back((id, path, dev));
             }

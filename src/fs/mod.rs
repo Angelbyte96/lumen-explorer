@@ -6,6 +6,7 @@ pub mod index;
 pub mod lister;
 pub mod ops;
 pub mod preview;
+pub mod search;
 #[cfg(windows)]
 pub mod pdf;
 pub mod transfer;
