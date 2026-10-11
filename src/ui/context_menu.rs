@@ -109,13 +109,20 @@ impl ContextMenu {
         event
     }
 
-    /// Arrows, Enter and Escape, read before the search box sees them. Left
-    /// and Right stay with the box while it holds text.
+    /// Arrows, Home, End, Page Up, Page Down, Enter and Escape, read before
+    /// the search box sees them. Left, Right, Home and End stay with the box
+    /// while it holds text.
     fn read_keys(&mut self, ctx: &egui::Context) -> Option<MenuEvent> {
         use egui::{Key as K, Modifiers as M};
-        let mut bindings = vec![(K::ArrowUp, Key::Up), (K::ArrowDown, Key::Down), (K::Enter, Key::Enter)];
+        let mut bindings = vec![
+            (K::ArrowUp, Key::Up),
+            (K::ArrowDown, Key::Down),
+            (K::PageUp, Key::PageUp),
+            (K::PageDown, Key::PageDown),
+            (K::Enter, Key::Enter),
+        ];
         if self.menu.query.is_empty() {
-            bindings.extend([(K::ArrowLeft, Key::Left), (K::ArrowRight, Key::Right)]);
+            bindings.extend([(K::ArrowLeft, Key::Left), (K::ArrowRight, Key::Right), (K::Home, Key::Home), (K::End, Key::End)]);
         }
         // In the order pressed: Down, Right, Down is not Down, Down, Right.
         let (escape, keys) = ctx.input_mut(|i| {
@@ -392,6 +399,50 @@ mod tests {
         let mut menu = ContextMenu::new(vec![Item::run(huge, None, true, Command::Open)], egui::pos2(10.0, 10.0));
         let capped = list_width(&ctx, &mut menu);
         assert!(capped <= MAX_WIDTH + 1.0, "never wider than {MAX_WIDTH}: {capped}");
+    }
+
+    /// "0" to "29", a separator after "0" and before "29"; each runs Shell(n).
+    fn long() -> ContextMenu {
+        let mut items = vec![Item::run("0", None, true, Command::Shell(0)), Item::separator()];
+        items.extend((1..29).map(|n| Item::run(n.to_string(), None, true, Command::Shell(n))));
+        items.extend([Item::separator(), Item::run("29", None, true, Command::Shell(29))]);
+        ContextMenu::new(items, egui::pos2(100.0, 100.0))
+    }
+
+    fn run_after(ctx: &egui::Context, menu: &mut ContextMenu, keys: &[K]) -> Option<MenuEvent> {
+        step(ctx, menu, vec![]);
+        step(ctx, menu, keys.iter().map(|&k| key(k)).collect());
+        step(ctx, menu, vec![key(K::Enter)])
+    }
+
+    #[test]
+    fn home_and_end_go_to_the_first_and_the_last_item() {
+        let ctx = egui::Context::default();
+        let shell = |n| Some(MenuEvent::Run(Command::Shell(n)));
+        assert_eq!(run_after(&ctx, &mut long(), &[K::End]), shell(29));
+        assert_eq!(run_after(&ctx, &mut long(), &[K::End, K::Home]), shell(0));
+        assert_eq!(run_after(&ctx, &mut long(), &[K::ArrowDown, K::ArrowDown, K::Home]), shell(0));
+    }
+
+    #[test]
+    fn page_down_and_page_up_move_ten_items_and_stop_at_the_ends() {
+        let ctx = egui::Context::default();
+        let shell = |n| Some(MenuEvent::Run(Command::Shell(n)));
+        assert_eq!(run_after(&ctx, &mut long(), &[K::PageDown]), shell(9), "from no cursor: the tenth item");
+        assert_eq!(run_after(&ctx, &mut long(), &[K::PageDown, K::PageDown]), shell(19));
+        assert_eq!(run_after(&ctx, &mut long(), &[K::PageDown, K::PageDown, K::PageDown, K::PageDown]), shell(29), "stops on the last");
+        assert_eq!(run_after(&ctx, &mut long(), &[K::End, K::PageUp]), shell(19));
+        assert_eq!(run_after(&ctx, &mut long(), &[K::PageDown, K::PageUp]), shell(0), "stops on the first");
+    }
+
+    #[test]
+    fn while_searching_home_and_end_stay_with_the_search_box() {
+        let ctx = egui::Context::default();
+        let mut menu = long();
+        step(&ctx, &mut menu, vec![]);
+        step(&ctx, &mut menu, vec![Event::Text("2".into())]);
+        step(&ctx, &mut menu, vec![key(K::End)]);
+        assert_eq!(step(&ctx, &mut menu, vec![key(K::Enter)]), Some(MenuEvent::Run(Command::Shell(2))), "the cursor stayed on the first match");
     }
 
     #[test]

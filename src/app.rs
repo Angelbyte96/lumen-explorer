@@ -1079,6 +1079,26 @@ impl LumenApp {
         self.context_on_entry = false;
     }
 
+    /// While the menu waits for the shell: Escape or a left click cancels it
+    /// (read first, so the list never sees that Escape and an answer arriving
+    /// in the same frame does not show it); else it shows once ready.
+    #[cfg(windows)]
+    fn read_pending_menu(&mut self, ctx: &egui::Context) {
+        if self.menu_pending.is_some() {
+            let cancel = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) || i.pointer.primary_pressed());
+            if cancel {
+                self.menu_pending = None;
+                self.shell_menu = None;
+                self.menu_basis = None;
+                return;
+            }
+        }
+        self.poll_shell_menu();
+        if self.menu_pending.is_some() {
+            ctx.set_cursor_icon(egui::CursorIcon::Progress);
+        }
+    }
+
     /// The shell's items arrived: the menu shows, whole. When the shell
     /// failed, it shows with Lumen's own items.
     #[cfg(windows)]
@@ -1868,6 +1888,8 @@ impl eframe::App for LumenApp {
 
         self.refresh_if_changed(&ctx);
         self.poll_count();
+        #[cfg(windows)]
+        self.read_pending_menu(&ctx);
 
         // An open dialog takes the keyboard; the list must not react underneath.
         if self.dialog.is_some() {
@@ -2033,19 +2055,7 @@ impl eframe::App for LumenApp {
         });
 
         #[cfg(windows)]
-        {
-            self.poll_shell_menu();
-            if self.menu_pending.is_some() {
-                // Escape or a left click before the menu showed: it never shows.
-                if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.pointer.primary_pressed()) {
-                    self.menu_pending = None;
-                    self.shell_menu = None;
-                    self.menu_basis = None;
-                } else {
-                    ctx.set_cursor_icon(egui::CursorIcon::Progress);
-                }
-            }
-        }
+        self.poll_shell_menu();
         if let Some(menu) = self.context_menu.as_mut()
             && let Some(event) = menu.show(&ctx)
         {
@@ -2820,6 +2830,32 @@ mod tests {
             assert!(!menu_labels(&app).iter().any(|label| label.starts_with("Loading")), "no loading line");
             app.context_menu = None;
             app.shell_menu = None;
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn escape_or_a_left_click_before_the_menu_shows_cancels_it_and_goes_no_further() {
+        use crate::ui::testing::frame;
+        let (ctx, mut app, _dir) = app_in("app-menu-cancel");
+        let press = |pressed| egui::Event::PointerButton {
+            pos: egui::pos2(10.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let escape = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        for cancel in [escape, press(true)] {
+            app.open_entry_menu(1, egui::pos2(10.0, 10.0));
+            let passed_on = frame(&ctx, vec![cancel], |ui| {
+                app.read_pending_menu(ui.ctx());
+                ui.input(|i| i.key_pressed(egui::Key::Escape))
+            });
+            assert!(!passed_on, "the list never sees that Escape");
+            assert!(app.menu_pending.is_none() && app.shell_menu.is_none(), "cancelled");
+            std::thread::sleep(Duration::from_millis(300));
+            frame(&ctx, vec![], |ui| app.read_pending_menu(ui.ctx()));
+            assert!(app.context_menu.is_none(), "and it never shows");
         }
     }
 

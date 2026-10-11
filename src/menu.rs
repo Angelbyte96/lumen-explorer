@@ -193,8 +193,17 @@ pub enum Key {
     Right,
     /// Closes the submenu the cursor is in (or on).
     Left,
+    /// The first line, the last line.
+    Home,
+    End,
+    /// `PAGE` lines up or down, stopping at the first or the last.
+    PageUp,
+    PageDown,
     Enter,
 }
+
+/// How many lines Page Up and Page Down move.
+pub const PAGE: usize = 10;
 
 /// The open menu: its items, the search text and the line under the cursor.
 pub struct Menu {
@@ -307,6 +316,20 @@ impl Menu {
                 }
                 self.collapse(&target);
                 self.cursor = self.rows().iter().position(|row| row.at == target);
+            }
+            Key::Home | Key::End | Key::PageUp | Key::PageDown => {
+                let lines: Vec<usize> = (0..rows.len()).filter(|&row| line(row)).collect();
+                let at = cursor.and_then(|c| lines.iter().position(|&row| row == c));
+                let to = match (key, at) {
+                    (Key::Home, _) => Some(0),
+                    (Key::End, _) => lines.len().checked_sub(1),
+                    (Key::PageDown, None) => Some(PAGE - 1),
+                    (Key::PageDown, Some(at)) => Some(at + PAGE),
+                    (_, at) => Some(at.unwrap_or(0).saturating_sub(PAGE)),
+                };
+                if let Some(to) = to.filter(|_| !lines.is_empty()) {
+                    self.cursor = Some(lines[to.min(lines.len() - 1)]);
+                }
             }
             Key::Enter => return cursor.and_then(|row| self.pick(row)),
         }
