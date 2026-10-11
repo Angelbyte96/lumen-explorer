@@ -1,8 +1,9 @@
-//! Windows' own icons for the list, like File Explorer and File Pilot: the
-//! type's (its program's) for ordinary files, the file's own for programs,
-//! shortcuts, .ico files and folders. Asked from the shell on a thread of
-//! its own; the painted icon shows until one arrives, or when there is none.
-//! Off Windows every row keeps the painted icons.
+//! The system's own icons for the list, like File Explorer and Nautilus. On
+//! Windows the shell's: the type's (its program's) for ordinary files, the
+//! file's own for programs, shortcuts, .ico files and folders. Elsewhere the
+//! user's freedesktop icon theme: one per file type, special folders their
+//! own. Loaded on a thread of their own; the painted icon shows until one
+//! arrives, or when there is none.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -13,11 +14,10 @@ use eframe::egui;
 
 use crate::fs::Entry;
 
-/// Types whose icon lives in the file itself, not in its type.
-const OWN_ICON: &[&str] = &["exe", "lnk", "ico"];
+/// Types whose icon lives in the file itself, not in its type (Windows).
+const OWN_ICON: &[&str] = if cfg!(windows) { &["exe", "lnk", "ico"] } else { &[] };
 
 /// The icon's side in pixels: the list's biggest zoom draws it at 64 points.
-#[cfg(windows)]
 pub const SIDE: i32 = 64;
 
 /// Which icon an entry shows: one per type, or its own.
@@ -52,8 +52,10 @@ pub struct FileIcons {
     /// shell about; sent on the next poll.
     wanted: RefCell<HashMap<Key, PathBuf>>,
     pending: HashSet<Key>,
-    #[cfg(windows)]
     worker: Option<native::Worker>,
+    /// Where the icon theme and the MIME tables are, and the special folders.
+    #[cfg(not(windows))]
+    setup: Option<native::Setup>,
 }
 
 impl FileIcons {
@@ -72,7 +74,7 @@ impl FileIcons {
         if let Some(texture) = self.loaded.get(&key) {
             return texture.as_ref().map(egui::TextureHandle::id);
         }
-        if cfg!(windows) && !self.pending.contains(&key) {
+        if !self.pending.contains(&key) {
             self.wanted.borrow_mut().entry(key).or_insert_with(|| path.to_path_buf());
         }
         None
@@ -90,39 +92,43 @@ impl FileIcons {
         self.loaded.insert(key_of(entry), Some(texture));
     }
 
-    /// Sends what was asked for to the shell's thread and uploads what came
+    /// Where to find icons, set once before the first poll asks for any;
+    /// the environment's otherwise.
+    #[cfg(not(windows))]
+    pub fn set_setup(&mut self, setup: native::Setup) {
+        self.setup = Some(setup);
+    }
+
+    /// Sends what was asked for to the icons' thread and uploads what came
     /// back. Call once a frame.
     pub fn poll(&mut self, ctx: &egui::Context) {
-        #[cfg(windows)]
-        {
-            let wanted: Vec<(Key, PathBuf)> = self.wanted.borrow_mut().drain().collect();
-            if !wanted.is_empty() {
-                let worker = self.worker.get_or_insert_with(|| native::Worker::start(ctx.clone()));
-                for (key, path) in wanted {
-                    worker.ask(key.clone(), path);
-                    self.pending.insert(key);
-                }
-            }
-            let Some(worker) = &self.worker else { return };
-            let answers = worker.answers();
-            if !answers.is_empty() {
-                // Drawn already this frame: the next one shows them.
-                ctx.request_repaint();
-            }
-            for (key, icon) in answers {
-                self.pending.remove(&key);
-                let texture = icon.map(|(size, rgba)| {
-                    let image = egui::ColorImage::from_rgba_premultiplied(size, &rgba);
-                    ctx.load_texture(format!("lumen_file_icon_{key:?}"), image, egui::TextureOptions::LINEAR)
-                });
-                self.loaded.insert(key, texture);
+        let wanted: Vec<(Key, PathBuf)> = self.wanted.borrow_mut().drain().collect();
+        if !wanted.is_empty() {
+            #[cfg(windows)]
+            let worker = self.worker.get_or_insert_with(|| native::Worker::start(ctx.clone()));
+            #[cfg(not(windows))]
+            let worker = self.worker.get_or_insert_with(|| {
+                let setup = self.setup.take().unwrap_or_else(|| native::Setup::from_env(Vec::new()));
+                native::Worker::start(ctx.clone(), setup)
+            });
+            for (key, path) in wanted {
+                worker.ask(key.clone(), path);
+                self.pending.insert(key);
             }
         }
-        #[cfg(not(windows))]
-        {
-            let _ = ctx;
-            // Nothing is asked for here: everything keeps the painted ones.
-            self.wanted.borrow_mut().clear();
+        let Some(worker) = &self.worker else { return };
+        let answers = worker.answers();
+        if !answers.is_empty() {
+            // Drawn already this frame: the next one shows them.
+            ctx.request_repaint();
+        }
+        for (key, icon) in answers {
+            self.pending.remove(&key);
+            let texture = icon.map(|(size, rgba)| {
+                let image = egui::ColorImage::from_rgba_premultiplied(size, &rgba);
+                ctx.load_texture(format!("lumen_file_icon_{key:?}"), image, egui::TextureOptions::LINEAR)
+            });
+            self.loaded.insert(key, texture);
         }
     }
 }
@@ -198,6 +204,128 @@ pub mod native {
     }
 }
 
+#[cfg(not(windows))]
+pub mod native {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::mpsc::{Receiver, Sender, channel};
+
+    use eframe::egui;
+
+    use super::Key;
+    use crate::icon_names::IconNames;
+    use crate::icon_theme::{self, IconTheme};
+
+    pub type Icon = Option<([usize; 2], Vec<u8>)>;
+
+    /// Where the icons come from.
+    pub struct Setup {
+        /// $XDG_DATA_HOME, then $XDG_DATA_DIRS: mime/ tables.
+        pub data: Vec<PathBuf>,
+        /// Icon theme folders, most important first.
+        pub bases: Vec<PathBuf>,
+        /// The theme; `None` asks the desktop (on the icons' thread: it may
+        /// run gsettings).
+        pub theme: Option<String>,
+        /// Special folders and their icon names.
+        pub folders: Vec<(PathBuf, String)>,
+    }
+
+    impl Setup {
+        pub fn from_env(folders: Vec<(PathBuf, String)>) -> Self {
+            let dirs = crate::apps::Dirs::from_env();
+            let home = crate::fs::home_dir().unwrap_or_default();
+            Self { bases: icon_theme::base_dirs(&home, &dirs.data), data: dirs.data, theme: None, folders }
+        }
+    }
+
+    /// The theme used when the desktop names none.
+    const FALLBACK_THEME: &str = "Adwaita";
+
+    /// The icon file drawn in a `side` pixels square, as premultiplied RGBA:
+    /// SVG with resvg, PNG with image. `None` when it cannot be read.
+    pub fn load(file: &Path, side: u32) -> Icon {
+        let bytes = std::fs::read(file).ok()?;
+        if file.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+            draw_svg(&bytes, side)
+        } else {
+            let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).ok()?.to_rgba8();
+            let size = [image.width() as usize, image.height() as usize];
+            let mut rgba = image.into_raw();
+            for px in rgba.as_chunks_mut::<4>().0 {
+                let alpha = u16::from(px[3]);
+                for channel in &mut px[..3] {
+                    *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+                }
+            }
+            Some((size, rgba))
+        }
+    }
+
+    /// The SVG scaled to fit a `side` square, centred; tiny-skia's pixels
+    /// are premultiplied already.
+    fn draw_svg(bytes: &[u8], side: u32) -> Icon {
+        use resvg::{tiny_skia, usvg};
+        let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).ok()?;
+        let size = tree.size();
+        let scale = side as f32 / size.width().max(size.height());
+        let (dx, dy) = ((side as f32 - size.width() * scale) / 2.0, (side as f32 - size.height() * scale) / 2.0);
+        let mut pixmap = tiny_skia::Pixmap::new(side, side)?;
+        resvg::render(&tree, tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, dx, dy), &mut pixmap.as_mut());
+        Some(([side as usize, side as usize], pixmap.take()))
+    }
+
+    /// One thread that loads the theme once, then answers icon requests in
+    /// order, so the list never waits on the disk.
+    pub struct Worker {
+        asks: Sender<(Key, PathBuf)>,
+        answers: Receiver<(Key, Icon)>,
+    }
+
+    impl Worker {
+        pub fn start(ctx: egui::Context, setup: Setup) -> Self {
+            let (asks, requests) = channel::<(Key, PathBuf)>();
+            let (send, answers) = channel();
+            let spawned = std::thread::Builder::new().name("lumen-file-icons".into()).spawn(move || {
+                let config = crate::apps::Dirs::from_env().config.into_iter().next().unwrap_or_default();
+                let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+                let theme = setup.theme.or_else(|| icon_theme::theme_name(&desktop, &config, icon_theme::ask_gsettings));
+                let theme = IconTheme::load(theme.as_deref().unwrap_or(FALLBACK_THEME), &setup.bases);
+                let names = IconNames::read(&setup.data, setup.folders);
+                // Many types share one file (text-x-generic): drawn once.
+                let mut drawn: HashMap<PathBuf, Icon> = HashMap::new();
+                for (key, _) in requests {
+                    let wanted = match &key {
+                        Key::Type(ext) => names.for_type(ext),
+                        Key::Path(path, _) => names.for_folder(path),
+                    };
+                    let wanted: Vec<&str> = wanted.iter().map(String::as_str).collect();
+                    let icon = theme
+                        .find(&wanted, super::SIDE as u32)
+                        .and_then(|file| drawn.entry(file.clone()).or_insert_with(|| load(&file, super::SIDE as u32)).clone());
+                    if send.send((key, icon)).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+            });
+            if spawned.is_err() {
+                // No thread: every icon stays painted.
+                return Self { asks: channel().0, answers: channel().1 };
+            }
+            Self { asks, answers }
+        }
+
+        pub fn ask(&self, key: Key, path: PathBuf) {
+            let _ = self.asks.send((key, path));
+        }
+
+        pub fn answers(&self) -> Vec<(Key, Icon)> {
+            self.answers.try_iter().collect()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,18 +343,94 @@ mod tests {
         let modified = Some(SystemTime::UNIX_EPOCH);
         for name in ["setup.exe", "App.LNK", "logo.Ico"] {
             let own = Entry { modified, ..entry(name) };
-            assert_eq!(key_of(&own), Key::Path(PathBuf::from(name), modified), "{name}");
+            if cfg!(windows) {
+                assert_eq!(key_of(&own), Key::Path(PathBuf::from(name), modified), "{name}");
+            } else {
+                let ext = name.rsplit('.').next().unwrap().to_ascii_lowercase();
+                assert_eq!(key_of(&own), Key::Type(ext), "{name}: the theme has one icon per type");
+            }
         }
         let folder = Entry { is_dir: true, modified, ..entry("Downloads") };
         assert_eq!(key_of(&folder), Key::Path(PathBuf::from("Downloads"), None), "a folder's own, whatever its date");
     }
 
+    /// A theme "T" with a PNG for PDFs (64 px, one half-transparent red
+    /// pixel) and an SVG folder; MIME tables naming .pdf and .txt.
+    #[cfg(not(windows))]
+    fn theme_fixture(name: &str) -> (PathBuf, native::Setup) {
+        let dir = crate::fs::ops::tests::fresh_fixture(name);
+        let theme = dir.join("icons/T");
+        for sub in ["32x32@2x/mimetypes", "scalable/places"] {
+            std::fs::create_dir_all(theme.join(sub)).unwrap();
+        }
+        std::fs::write(
+            theme.join("index.theme"),
+            "[Icon Theme]\nDirectories=32x32@2x/mimetypes,scalable/places\n\n[32x32@2x/mimetypes]\nSize=32\nScale=2\nType=Fixed\n\n\
+             [scalable/places]\nSize=16\nMinSize=8\nMaxSize=512\nType=Scalable\n",
+        )
+        .unwrap();
+        let mut png = image::RgbaImage::new(64, 64);
+        png.put_pixel(0, 0, image::Rgba([255, 0, 0, 128]));
+        png.save(theme.join("32x32@2x/mimetypes/application-pdf.png")).unwrap();
+        std::fs::write(
+            theme.join("scalable/places/folder.svg"),
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect x="4" y="4" width="8" height="8" fill="#0000ff"/></svg>"##,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("data/mime")).unwrap();
+        std::fs::write(dir.join("data/mime/globs2"), "50:application/pdf:*.pdf\n50:text/plain:*.txt\n").unwrap();
+        let setup = native::Setup { data: vec![dir.join("data")], bases: vec![dir.join("icons")], theme: Some("T".into()), folders: Vec::new() };
+        (dir, setup)
+    }
+
     #[cfg(not(windows))]
     #[test]
-    fn off_windows_nothing_is_asked_for() {
-        let icons = FileIcons::default();
-        assert_eq!(icons.texture(&entry("setup.exe")), None);
-        assert!(icons.wanted.borrow().is_empty());
+    fn a_png_icon_is_read_as_premultiplied_rgba_and_an_svg_is_drawn_to_size() {
+        let (dir, _) = theme_fixture("file-icons-load");
+        let (size, rgba) = native::load(&dir.join("icons/T/32x32@2x/mimetypes/application-pdf.png"), 64).expect("png");
+        assert_eq!(size, [64, 64]);
+        assert_eq!(&rgba[..4], &[128, 0, 0, 128], "premultiplied, as egui takes it");
+        let (size, rgba) = native::load(&dir.join("icons/T/scalable/places/folder.svg"), 64).expect("svg");
+        assert_eq!(size, [64, 64], "a 16 px drawing scaled to 64");
+        let at = |x: usize, y: usize| &rgba[(y * 64 + x) * 4..][..4];
+        assert_eq!(at(32, 32), &[0, 0, 255, 255], "the square fills the middle");
+        assert_eq!(at(2, 2)[3], 0, "and leaves the corners empty");
+        assert_eq!(native::load(&dir.join("missing.svg"), 64), None);
+        std::fs::write(dir.join("broken.png"), "not a picture").unwrap();
+        assert_eq!(native::load(&dir.join("broken.png"), 64), None);
+    }
+
+    /// Polls until every entry has an answer, or 20 s pass.
+    #[cfg(not(windows))]
+    fn answered(icons: &mut FileIcons, ctx: &egui::Context, entries: &[&Entry]) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        for entry in entries {
+            icons.texture(entry);
+        }
+        while entries.iter().any(|e| !icons.loaded.contains_key(&key_of(e))) && std::time::Instant::now() < deadline {
+            icons.poll(ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn rows_get_the_theme_icon_of_their_type_and_folders_theirs() {
+        let ctx = egui::Context::default();
+        let (_, setup) = theme_fixture("file-icons-theme");
+        let mut icons = FileIcons::default();
+        icons.set_setup(setup);
+        let (pdf, other_pdf, text) = (entry("a.pdf"), entry("B.PDF"), entry("notes.txt"));
+        let folder = Entry { is_dir: true, ..entry("Projects") };
+        icons.texture(&pdf);
+        icons.texture(&other_pdf);
+        assert_eq!(icons.wanted.borrow().len(), 1, "one request for the type");
+        answered(&mut icons, &ctx, &[&pdf, &text, &folder]);
+        let shown = icons.texture(&pdf).expect("the type's PNG");
+        assert_eq!(icons.texture(&other_pdf), Some(shown));
+        assert!(icons.texture(&folder).is_some(), "the folder's SVG");
+        assert_eq!(icons.loaded.get(&key_of(&text)).map(Option::is_none), Some(true), "the theme has no text icon: the painted one");
+        assert!(icons.wanted.borrow().is_empty() && icons.pending.is_empty(), "nothing asked again");
     }
 
     #[cfg(windows)]

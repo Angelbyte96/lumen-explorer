@@ -878,6 +878,11 @@ impl LumenApp {
             let user_dirs = std::fs::read_to_string(config_home.join("user-dirs.dirs")).ok();
             let trash_place = cfg!(unix).then_some(trash.as_path());
             app.places = places::places(&home, user_dirs.as_deref(), trash_place);
+            #[cfg(not(windows))]
+            {
+                let folders = app.places.iter().map(|p| (p.path.clone(), p.icon.to_owned())).collect();
+                app.file_icons.set_setup(crate::ui::file_icons::native::Setup::from_env(folders));
+            }
             app.templates = places::templates_dir(&home, user_dirs.as_deref());
             app.trash = cfg!(unix).then_some(trash);
         }
