@@ -10,16 +10,6 @@ use crate::app::Sort;
 use crate::fs::Entry;
 use crate::menu::{self, Command, Item, Kind};
 
-/// The line shown while the shell's items load.
-pub const LOADING: &str = "Loading system items…";
-
-/// Lumen's items with the loading line on top, until the shell's arrive.
-pub fn loading(items: Vec<Item>) -> Vec<Item> {
-    let mut out = vec![Item::run(LOADING, None, false, Command::Refresh), Item::separator()];
-    out.extend(items);
-    out
-}
-
 /// A shell label without its accelerator marks ("&Open" -> "Open", "&&" ->
 /// "&") and without a shortcut after a tab.
 pub fn clean_label(raw: &str) -> String {

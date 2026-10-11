@@ -313,40 +313,6 @@ impl Menu {
         None
     }
 
-    /// Swaps the items (the shell's arrived): the search stays, and the
-    /// cursor stays on the line with the same label if there still is one.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub fn replace(&mut self, items: Vec<Item>) {
-        // Places change with the new items; labels do not.
-        let open: Vec<Vec<String>> = self.expanded.iter().map(|at| self.label_path(at)).collect();
-        let cursor = self.cursor.and_then(|row| self.rows().get(row).map(|line| self.label_path(&line.at)));
-        self.items = items;
-        self.expanded = open.iter().filter_map(|labels| self.find(labels)).collect();
-        let cursor = cursor.and_then(|labels| self.find(&labels));
-        self.cursor = cursor.and_then(|at| self.rows().iter().position(|line| line.at == at));
-    }
-
-    /// The labels from the top down to the item at `at`.
-    fn label_path(&self, at: &[usize]) -> Vec<String> {
-        (1..=at.len()).map(|depth| self.item(&at[..depth]).label.clone()).collect()
-    }
-
-    /// The place of the item reached through these labels (the first of
-    /// equal ones), if there is one.
-    fn find(&self, labels: &[String]) -> Option<Vec<usize>> {
-        let mut items = &self.items;
-        let mut at = Vec::new();
-        for (depth, label) in labels.iter().enumerate() {
-            let index = items.iter().position(|item| item.kind != Kind::Separator && &item.label == label)?;
-            at.push(index);
-            if depth + 1 < labels.len() {
-                let Kind::Sub(sub) = &items[index].kind else { return None };
-                items = sub;
-            }
-        }
-        Some(at)
-    }
-
     /// The pointer moved onto row `row`: it becomes the cursor's line.
     pub fn hover(&mut self, row: usize) {
         let rows = self.rows();
@@ -503,39 +469,6 @@ pub(crate) mod tests {
         assert_eq!(labels(&menu), ["Open", "", "Sort by", "  Name", "  Size", "Paste"]);
         menu.click(2);
         assert_eq!(labels(&menu), ["Open", "", "Sort by", "Paste"], "a second click closes it");
-    }
-
-    #[test]
-    fn new_items_keep_the_search_and_the_cursors_line() {
-        let mut menu = sample();
-        menu.key(Key::Down);
-        menu.key(Key::Down);
-        assert_eq!(menu.rows()[menu.cursor().unwrap()].label, "Sort by");
-        menu.replace(vec![run("Properties", Command::Shell(0)), Item::separator(), sample().items.remove(2)]);
-        assert_eq!(menu.rows()[menu.cursor().unwrap()].label, "Sort by", "the same line, moved");
-        menu.replace(vec![run("Open", Command::Open)]);
-        assert_eq!(menu.cursor(), None, "gone: nothing picked");
-        menu.set_query("prop".into());
-        menu.replace(vec![run("Open", Command::Open), run("Properties", Command::Shell(1))]);
-        assert_eq!(menu.query, "prop");
-        assert_eq!(menu.rows().iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["Properties"]);
-    }
-
-    #[test]
-    fn new_items_keep_open_submenus_open_by_label() {
-        let mut menu = sample();
-        menu.key(Key::Down);
-        menu.key(Key::Down);
-        menu.key(Key::Right);
-        menu.key(Key::Down);
-        assert_eq!(menu.rows()[menu.cursor().unwrap()].label, "Name");
-        let mut items = vec![run("Properties", Command::Shell(0)), Item::separator()];
-        items.extend(sample().items);
-        menu.replace(items);
-        assert_eq!(labels(&menu), ["Properties", "", "Open", "", "Sort by", "  Name", "  Size", "Paste"], "still open");
-        assert_eq!(menu.rows()[menu.cursor().unwrap()].label, "Name", "the cursor stays inside it");
-        menu.replace(vec![run("Open", Command::Open)]);
-        assert!(menu.rows().iter().all(|row| row.depth == 0), "a submenu that is gone leaves no open path");
     }
 
     #[test]
