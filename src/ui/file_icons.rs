@@ -57,21 +57,30 @@ pub struct FileIcons {
 
 impl FileIcons {
     /// The shell's icon for the entry once it is loaded; asks for it
-    /// otherwise. Always `None` off Windows.
+    /// otherwise (on Windows only).
     pub fn texture(&self, entry: &Entry) -> Option<egui::TextureId> {
-        if !cfg!(windows) {
-            return None;
+        self.lookup(key_of(entry), &entry.path)
+    }
+
+    /// The shell's icon for the folder or disk at `path` (a side panel row).
+    pub fn folder_texture(&self, path: &std::path::Path) -> Option<egui::TextureId> {
+        self.lookup(Key::Path(path.to_path_buf(), None), path)
+    }
+
+    fn lookup(&self, key: Key, path: &std::path::Path) -> Option<egui::TextureId> {
+        if let Some(texture) = self.loaded.get(&key) {
+            return texture.as_ref().map(egui::TextureHandle::id);
         }
-        let key = key_of(entry);
-        match self.loaded.get(&key) {
-            Some(texture) => texture.as_ref().map(egui::TextureHandle::id),
-            None => {
-                if !self.pending.contains(&key) {
-                    self.wanted.borrow_mut().entry(key).or_insert_with(|| entry.path.clone());
-                }
-                None
-            }
+        if cfg!(windows) && !self.pending.contains(&key) {
+            self.wanted.borrow_mut().entry(key).or_insert_with(|| path.to_path_buf());
         }
+        None
+    }
+
+    /// As if the shell had answered with `texture` for the folder or disk at `path`.
+    #[cfg(test)]
+    pub fn insert_folder(&mut self, path: &std::path::Path, texture: egui::TextureHandle) {
+        self.loaded.insert(Key::Path(path.to_path_buf(), None), Some(texture));
     }
 
     /// As if the shell had answered with `texture` for this entry.

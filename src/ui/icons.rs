@@ -78,6 +78,16 @@ pub fn folder(ui: &mut egui::Ui) -> egui::Response {
     response
 }
 
+/// A loaded picture (Windows' icon for a side panel row), as big as the
+/// painted icons beside it.
+pub fn image(ui: &mut egui::Ui, texture: egui::TextureId) -> egui::Response {
+    let side = ui.text_style_height(&egui::TextStyle::Body);
+    let (rect, response) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
+    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    ui.painter().image(texture, rect, uv, Color32::WHITE);
+    response
+}
+
 /// A plain file icon, for the status bar count.
 pub fn file(ui: &mut egui::Ui) -> egui::Response {
     let side = ui.text_style_height(&egui::TextStyle::Body);
