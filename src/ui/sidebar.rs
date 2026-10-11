@@ -135,6 +135,8 @@ fn item(ui: &mut egui::Ui, icon: ItemIcon, label: &str, hint: &str, path: &Path,
     let selected = path == current;
     // Senses clicks below the name button, so the button keeps its own.
     let row = egui::UiBuilder::new().sense(egui::Sense::click());
+    // Behind the row, filled once its size is known: the hover highlight.
+    let backdrop = ui.painter().add(egui::Shape::Noop);
     let inner = ui.scope_builder(row, |ui| {
         ui.horizontal(|ui| {
             ui.set_min_width(ui.available_width());
@@ -154,7 +156,13 @@ fn item(ui: &mut egui::Ui, icon: ItemIcon, label: &str, hint: &str, path: &Path,
         })
         .inner
     });
-    inner.response.union(inner.inner).on_hover_text(hint)
+    let response = inner.response.union(inner.inner);
+    // The whole row, as the file rows do, also where the name's button is.
+    if response.contains_pointer() && !selected {
+        let fill = ui.visuals().widgets.hovered.bg_fill;
+        ui.painter().set(backdrop, egui::Shape::rect_filled(response.rect, egui::CornerRadius::same(3), fill));
+    }
+    response.on_hover_text(hint)
 }
 
 #[cfg(test)]
@@ -216,6 +224,44 @@ mod tests {
         assert_eq!(glyphs, 0, "no glyph once the disk's icon is in");
         let meshes = shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Mesh(m) if m.texture_id != egui::TextureId::default())).count();
         assert_eq!(meshes, 2, "the bookmark, still loading, keeps the painted folder");
+    }
+
+    #[test]
+    fn a_row_under_the_pointer_is_highlighted_across_the_panel_like_the_file_rows() {
+        let ctx = egui::Context::default();
+        let icons = FileIcons::default();
+        let draw = |ctx: &egui::Context, events| {
+            let mut row = egui::Rect::NOTHING;
+            let input = egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+            let mut output = ctx.run_ui(input, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    row = item(ui, ItemIcon::Folder, "Downloads", "hint", Path::new("/d"), Path::new("/home"), &icons).rect;
+                });
+            });
+            output.textures_delta.clear();
+            (output.shapes, row)
+        };
+        let hover = ctx.global_style().visuals.widgets.hovered.bg_fill;
+        let fills = |shapes: &[egui::epaint::ClippedShape]| -> Vec<egui::Rect> {
+            shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Rect(r) if r.fill == hover => Some(r.rect),
+                    _ => None,
+                })
+                .collect()
+        };
+        draw(&ctx, vec![]);
+        let (still, row) = draw(&ctx, vec![]);
+        assert!(fills(&still).iter().all(|r| r.width() < row.width() - 1.0), "no row highlight without the pointer");
+        let end = row.right_center() - egui::vec2(5.0, 0.0);
+        draw(&ctx, vec![egui::Event::PointerMoved(end)]);
+        let (hovered, _) = draw(&ctx, vec![]);
+        assert!(
+            fills(&hovered).iter().any(|r| r.width() >= row.width() - 1.0 && r.contains(row.center())),
+            "the whole row lights up, even past the name: {:?} for {row:?}",
+            fills(&hovered)
+        );
     }
 
     #[test]
