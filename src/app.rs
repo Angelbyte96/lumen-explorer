@@ -23,7 +23,7 @@ use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::ui::tabs::TabEvent;
 use crate::ui::toolbar::{Nav, ToolbarEvent};
 use crate::ui::context_menu::{ContextMenu, MenuEvent};
-use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_popup::{PathPopup, PopupEvent}, preview::PreviewPane, status_bar::Status};
+use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_popup::{PathPopup, PopupEvent}, preview::PreviewPane, status_bar::{PickedSize, Status}};
 
 /// How the table should bring the selection into view on the next frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,6 +290,22 @@ impl View {
     /// Picked rows shown.
     pub fn picked_count(&self) -> usize {
         (0..self.rows.len()).filter(|&row| self.is_picked(row)).count()
+    }
+
+    /// The picked rows' total size, for the status bar.
+    pub fn picked_size(&self) -> PickedSize {
+        let mut size = PickedSize::default();
+        for row in (0..self.rows.len()).filter(|&row| self.is_picked(row)) {
+            let entry = &self.entries[self.rows[row]];
+            let bytes = if entry.is_dir { self.totals.get(&entry.name).map(|t| t.bytes) } else { entry.size };
+            match bytes {
+                Some(bytes) => size.bytes += bytes,
+                None if entry.is_dir => size.uncounted += 1,
+                // An unreadable file: nothing to add.
+                None => {}
+            }
+        }
+        size
     }
 
     /// What an operation acts on, in display order: the picked rows shown, or
@@ -862,6 +878,11 @@ impl LumenApp {
             let user_dirs = std::fs::read_to_string(config_home.join("user-dirs.dirs")).ok();
             let trash_place = cfg!(unix).then_some(trash.as_path());
             app.places = places::places(&home, user_dirs.as_deref(), trash_place);
+            #[cfg(not(windows))]
+            {
+                let folders = app.places.iter().map(|p| (p.path.clone(), p.icon.to_owned())).collect();
+                app.file_icons.set_setup(crate::ui::file_icons::native::Setup::from_env(folders));
+            }
             app.templates = places::templates_dir(&home, user_dirs.as_deref());
             app.trash = cfg!(unix).then_some(trash);
         }
@@ -2002,6 +2023,7 @@ impl eframe::App for LumenApp {
                     folder_count: self.tab.view.folder_count(),
                     selected: self.tab.view.selected,
                     picked: self.tab.view.picked_count(),
+                    picked_size: self.tab.view.picked_size(),
                     counting: self.counting.as_ref().map(|c| {
                         let name = file_name(&c.path).unwrap_or_default();
                         ui::status_bar::counting_text(&name, &c.progress)
@@ -2176,15 +2198,18 @@ pub enum Start {
 }
 
 /// From the command line (without the program name): a folder argument
-/// opens it; otherwise `--restore` (the desktop entry) or Windows restores
-/// the last session, and Linux opens the working directory (a terminal's).
+/// opens it; otherwise `--restore` (the desktop entry), Windows, or Linux
+/// without a terminal (a double click in a file manager) restores the last
+/// session, and Linux in a terminal opens the working directory.
 pub fn start(args: &[String]) -> Start {
-    start_from(args, std::env::current_dir().ok(), fs::home_dir(), cfg!(windows))
+    use std::io::IsTerminal;
+    let terminal = std::io::stdin().is_terminal();
+    start_from(args, std::env::current_dir().ok(), fs::home_dir(), cfg!(windows), terminal)
 }
 
-fn start_from(args: &[String], cwd: Option<PathBuf>, home: Option<PathBuf>, windows: bool) -> Start {
+fn start_from(args: &[String], cwd: Option<PathBuf>, home: Option<PathBuf>, windows: bool, terminal: bool) -> Start {
     let folder = args.iter().find(|a| *a != RESTORE).cloned();
-    if folder.is_none() && (windows || args.iter().any(|a| a == RESTORE)) {
+    if folder.is_none() && (windows || !terminal || args.iter().any(|a| a == RESTORE)) {
         return Start::Restore;
     }
     // Windows hands a GUI app whatever working directory its launcher had
@@ -2237,12 +2262,22 @@ mod tests {
     fn the_session_is_restored_on_windows_and_with_restore_and_never_over_a_folder() {
         let cwd = Some(PathBuf::from("/srv/work"));
         let home = Some(PathBuf::from("/home/u"));
-        let start = |list: &[&str], windows| start_from(&args(list), cwd.clone(), home.clone(), windows);
+        let start = |list: &[&str], windows| start_from(&args(list), cwd.clone(), home.clone(), windows, true);
         assert_eq!(start(&[], true), Start::Restore, "Windows without a folder");
         assert_eq!(start(&["--restore"], false), Start::Restore, "the desktop entry on Linux");
         assert_eq!(start(&[], false), Start::Folder("/srv/work".into()), "a terminal on Linux");
         assert_eq!(start(&["--restore", "docs"], false), Start::Folder("/srv/work/docs".into()), "a folder opened with Lumen");
         assert_eq!(start(&["docs"], true), Start::Folder("/srv/work/docs".into()));
+    }
+
+    #[test]
+    fn without_a_terminal_linux_restores_the_session_unless_given_a_folder() {
+        let cwd = Some(PathBuf::from("/srv/work"));
+        let home = Some(PathBuf::from("/home/u"));
+        let start = |list: &[&str]| start_from(&args(list), cwd.clone(), home.clone(), false, false);
+        assert_eq!(start(&[]), Start::Restore, "a double click in a file manager");
+        assert_eq!(start(&["--restore"]), Start::Restore);
+        assert_eq!(start(&["docs"]), Start::Folder("/srv/work/docs".into()), "a folder argument still wins");
     }
 
     #[test]
@@ -3825,6 +3860,31 @@ mod tests {
         v.apply_listing(ok_listing("/y", vec![entry("a.txt", false), entry("b.txt", false)]), None);
         assert_eq!(v.picked_count(), 0, "same names, another folder");
         assert_eq!(selection_names(&v), ["a.txt"]);
+    }
+
+    #[test]
+    fn picked_size_adds_files_and_counted_folders_and_tells_the_uncounted_ones() {
+        let mut v = View::default();
+        let mut big = entry("big.iso", false);
+        big.size = Some(3 << 20);
+        let entries = vec![entry("src", true), entry("docs", true), big, entry("a.txt", false), entry("b.txt", false)];
+        v.apply_listing(ok_listing("/x", entries), None);
+        v.set_totals("src".into(), Totals { folders: 1, files: 2, bytes: 1000, ..Totals::default() });
+        let row = |v: &View, name: &str| (0..v.rows.len()).find(|&r| v.entries[v.rows[r]].name == name).unwrap();
+        assert_eq!(v.picked_size(), PickedSize { bytes: 0, uncounted: 0 }, "nothing picked");
+        for name in ["src", "docs", "big.iso", "a.txt"] {
+            let r = row(&v, name);
+            v.toggle_pick(r);
+        }
+        // toggle_pick keeps the cursor row picked too: drop whatever else got in.
+        let extra: Vec<usize> = (0..v.rows.len())
+            .filter(|&r| v.is_picked(r) && !["src", "docs", "big.iso", "a.txt"].contains(&v.entries[v.rows[r]].name.as_str()))
+            .collect();
+        for r in extra {
+            v.toggle_pick(r);
+        }
+        assert_eq!(v.picked_count(), 4);
+        assert_eq!(v.picked_size(), PickedSize { bytes: 1000 + (3 << 20) + 1, uncounted: 1 });
     }
 
     #[test]

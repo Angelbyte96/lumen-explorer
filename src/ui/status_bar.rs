@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use eframe::egui;
 
+use crate::format::format_size;
 use crate::fs::count::Totals;
 use crate::fs::transfer::{Mode, Progress};
 
@@ -27,6 +28,7 @@ pub struct Status<'a> {
     pub selected: Option<usize>,
     /// Rows picked with Ctrl+A, Ctrl+click or Shift.
     pub picked: usize,
+    pub picked_size: PickedSize,
 }
 
 pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
@@ -58,7 +60,7 @@ pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
             ui.label(counting);
             ui.weak("Esc to cancel");
         }
-        if let Some(picked) = picked_text(status.picked) {
+        if let Some(picked) = picked_text(status.picked, &status.picked_size) {
             ui.separator();
             ui.strong(picked);
         }
@@ -120,9 +122,28 @@ pub fn filter_placeholder(items: usize) -> String {
     format!("Filter {items} {noun}…")
 }
 
-/// "5 selected" while rows are picked.
-pub fn picked_text(picked: usize) -> Option<String> {
-    (picked > 0).then(|| format!("{picked} selected"))
+/// The picked rows' total size: files and folders counted with Alt+R add
+/// their bytes; `uncounted` folders have no size yet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PickedSize {
+    pub bytes: u64,
+    pub uncounted: u64,
+}
+
+/// "5 selected · 12.4 MB + 2 folders" while rows are picked: their total
+/// size, and the folders not counted yet.
+pub fn picked_text(picked: usize, size: &PickedSize) -> Option<String> {
+    use crate::ui::preview::plural;
+    if picked == 0 {
+        return None;
+    }
+    let folders = plural(size.uncounted, "folder");
+    let total = match (size.bytes, size.uncounted) {
+        (0, 1..) => folders,
+        (bytes, 0) => format_size(bytes),
+        (bytes, _) => format!("{} + {folders}", format_size(bytes)),
+    };
+    Some(format!("{picked} selected · {total}"))
 }
 
 /// "9/10": the selected row, counted from 1, of the rows shown.
@@ -179,6 +200,7 @@ mod tests {
             folder_count: 0,
             selected: None,
             picked: 0,
+            picked_size: PickedSize::default(),
         };
         let mut shapes = Vec::new();
         for _ in 0..2 {
@@ -211,9 +233,17 @@ mod tests {
 
     #[test]
     fn picked_rows_are_counted_only_when_there_are_some() {
-        assert_eq!(picked_text(0), None);
-        assert_eq!(picked_text(1).as_deref(), Some("1 selected"));
-        assert_eq!(picked_text(5).as_deref(), Some("5 selected"));
+        let none = PickedSize::default();
+        assert_eq!(picked_text(0, &none), None);
+        assert_eq!(picked_text(1, &PickedSize { bytes: 512, uncounted: 0 }).as_deref(), Some("1 selected · 512 B"));
+        assert_eq!(picked_text(5, &PickedSize { bytes: 13_002_342, uncounted: 0 }).as_deref(), Some("5 selected · 12.4 MB"));
+        assert_eq!(
+            picked_text(5, &PickedSize { bytes: 13_002_342, uncounted: 2 }).as_deref(),
+            Some("5 selected · 12.4 MB + 2 folders"),
+            "folders not counted with Alt+R have no size yet"
+        );
+        assert_eq!(picked_text(1, &PickedSize { bytes: 0, uncounted: 1 }).as_deref(), Some("1 selected · 1 folder"), "only uncounted folders");
+        assert_eq!(picked_text(2, &PickedSize { bytes: 0, uncounted: 0 }).as_deref(), Some("2 selected · 0 B"), "empty files");
     }
 
     #[test]
@@ -249,6 +279,7 @@ mod tests {
             folder_count: 2,
             selected: None,
             picked: 0,
+            picked_size: PickedSize::default(),
         };
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 200.0));
         let mut shapes = Vec::new();

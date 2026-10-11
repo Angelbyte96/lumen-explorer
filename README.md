@@ -48,8 +48,9 @@ On Windows:
   closed (a folder that is gone opens its nearest parent, else your user
   folder), never the working directory Windows hands apps (such as
   `C:\Windows\System32`). On Linux the app menu entry does the same
-  (`lumen --restore`), while `lumen` from a terminal opens the folder it was
-  started from. A folder given to Lumen always opens alone.
+  (`lumen --restore`), and so does a double click on the program in a file
+  manager (no terminal), while `lumen` from a terminal opens the folder it
+  was started from. A folder given to Lumen always opens alone.
 - Storage in the side panel lists local and USB drives with their free space;
   network and CD drives are left out.
 - Files open as a double-click in File Explorer does: Windows asks before
@@ -119,6 +120,8 @@ The toolbar has back, forward and up buttons, the bookmark star and the current 
 
 The list and the folder preview show Name, Type, Date Modified, Folders, Files and Size. Click a header to sort by that column; click it again to reverse. Folders always stay on top; counted folders sort by their totals. Drag the border between two headers to resize a column (every column keeps its own width, the last one stretches to the list's edge, and columns wider than the window scroll sideways); the widths are saved. Right-click a header for Shift Column Left / Right (past hidden columns), Size Column To Fit, Close Column (also a middle click on the header), Size All Columns To Fit (Ctrl+Shift+F), Restore Default Columns (default widths and order, every column shown) and a checkbox per column to show or hide it; Name is always shown. Hidden columns and the order are saved too.
 
+Rows show the system's icons. On Windows, the shell's (a program's own icon, its type's program icon for other files). On Linux, your desktop's icon theme, as Nautilus and Dolphin show it: the theme GNOME names in its settings (KDE: kdeglobals), then the themes it inherits and hicolor, picking each file's icon by its type (from its extension, through the system's MIME tables) and special folders' own (Downloads, Documents…); PNG and SVG icons alike. Lumen's own drawn icons show until the theme's arrive, or when the theme has none. The side panel shows the same icons on Windows; on Linux the theme's one-colour (symbolic) icons in the text colour, as Nautilus does: home, Desktop, Downloads, Documents, Music, Pictures, Videos, the trash, disks, and a folder for bookmarks and recents.
+
 Lumen deletes permanently only with Shift+Delete, after asking: Delete moves entries to the system trash, and renaming or pasting onto an existing name asks first and sends the old entry to the trash.
 
 Copy and paste use Lumen's own clipboard (not shared with other apps). Pasting into the same folder creates "name (copy)", "name (copy 2)"... Cut + paste moves: a rename on the same disk, or a copy followed by moving the original to the trash across disks. Copies and moves run in the background with progress in the status bar; cancelling keeps what was already copied and removes the half-written file.
@@ -129,5 +132,5 @@ The open folder reloads by itself when something changes on disk, keeping the se
 
 Settings are kept in `~/.config/lumen/config` (or `$XDG_CONFIG_HOME/lumen/config`; on Windows `%APPDATA%\lumen\config`): bookmarks, sort order, Ctrl+H, whether the side panel and the preview are open, the list zoom and the window size. They are written as soon as they change (the window size when Lumen closes). It is a plain `key = value` file; lines Lumen does not understand are ignored. If the file exists but cannot be read, Lumen says so and saves nothing that session, so the file is never overwritten. With two Lumen windows open, each one writes only what it changed, so neither loses the other's bookmarks. The folders of the open tabs are saved when a window closes (`tab = …` and `active_tab = …`): the last window closed is the one reopened.
 
-The status bar shows the filter on the left ("Filter 9 files…" while empty, with a text cursor after the typed text), how long the last listing took, how many rows are selected ("5 selected") while you pick several, and on the right the folders shown and the selected row out of the rows shown ("1/9").
+The status bar shows the filter on the left ("Filter 9 files…" while empty, with a text cursor after the typed text), how long the last listing took, how many rows are selected and their total size ("5 selected · 12.4 MB"; folders add their size once counted with Alt+R, and "+ 2 folders" tells the ones not counted yet) while you pick several, and on the right the folders shown and the selected row out of the rows shown ("1/9").
 Listing always runs on a background thread, so the window never freezes.
