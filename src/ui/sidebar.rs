@@ -211,7 +211,7 @@ mod tests {
         let (downloads, disk) = (red("downloads"), red("disk"));
         icons.insert_folder(Path::new("/home/me/Downloads"), downloads.clone());
         icons.insert_folder(Path::new("/"), disk.clone());
-        let places = [Place { label: "Downloads".into(), path: "/home/me/Downloads".into(), trash: false }];
+        let places = [Place { label: "Downloads".into(), path: "/home/me/Downloads".into(), trash: false, icon: "folder-download" }];
         let disks = [(Mount { label: "File System".into(), path: "/".into() }, None)];
         let bookmarks = [PathBuf::from("/home/me/work")];
         let sidebar = Sidebar { current: Path::new("/home/me"), bookmarks: &bookmarks, places: &places, disks: &disks, recents: &[], icons: &icons };
