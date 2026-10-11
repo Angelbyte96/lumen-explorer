@@ -17,6 +17,7 @@ use crate::fs::Entry;
 const OWN_ICON: &[&str] = &["exe", "lnk", "ico"];
 
 /// The icon's side in pixels: the list's biggest zoom draws it at 64 points.
+#[cfg(windows)]
 pub const SIDE: i32 = 64;
 
 /// Which icon an entry shows: one per type, or its own.
