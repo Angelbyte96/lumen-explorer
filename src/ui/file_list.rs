@@ -31,6 +31,8 @@ pub enum ListEvent {
     Resized(Widths),
     /// Right click on a column's header: its menu.
     HeaderMenu(usize),
+    /// Middle click on a column's header: hide it (never Name).
+    CloseColumn(usize),
 }
 
 /// Each column's width in points, in `COLUMNS` order.
@@ -38,6 +40,11 @@ pub type Widths = [f32; COLUMNS.len()];
 
 /// The widths Lumen starts with and goes back to.
 pub const DEFAULT_WIDTHS: Widths = [320.0, 110.0, 130.0, 60.0, 60.0, 80.0];
+
+/// Which columns are shown, in `COLUMNS` order; Name always is.
+pub type Shown = [bool; COLUMNS.len()];
+
+pub const ALL_SHOWN: Shown = [true; COLUMNS.len()];
 
 /// No column is dragged narrower than this.
 pub const MIN_WIDTH: f32 = 40.0;
@@ -83,11 +90,12 @@ pub struct Sizes {
     /// Icon and row size, 0 (normal) to `MAX_ZOOM`.
     pub zoom: u8,
     pub widths: Widths,
+    pub shown: Shown,
 }
 
 impl Default for Sizes {
     fn default() -> Self {
-        Self { zoom: 0, widths: DEFAULT_WIDTHS }
+        Self { zoom: 0, widths: DEFAULT_WIDTHS, shown: ALL_SHOWN }
     }
 }
 
@@ -132,11 +140,13 @@ pub fn show(
         // Every column has its own width, like File Pilot: the last one stretches
         // over whatever room the others leave, and columns wider than the list
         // scroll sideways.
-        let (last, others) = widths.split_last().expect("columns");
-        for &width in others {
-            table = table.column(Column::exact(width).clip(true));
+        // Name is always shown.
+        let shown: Vec<usize> = (0..COLUMNS.len()).filter(|&c| c == 0 || sizes.shown[c]).collect();
+        let (&last, others) = shown.split_last().expect("Name is shown");
+        for &column in others {
+            table = table.column(Column::exact(widths[column]).clip(true));
         }
-        table = table.column(Column::remainder().at_least(*last).clip(true));
+        table = table.column(Column::remainder().at_least(widths[last]).clip(true));
         if let Some(scroll) = scroll
             && let Some(sel) = selected
         {
@@ -147,7 +157,8 @@ pub fn show(
 
         table
             .header(header_height, |mut header| {
-                for (i, (label, column)) in COLUMNS.into_iter().enumerate() {
+                for &i in &shown {
+                    let (label, column) = COLUMNS[i];
                     header.col(|ui| {
                         cells[i] = ui.max_rect();
                         // The whole header, not only its label: a click sorts, a right click opens its menu.
@@ -157,6 +168,8 @@ pub fn show(
                             event = Some(ListEvent::Sort(column));
                         } else if label.secondary_clicked() || cell.secondary_clicked() {
                             event = Some(ListEvent::HeaderMenu(i));
+                        } else if (label.middle_clicked() || cell.middle_clicked()) && i != 0 {
+                            event = Some(ListEvent::CloseColumn(i));
                         }
                     });
                 }
@@ -166,34 +179,39 @@ pub fn show(
                     let i = row.index();
                     let entry = &entries[rows[i]];
                     row.set_selected(if multi { view.is_picked(i) } else { selected == Some(i) });
-                    row.col(|ui| {
-                        // Icon and name on one line as tall as the row, centred in it:
-                        // a plain `horizontal` is one text line tall, so a zoomed icon
-                        // would hang below the row and be clipped (and the name with it).
-                        let line = egui::vec2(ui.available_width(), row_height);
-                        ui.allocate_ui_with_layout(line, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            // Cut and not pasted yet: faded, like other explorers.
-                            if cut.contains(&entry.path) {
-                                ui.set_opacity(CUT_OPACITY);
+                    let counts = count_cells(entry, totals.get(&entry.name));
+                    for &column in &shown {
+                        row.col(|ui| match column {
+                            0 => {
+                                // Icon and name on one line as tall as the row, centred in it:
+                                // a plain `horizontal` is one text line tall, so a zoomed icon
+                                // would hang below the row and be clipped (and the name with it).
+                                let line = egui::vec2(ui.available_width(), row_height);
+                                ui.allocate_ui_with_layout(line, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    // Cut and not pasted yet: faded, like other explorers.
+                                    if cut.contains(&entry.path) {
+                                        ui.set_opacity(CUT_OPACITY);
+                                    }
+                                    icons::show(ui, entry, icon, file_icons.texture(entry));
+                                    if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
+                                        if let Some(submit) = rename_field(ui, edit) {
+                                            event = Some(ListEvent::RenameEnded(submit));
+                                        }
+                                        return;
+                                    }
+                                    name_label(ui, entry, view.filter());
+                                });
                             }
-                            icons::show(ui, entry, icon, file_icons.texture(entry));
-                            if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
-                                if let Some(submit) = rename_field(ui, edit) {
-                                    event = Some(ListEvent::RenameEnded(submit));
-                                }
-                                return;
+                            1 => {
+                                ui.add(egui::Label::new(entry.kind()).selectable(false).truncate());
                             }
-                            name_label(ui, entry, view.filter());
+                            2 => {
+                                let date = entry.modified.map(format_time).unwrap_or_default();
+                                ui.add(egui::Label::new(date).selectable(false));
+                            }
+                            _ => count_cell(ui, column - 3, &counts[column - 3]),
                         });
-                    });
-                    row.col(|ui| {
-                        ui.add(egui::Label::new(entry.kind()).selectable(false).truncate());
-                    });
-                    row.col(|ui| {
-                        let date = entry.modified.map(format_time).unwrap_or_default();
-                        ui.add(egui::Label::new(date).selectable(false));
-                    });
-                    count_cols(&mut row, &count_cells(entry, totals.get(&entry.name)));
+                    }
                     let response = row.response();
                     if selected == Some(i) {
                         response.ctx.data_mut(|d| d.insert_temp(cursor_row_id(), response.rect));
@@ -374,17 +392,20 @@ pub fn count_cells(entry: &Entry, totals: Option<&Totals>) -> [String; 3] {
 /// Draws the Folders, Files and Size cells. Size is right-aligned so the
 /// units line up, like File Pilot; the counts stay under their headers.
 pub fn count_cols(row: &mut egui_extras::TableRow<'_, '_>, cells: &[String; 3]) {
-    let [folders, files, size] = cells;
-    for cell in [folders, files] {
-        row.col(|ui| {
-            ui.add(egui::Label::new(cell.as_str()).selectable(false));
+    for (i, cell) in cells.iter().enumerate() {
+        row.col(|ui| count_cell(ui, i, cell));
+    }
+}
+
+/// Cell `i` of the Folders, Files and Size cells.
+fn count_cell(ui: &mut egui::Ui, i: usize, text: &str) {
+    if i < 2 {
+        ui.add(egui::Label::new(text).selectable(false));
+    } else {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add(egui::Label::new(text).selectable(false));
         });
     }
-    row.col(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add(egui::Label::new(size.as_str()).selectable(false));
-        });
-    });
 }
 
 /// Id of the rename field, so the app can tell when it lost focus silently.
@@ -729,7 +750,7 @@ mod tests {
             egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
             |root| {
                 egui::CentralPanel::default().show(root, |ui| {
-                    event = show(ui, view, &[], Sizes { zoom: 0, widths: *widths }, None, None, &FileIcons::default());
+                    event = show(ui, view, &[], Sizes { widths: *widths, ..Sizes::default() }, None, None, &FileIcons::default());
                 });
             },
         );
@@ -892,6 +913,57 @@ mod tests {
         assert!(matches!(click(past_label, right), Some(ListEvent::HeaderMenu(1))), "on Type's free part");
         let left = click(on_label, egui::PointerButton::Primary);
         assert!(matches!(left, Some(ListEvent::Sort(SortColumn::Type))), "a left click sorts");
+    }
+
+    #[test]
+    fn hidden_columns_are_not_drawn_and_the_next_one_takes_their_place() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt"]);
+        let all = settled(&ctx, &view, &DEFAULT_WIDTHS);
+        let shown = [true, false, true, true, true, true];
+        let mut shapes = Vec::new();
+        let mut lefts = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        show(ui, &view, &[], Sizes { shown, ..Sizes::default() }, None, None, &FileIcons::default());
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            shapes = output.shapes;
+            lefts = COLUMNS
+                .iter()
+                .map(|(label, _)| {
+                    shapes.iter().find_map(|s| match &s.shape {
+                        egui::Shape::Text(t) if t.galley.text().trim_end_matches([' ', '⏶', '⏷']) == *label => Some(t.pos.x),
+                        _ => None,
+                    })
+                })
+                .collect::<Vec<_>>();
+        }
+        let painted = |text: &str| shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == text));
+        assert_eq!(lefts[1], None, "no Type header");
+        assert!(!painted("TXT file"), "no Type cell");
+        assert!(painted("a.txt") && painted("1 B"), "the other cells are drawn");
+        assert_eq!(lefts[2], Some(all[1]), "Date Modified moves into Type's place");
+    }
+
+    #[test]
+    fn a_middle_click_on_a_header_closes_its_column_but_never_name() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt"]);
+        let lefts = settled(&ctx, &view, &DEFAULT_WIDTHS);
+        let middle = |pos: egui::Pos2| {
+            let press = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Middle, pressed, modifiers: egui::Modifiers::NONE };
+            draw_list(&ctx, &view, &DEFAULT_WIDTHS, vec![egui::Event::PointerMoved(pos)]);
+            draw_list(&ctx, &view, &DEFAULT_WIDTHS, vec![press(true)]);
+            draw_list(&ctx, &view, &DEFAULT_WIDTHS, vec![press(false)]).event
+        };
+        assert!(matches!(middle(egui::pos2(lefts[2] + 80.0, 10.0)), Some(ListEvent::CloseColumn(2))));
+        assert!(middle(egui::pos2(lefts[0] + 5.0, 10.0)).is_none(), "Name stays");
     }
 
     /// What is painted of the row whose name starts like `name`, with Name `width` wide.

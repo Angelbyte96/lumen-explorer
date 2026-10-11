@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::app::{Sort, SortColumn};
-use crate::ui::file_list::{DEFAULT_WIDTHS, MAX_ZOOM, MIN_WIDTH, Widths};
+use crate::ui::file_list::{ALL_SHOWN, DEFAULT_WIDTHS, MAX_ZOOM, MIN_WIDTH, Shown, Widths};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -25,6 +25,8 @@ pub struct Config {
     pub active_tab: usize,
     /// The list's column widths, in the list's column order.
     pub columns: Widths,
+    /// Which of the list's columns are shown.
+    pub shown_columns: Shown,
 }
 
 impl Default for Config {
@@ -40,6 +42,7 @@ impl Default for Config {
             tabs: Vec::new(),
             active_tab: 0,
             columns: DEFAULT_WIDTHS,
+            shown_columns: ALL_SHOWN,
         }
     }
 }
@@ -69,6 +72,7 @@ impl Config {
                 "tab" if !value.is_empty() => config.tabs.push(PathBuf::from(value)),
                 "active_tab" => config.active_tab = value.parse().unwrap_or(config.active_tab),
                 "columns" => config.columns = parse_widths(value).unwrap_or(config.columns),
+                "hidden_columns" => config.shown_columns = parse_hidden(value),
                 _ => {}
             }
         }
@@ -90,6 +94,10 @@ impl Config {
         text += &format!("list_zoom = {}\n", self.list_zoom);
         let columns: Vec<String> = self.columns.iter().map(|w| w.round().to_string()).collect();
         text += &format!("columns = {}\n", columns.join(" "));
+        let hidden: Vec<&str> = SORT_COLUMNS.into_iter().zip(self.shown_columns).filter(|(_, shown)| !shown).map(|(c, _)| column_name(c)).collect();
+        if !hidden.is_empty() {
+            text += &format!("hidden_columns = {}\n", hidden.join(" "));
+        }
         for path in self.bookmarks.iter().filter_map(|p| one_line(p)) {
             text += &format!("bookmark = {path}\n");
         }
@@ -137,6 +145,9 @@ impl Config {
         }
         if before.columns != after.columns {
             merged.columns = after.columns;
+        }
+        if before.shown_columns != after.shown_columns {
+            merged.shown_columns = after.shown_columns;
         }
         if (&before.tabs, before.active_tab) != (&after.tabs, after.active_tab) {
             (merged.tabs, merged.active_tab) = (after.tabs.clone(), after.active_tab);
@@ -253,19 +264,20 @@ fn parse_bool(value: &str) -> Option<bool> {
 }
 
 /// "size desc", "name asc".
+/// Every column, in the list's order.
+const SORT_COLUMNS: [SortColumn; 6] = [
+    SortColumn::Name,
+    SortColumn::Type,
+    SortColumn::Modified,
+    SortColumn::Folders,
+    SortColumn::Files,
+    SortColumn::Size,
+];
+
 fn parse_sort(value: &str) -> Option<Sort> {
     let mut words = value.split_whitespace();
     let name = words.next()?;
-    let column = [
-        SortColumn::Name,
-        SortColumn::Type,
-        SortColumn::Modified,
-        SortColumn::Folders,
-        SortColumn::Files,
-        SortColumn::Size,
-    ]
-    .into_iter()
-    .find(|&c| column_name(c) == name)?;
+    let column = SORT_COLUMNS.into_iter().find(|&c| column_name(c) == name)?;
     let descending = match words.next()? {
         "asc" => false,
         "desc" => true,
@@ -274,7 +286,18 @@ fn parse_sort(value: &str) -> Option<Sort> {
     words.next().is_none().then_some(Sort { column, descending })
 }
 
-/// "1200x800", at least the window's minimum size.
+/// The columns named (as in `sort`) are hidden; unknown names are skipped
+/// and Name is always shown.
+fn parse_hidden(value: &str) -> Shown {
+    let mut shown = ALL_SHOWN;
+    for word in value.split_whitespace() {
+        if let Some(i) = SORT_COLUMNS.into_iter().position(|c| column_name(c) == word) {
+            shown[i] = i == 0;
+        }
+    }
+    shown
+}
+
 /// One width per column, separated by spaces; one too narrow gets the minimum.
 fn parse_widths(value: &str) -> Option<Widths> {
     let widths: Vec<f32> = value.split_whitespace().map(|w| w.parse().ok()).collect::<Option<_>>()?;
@@ -282,6 +305,7 @@ fn parse_widths(value: &str) -> Option<Widths> {
     widths.iter().all(|w| w.is_finite()).then(|| widths.map(|w| w.max(MIN_WIDTH)))
 }
 
+/// "1200x800", at least the window's minimum size.
 fn parse_window(value: &str) -> Option<[f32; 2]> {
     let (w, h) = value.split_once('x')?;
     let size = [w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?];
@@ -316,6 +340,7 @@ mod tests {
             tabs: vec![PathBuf::from("/home/u"), PathBuf::from("/srv/my files")],
             active_tab: 1,
             columns: [250.0, 90.0, 140.0, 55.0, 60.0, 95.0],
+            shown_columns: [true, false, true, true, false, true],
         }
     }
 
@@ -327,6 +352,7 @@ mod tests {
         assert!(text.contains("window = 1200x800\n"), "{text}");
         assert!(text.contains("list_zoom = 2\n"), "{text}");
         assert!(text.contains("columns = 250 90 140 55 60 95\n"), "{text}");
+        assert!(text.contains("hidden_columns = type files\n"), "{text}");
         assert!(text.contains("bookmark = /srv/my files\n"), "{text}");
         assert!(text.contains("tab = /home/u\ntab = /srv/my files\nactive_tab = 1\n"), "{text}");
         assert_eq!(Config::parse(&text), sample());
@@ -408,6 +434,18 @@ bookmark =
             "a column too narrow gets the minimum"
         );
         assert!(Config::default().to_text().contains("columns = 320 110 130 60 60 80\n"));
+    }
+
+    #[test]
+    fn hidden_columns_are_named_and_name_is_never_hidden() {
+        assert!(!Config::default().to_text().contains("hidden_columns"), "all shown: no line");
+        assert_eq!(Config::parse("list_zoom = 1\n").shown_columns, ALL_SHOWN, "an older file");
+        let parsed = Config::parse("hidden_columns = name size bogus modified\n").shown_columns;
+        assert_eq!(parsed, [true, true, false, true, true, false], "unknown names skipped, Name always shown");
+        let before = Config::default();
+        let after = Config { shown_columns: parsed, ..before.clone() };
+        assert_eq!(Config::merge(&before, &before, &after).shown_columns, parsed);
+        assert_eq!(Config::merge(&after, &before, &before).shown_columns, parsed, "another window's stays");
     }
 
     #[test]

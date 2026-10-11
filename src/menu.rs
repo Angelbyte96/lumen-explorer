@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use crate::app::{Sort, SortColumn};
 use crate::fs::Entry;
-use crate::ui::file_list::{COLUMNS, SORT_ASCENDING, SORT_DESCENDING};
+use crate::ui::file_list::{COLUMNS, SORT_ASCENDING, SORT_DESCENDING, Shown};
 use crate::ui::path_popup::word_ranges;
 
 /// An application that can open a file ("Open With").
@@ -52,6 +52,8 @@ pub enum Command {
     /// Every column's width to its content (Ctrl+Shift+F).
     FitAllColumns,
     RestoreColumns,
+    /// Show the column again, or hide it.
+    ToggleColumn(usize),
 }
 
 /// The line icon drawn left of an item (see `ui::icons::menu_icon`).
@@ -120,7 +122,7 @@ impl MenuIcon {
             Command::OpenTerminal => Self::Terminal,
             Command::Refresh => Self::Refresh,
             Command::Sort(_) | Command::Shell(_) => return None,
-            Command::FitColumn(_) | Command::FitAllColumns | Command::RestoreColumns => return None,
+            Command::FitColumn(_) | Command::FitAllColumns | Command::RestoreColumns | Command::ToggleColumn(_) => return None,
         })
     }
 }
@@ -148,17 +150,19 @@ pub struct Item {
     pub picture: Option<std::sync::Arc<Bitmap>>,
     pub shortcut: Option<&'static str>,
     pub enabled: bool,
+    /// A checkbox drawn in the icon column, ticked or not.
+    pub checked: Option<bool>,
     pub kind: Kind,
 }
 
 impl Item {
     pub fn run(label: impl Into<String>, shortcut: Option<&'static str>, enabled: bool, command: Command) -> Self {
-        Self { label: label.into(), icon: MenuIcon::of(&command), picture: None, shortcut, enabled, kind: Kind::Run(command) }
+        Self { label: label.into(), icon: MenuIcon::of(&command), picture: None, shortcut, enabled, checked: None, kind: Kind::Run(command) }
     }
 
     pub fn sub(label: impl Into<String>, icon: MenuIcon, items: Vec<Item>) -> Self {
         let enabled = items.iter().any(|item| item.enabled);
-        Self { label: label.into(), icon: Some(icon), picture: None, shortcut: None, enabled, kind: Kind::Sub(items) }
+        Self { label: label.into(), icon: Some(icon), picture: None, shortcut: None, enabled, checked: None, kind: Kind::Sub(items) }
     }
 
     /// A submenu without a line icon (the shell's).
@@ -172,8 +176,13 @@ impl Item {
         Self { picture, ..self }
     }
 
+    /// An item with a checkbox, ticked when `checked`.
+    pub fn check(label: impl Into<String>, checked: bool, enabled: bool, command: Command) -> Self {
+        Self { checked: Some(checked), ..Self::run(label, None, enabled, command) }
+    }
+
     pub fn separator() -> Self {
-        Self { label: String::new(), icon: None, picture: None, shortcut: None, enabled: false, kind: Kind::Separator }
+        Self { label: String::new(), icon: None, picture: None, shortcut: None, enabled: false, checked: None, kind: Kind::Separator }
     }
 }
 
@@ -445,13 +454,20 @@ pub fn sort_menu(sort: Sort) -> Item {
 }
 
 /// Right click on the list's header `column`, like File Pilot's.
-pub fn column_menu(column: usize) -> Vec<Item> {
-    vec![
+/// The checkboxes show or hide each column; Name is always shown.
+pub fn column_menu(column: usize, shown: &Shown) -> Vec<Item> {
+    let mut items = vec![
         Item::run("Size Column To Fit", None, true, Command::FitColumn(column)),
         Item::run("Size All Columns To Fit", Some("Ctrl+Shift+F"), true, Command::FitAllColumns),
+        Item::run("Close Column", Some("Middle click"), column != 0, Command::ToggleColumn(column)),
         Item::separator(),
         Item::run("Restore Default Columns", None, true, Command::RestoreColumns),
-    ]
+        Item::separator(),
+    ];
+    for (i, (label, _)) in COLUMNS.into_iter().enumerate() {
+        items.push(Item::check(label, shown[i], i != 0, Command::ToggleColumn(i)));
+    }
+    items
 }
 
 /// The menu for the folder's empty space. `can_paste`: the clipboard holds
@@ -744,28 +760,44 @@ pub(crate) mod tests {
         assert_eq!(bare[shown.len() + 1], format!("  Name {SORT_ASCENDING}"));
     }
 
-    #[test]
-    fn the_header_menu_fits_one_column_all_of_them_or_restores_the_defaults() {
-        let items = column_menu(2);
-        let lines: Vec<(&str, Option<&str>, Option<&Command>)> = items
+    /// A line of a menu: label, shortcut, command, enabled, checkbox.
+    type Line<'a> = (&'a str, Option<&'a str>, Option<&'a Command>, bool, Option<bool>);
+
+    fn lines(items: &[Item]) -> Vec<Line<'_>> {
+        items
             .iter()
             .map(|item| {
                 let command = match &item.kind {
                     Kind::Run(command) => Some(command),
                     _ => None,
                 };
-                (item.label.as_str(), item.shortcut, command)
+                (item.label.as_str(), item.shortcut, command, item.enabled, item.checked)
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn the_header_menu_fits_closes_restores_and_shows_or_hides_each_column() {
+        let shown = [true, true, false, true, true, true];
         assert_eq!(
-            lines,
+            lines(&column_menu(1, &shown)),
             [
-                ("Size Column To Fit", None, Some(&Command::FitColumn(2))),
-                ("Size All Columns To Fit", Some("Ctrl+Shift+F"), Some(&Command::FitAllColumns)),
-                ("", None, None),
-                ("Restore Default Columns", None, Some(&Command::RestoreColumns)),
+                ("Size Column To Fit", None, Some(&Command::FitColumn(1)), true, None),
+                ("Size All Columns To Fit", Some("Ctrl+Shift+F"), Some(&Command::FitAllColumns), true, None),
+                ("Close Column", Some("Middle click"), Some(&Command::ToggleColumn(1)), true, None),
+                ("", None, None, false, None),
+                ("Restore Default Columns", None, Some(&Command::RestoreColumns), true, None),
+                ("", None, None, false, None),
+                ("Name", None, Some(&Command::ToggleColumn(0)), false, Some(true)),
+                ("Type", None, Some(&Command::ToggleColumn(1)), true, Some(true)),
+                ("Date Modified", None, Some(&Command::ToggleColumn(2)), true, Some(false)),
+                ("Folders", None, Some(&Command::ToggleColumn(3)), true, Some(true)),
+                ("Files", None, Some(&Command::ToggleColumn(4)), true, Some(true)),
+                ("Size", None, Some(&Command::ToggleColumn(5)), true, Some(true)),
             ]
         );
-        assert!(items.iter().filter(|i| matches!(i.kind, Kind::Run(_))).all(|i| i.enabled));
+        let name = column_menu(0, &shown);
+        let close = name.iter().find(|i| i.label == "Close Column").expect("listed");
+        assert!(!close.enabled, "Name is never closed");
     }
 }
