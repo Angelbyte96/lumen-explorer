@@ -211,7 +211,9 @@ impl ContextMenu {
                             // A fixed column, so labels line up with or without an icon.
                             let side = ui.text_style_height(&egui::TextStyle::Body);
                             let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
-                            if let Some(picture) = &item.picture {
+                            if let Some(checked) = item.checked {
+                                checkbox(ui.painter(), icon_rect.shrink(2.0), checked, color);
+                            } else if let Some(picture) = &item.picture {
                                 let texture = self.textures.entry(row.at.clone()).or_insert_with(|| {
                                     let image = egui::ColorImage::from_rgba_premultiplied(picture.size, &picture.rgba);
                                     ui.ctx().load_texture(format!("lumen_menu_picture_{:?}", row.at), image, egui::TextureOptions::LINEAR)
@@ -248,6 +250,18 @@ impl ContextMenu {
             ui.ctx().request_repaint();
         }
         clicked.and_then(|row| self.menu.click(row))
+    }
+}
+
+/// A box in `rect`, with a tick when `checked`.
+fn checkbox(painter: &egui::Painter, rect: egui::Rect, checked: bool, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.0, color);
+    painter.rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
+    if checked {
+        let at = |x: f32, y: f32| rect.lerp_inside(egui::vec2(x, y));
+        let tick = egui::Stroke::new(1.5, color);
+        painter.line_segment([at(0.22, 0.52), at(0.42, 0.72)], tick);
+        painter.line_segment([at(0.42, 0.72), at(0.78, 0.3)], tick);
     }
 }
 
@@ -344,6 +358,44 @@ mod tests {
         }
         let shown = ctx.data(|d| d.get_temp::<egui::Rect>(list_id())).unwrap();
         assert!(shown.height() < 3.0 * row_rect(&ctx, 0).height(), "two items, no empty space: {shown:?}");
+    }
+
+    #[test]
+    fn a_checkbox_item_draws_a_box_ticked_or_empty_and_a_plain_one_none() {
+        let ctx = egui::Context::default();
+        let items = vec![
+            Item::check("Type", true, true, Command::ToggleColumn(1)),
+            Item::check("Size", false, true, Command::ToggleColumn(5)),
+            Item::run("Refit", None, true, Command::FitAllColumns),
+        ];
+        let mut menu = ContextMenu::new(items, egui::pos2(100.0, 50.0));
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                menu.show(ui.ctx());
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        // In each row's icon column: boxes (stroked rects) and tick strokes.
+        let marks = |row: usize| {
+            let r = row_rect(&ctx, row);
+            let icon = egui::Rect::from_min_max(r.min, egui::pos2(r.left() + 30.0, r.bottom()));
+            let inside = |b: egui::Rect| b.is_finite() && icon.contains_rect(b);
+            let boxes = shapes
+                .iter()
+                .filter(|s| matches!(&s.shape, egui::Shape::Rect(rect) if rect.stroke.width > 0.0 && inside(rect.rect)))
+                .count();
+            let ticks = shapes
+                .iter()
+                .filter(|s| matches!(&s.shape, egui::Shape::LineSegment { .. } | egui::Shape::Path(_)) && inside(s.shape.visual_bounding_rect()))
+                .count();
+            (boxes, ticks)
+        };
+        let (boxes, ticks) = marks(0);
+        assert!(boxes == 1 && ticks > 0, "ticked: {boxes} box, {ticks} tick strokes");
+        assert_eq!(marks(1), (1, 0), "empty box");
+        assert_eq!(marks(2), (0, 0), "no checkbox");
     }
 
     #[test]

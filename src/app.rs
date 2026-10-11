@@ -765,6 +765,8 @@ pub struct LumenApp {
     list_zoom: u8,
     /// The list's column widths.
     columns: ui::file_list::Widths,
+    /// Which list columns are shown.
+    shown_columns: ui::file_list::Shown,
     /// Folder size and counts being computed (Alt+R); one at a time.
     counting: Option<Count>,
     /// Informational line in the status bar ("1 item copied").
@@ -836,6 +838,7 @@ impl LumenApp {
             sidebar_open: true,
             list_zoom: 0,
             columns: ui::file_list::DEFAULT_WIDTHS,
+            shown_columns: ui::file_list::ALL_SHOWN,
             notice: None,
             watcher: Watcher::new({
                 let ctx = ctx.clone();
@@ -876,6 +879,7 @@ impl LumenApp {
         app.preview_open = config.preview;
         app.list_zoom = config.list_zoom;
         app.columns = config.columns;
+        app.shown_columns = config.shown_columns;
         app.bookmarks = Bookmarks::from_paths(config.bookmarks);
         app.window = config.window;
         app.saved = app.settings(true);
@@ -919,6 +923,7 @@ impl LumenApp {
             bookmarks: self.bookmarks.paths().to_vec(),
             list_zoom: self.list_zoom,
             columns: self.columns,
+            shown_columns: self.shown_columns,
             tabs: if with_window { self.session().0 } else { self.saved.tabs.clone() },
             active_tab: if with_window { self.session().1 } else { self.saved.active_tab },
         }
@@ -1222,7 +1227,12 @@ impl LumenApp {
                     self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, self.list_zoom, column);
                 }
             }
-            Command::RestoreColumns => self.columns = ui::file_list::DEFAULT_WIDTHS,
+            Command::RestoreColumns => {
+                self.columns = ui::file_list::DEFAULT_WIDTHS;
+                self.shown_columns = ui::file_list::ALL_SHOWN;
+            }
+            // Name is always shown.
+            Command::ToggleColumn(column) => self.shown_columns[column] = column == 0 || !self.shown_columns[column],
         }
     }
 
@@ -2037,7 +2047,7 @@ impl eframe::App for LumenApp {
         let list = egui::CentralPanel::default_margins().show(ui, |ui| {
             let scroll = self.tab.view.scroll.take();
             let cut = self.cut_paths().to_vec();
-            let sizes = ui::file_list::Sizes { zoom: self.list_zoom, widths: self.columns };
+            let sizes = ui::file_list::Sizes { zoom: self.list_zoom, widths: self.columns, shown: self.shown_columns };
             let event = ui::file_list::show(ui, &self.tab.view, &cut, sizes, scroll, self.rename.as_mut(), &self.file_icons);
             // After drawing: the icons the list just asked for go out this frame.
             self.file_icons.poll(&ctx);
@@ -2056,9 +2066,10 @@ impl eframe::App for LumenApp {
                 }
                 Some(ListEvent::Sort(column)) => self.tab.view.sort_by(column),
                 Some(ListEvent::Resized(widths)) => self.columns = widths,
+                Some(ListEvent::CloseColumn(column)) => self.run_command(&ctx, Command::ToggleColumn(column)),
                 Some(ListEvent::HeaderMenu(column)) => {
                     if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                        self.context_menu = Some(ContextMenu::new(crate::menu::column_menu(column), pos));
+                        self.context_menu = Some(ContextMenu::new(crate::menu::column_menu(column, &self.shown_columns), pos));
                         self.context_on_entry = false;
                     }
                 }
@@ -3207,6 +3218,27 @@ mod tests {
         assert_eq!(app.columns.to_vec(), all, "the menu's Size All Columns To Fit too");
         app.save_settings(false);
         assert_eq!(Config::load(&path).unwrap().columns, app.columns);
+    }
+
+    #[test]
+    fn columns_are_hidden_shown_again_restored_and_saved_but_name_stays() {
+        let (ctx, _, dir) = app_in("app-hide-columns");
+        let path = dir.join("cfg/lumen/config");
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
+        app.run_command(&ctx, Command::ToggleColumn(2));
+        assert_eq!(app.shown_columns, [true, true, false, true, true, true]);
+        app.run_command(&ctx, Command::ToggleColumn(0));
+        assert!(app.shown_columns[0], "Name is never hidden");
+        app.save_settings(false);
+        assert_eq!(Config::load(&path).unwrap().shown_columns, app.shown_columns);
+        app.run_command(&ctx, Command::ToggleColumn(2));
+        assert!(app.shown_columns[2], "shown again");
+        app.shown_columns[4] = false;
+        app.columns[1] = 300.0;
+        app.run_command(&ctx, Command::RestoreColumns);
+        assert_eq!((app.shown_columns, app.columns), (ui::file_list::ALL_SHOWN, ui::file_list::DEFAULT_WIDTHS));
+        let reopened = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
+        assert_eq!(reopened.shown_columns, [true, true, false, true, true, true], "loaded at startup");
     }
 
     #[test]
