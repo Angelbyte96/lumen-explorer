@@ -9,6 +9,7 @@ use eframe::egui;
 
 use crate::config::{Config, Settings};
 use crate::fs::count::{Count, Totals};
+use crate::fs::index::Crawler;
 use crate::fs::watch::Watcher;
 use crate::fs::{self, Entry, Lister, Listing};
 use crate::input::{self, Action, Confirm};
@@ -924,6 +925,11 @@ impl LumenApp {
             Start::Restore => restore_tabs(&settings.config.tabs, settings.config.active_tab, home),
         };
         let mut app = Self::with_config(ctx, tabs[active].clone(), log, settings);
+        // Only here, never in `new`, and not under test: a test must not
+        // crawl the machine.
+        if !cfg!(test) {
+            app.path_popup = PathPopup::with_crawler(start_index(ctx));
+        }
         // The others list when they are first shown (see `select_tab`).
         app.tabs = tabs
             .iter()
@@ -2154,7 +2160,7 @@ impl eframe::App for LumenApp {
         let home = fs::home_dir();
         let shown = self.tab.view.show_hidden;
         let current = self.tab.view.current.clone();
-        if let Some(event) = self.path_popup.show(&ctx, list.response.rect, &current, home.as_deref(), shown) {
+        if let Some(event) = self.path_popup.show(&ctx, list.response.rect, &current, home.as_deref(), shown, || self.visits.scores(unix_now())) {
             self.handle_popup(&ctx, event);
         }
 
@@ -2193,6 +2199,14 @@ impl eframe::App for LumenApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_settings(true);
     }
+}
+
+/// Starts the background crawl of every disk behind the path box's quick jump.
+fn start_index(ctx: &egui::Context) -> Crawler {
+    let disks = places::disks().into_iter().map(|mount| mount.path).collect();
+    let (roots, rules) = fs::index::scope(disks);
+    let ctx = ctx.clone();
+    Crawler::start(roots, rules, move || ctx.request_repaint())
 }
 
 /// What Lumen opens at startup.

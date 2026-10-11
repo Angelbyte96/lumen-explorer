@@ -7,13 +7,13 @@
 //! Measured (release, a million 35-letter names): 25-40 ms a query, 76 ms
 //! for one letter, which matches nearly all.
 
-// The path box uses it from fase-9 T4 on.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, RwLock};
+use std::thread;
 
 use super::index::Index;
 
@@ -23,6 +23,8 @@ pub struct Hit {
     pub id: u32,
     pub path: PathBuf,
     pub is_dir: bool,
+    /// Hidden itself or inside a hidden folder.
+    pub hidden: bool,
     /// Byte ranges of the name that matched; empty for an entry listed
     /// because it is in the first folder found.
     pub ranges: Vec<Range<usize>>,
@@ -202,6 +204,7 @@ pub fn search(index: &Index, query: &str, show_hidden: bool, frecent: &[(PathBuf
             id: f.id,
             path: index.path(f.id),
             is_dir: index.is_dir(f.id),
+            hidden: index.is_hidden(f.id),
             ranges: letters(index.name(f.id), query).unwrap_or_default(),
         })
         .collect();
@@ -212,10 +215,66 @@ pub fn search(index: &Index, query: &str, show_hidden: bool, frecent: &[(PathBuf
             .collect();
         inside.sort_by_cached_key(|&id| (!index.is_dir(id), index.name(id).to_lowercase()));
         for id in inside.into_iter().take(limit - hits.len()) {
-            hits.push(Hit { id, path: index.path(id), is_dir: index.is_dir(id), ranges: Vec::new() });
+            hits.push(Hit { id, path: index.path(id), is_dir: index.is_dir(id), hidden: index.is_hidden(id), ranges: Vec::new() });
         }
     }
     hits
+}
+
+/// What a search found.
+#[derive(Debug)]
+pub struct Answer {
+    pub id: u64,
+    pub hits: Vec<Hit>,
+}
+
+/// Runs searches on their own thread, so typing never waits for one; the
+/// newest request wins, like the lister's. A search takes the index's read
+/// lock, so the crawl goes on meanwhile.
+pub struct Searcher {
+    index: Arc<RwLock<Index>>,
+    tx: Sender<Answer>,
+    rx: Receiver<Answer>,
+    latest_id: u64,
+}
+
+impl Searcher {
+    pub fn new(index: Arc<RwLock<Index>>) -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self { index, tx, rx, latest_id: 0 }
+    }
+
+    /// Starts a search; `on_done` runs on its thread when the answer is ready
+    /// (the UI uses it to request a repaint).
+    pub fn request(&mut self, query: String, show_hidden: bool, frecent: Vec<(PathBuf, f64)>, limit: usize, on_done: impl FnOnce() + Send + 'static) -> u64 {
+        self.latest_id += 1;
+        let id = self.latest_id;
+        let (index, tx) = (self.index.clone(), self.tx.clone());
+        thread::spawn(move || {
+            let hits = search(&index.read().expect("index lock"), &query, show_hidden, &frecent, limit);
+            // The receiver only disappears when the app is closing.
+            let _ = tx.send(Answer { id, hits });
+            on_done();
+        });
+        id
+    }
+
+    /// The newest request's answer once it is ready; older ones are dropped.
+    pub fn poll(&self) -> Option<Answer> {
+        let mut newest = None;
+        while let Ok(answer) = self.rx.try_recv() {
+            if answer.id == self.latest_id {
+                newest = Some(answer);
+            }
+        }
+        newest
+    }
+
+    /// Whether the newest request is still searching, given the id of the
+    /// answer on screen.
+    pub fn is_pending(&self, shown_id: u64) -> bool {
+        shown_id != self.latest_id
+    }
 }
 
 #[cfg(test)]
@@ -299,6 +358,26 @@ mod tests {
         assert_eq!(names(&index, &hits), ["Downloads", "Windows NT", "photos", "song.mp3"]);
         assert!(hits[2].ranges.is_empty(), "listed for its folder, not for a match");
         assert_eq!(search(&index, "down", false, &[], 3).len(), 3);
+    }
+
+    #[test]
+    fn only_the_newest_request_is_answered() {
+        let shared = Arc::new(RwLock::new(index(&["Downloads/", "Windows NT/"])));
+        let mut searcher = Searcher::new(shared.clone());
+        searcher.request("zzz".into(), false, Vec::new(), 10, || {});
+        let newest = searcher.request("down".into(), false, Vec::new(), 10, || {});
+        let start = std::time::Instant::now();
+        let answer = loop {
+            if let Some(answer) = searcher.poll() {
+                break answer;
+            }
+            assert!(start.elapsed().as_secs() < 5, "no answer");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(answer.id, newest, "the old request's answer is dropped");
+        assert_eq!(names(&shared.read().unwrap(), &answer.hits), ["Downloads", "Windows NT"]);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(searcher.poll().is_none(), "nothing else arrives");
     }
 
     #[test]

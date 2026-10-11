@@ -8,9 +8,6 @@
 //! Measured on a Linux laptop: 1.3 million entries, about 66 MB, crawled in
 //! 23 s from a cold disk cache and 2 s from a warm one.
 
-// The path box uses it from fase-9 T4 on.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -239,8 +236,21 @@ impl Crawler {
     }
 
     /// The entries found so far; readable while the crawl goes on.
-    pub fn index(&self) -> &RwLock<Index> {
+    pub fn index(&self) -> &Arc<RwLock<Index>> {
         &self.index
+    }
+
+    /// A crawler over `index` with no thread behind it, finished or still
+    /// going as `done` says: tests need a crawl whose state they control.
+    #[cfg(test)]
+    pub fn fixed(index: Index, done: bool) -> Self {
+        Self { index: Arc::new(RwLock::new(index)), done: Arc::new(AtomicBool::new(done)), cancel: Arc::new(AtomicBool::new(false)) }
+    }
+
+    /// Ends a [`Crawler::fixed`] crawl.
+    #[cfg(test)]
+    pub fn finish(&self) {
+        self.done.store(true, Ordering::Release);
     }
 
     pub fn is_done(&self) -> bool {
