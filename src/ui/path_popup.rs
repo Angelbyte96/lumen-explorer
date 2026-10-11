@@ -5,11 +5,18 @@
 //! first match is picked); Up/Down pick
 //! a row, Enter uses it (or the typed path), Tab completes it, Ctrl+Enter opens
 //! it in a new tab, Escape closes.
+//!
+//! A word with no path ("down", no separator) is the quick jump instead: it
+//! lists matches from the whole index, visited folders first, each with its
+//! folder; the rows work the same way.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
+use crate::fs::index::Crawler;
+use crate::fs::search::{Hit, Searcher};
 use crate::fs::{self, Entry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +68,96 @@ enum Cursor {
 /// Rows shown before the list scrolls.
 const VISIBLE_ROWS: f32 = 10.0;
 
+/// Global results kept: more than a person scrolls through.
+const RESULTS: usize = 50;
+
+/// How often the results are searched again while the crawl goes on.
+const REFRESH_SECS: f64 = 0.5;
+
+/// One row of the list: a folder's entry, or a hit of the whole index.
+struct Row {
+    entry: Entry,
+    /// Name letters to mark.
+    ranges: Vec<Range<usize>>,
+    /// The folder it is in, shown beside a global hit.
+    parent: Option<PathBuf>,
+}
+
+impl Row {
+    fn of_hit(hit: &Hit) -> Self {
+        let name = hit.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let entry = Entry { name, path: hit.path.clone(), is_dir: hit.is_dir, size: None, modified: None, hidden: hit.hidden };
+        Self { entry, ranges: hit.ranges.clone(), parent: hit.path.parent().map(Path::to_path_buf) }
+    }
+}
+
+/// What the last search asked, to know when to ask again.
+struct Asked {
+    query: String,
+    show_hidden: bool,
+    /// Entries indexed and whether the crawl was over when it was asked.
+    items: usize,
+    done: bool,
+    at: f64,
+}
+
+/// The quick jump: the crawl and the searches over what it finds.
+struct Jump {
+    crawler: Crawler,
+    searcher: Searcher,
+    asked: Option<Asked>,
+    /// The request whose answer `hits` holds.
+    shown: u64,
+    hits: Vec<Hit>,
+    /// Entries indexed so far, for the progress line.
+    items: usize,
+}
+
+impl Jump {
+    fn new(crawler: Crawler) -> Self {
+        let searcher = Searcher::new(crawler.index().clone());
+        Self { crawler, searcher, asked: None, shown: 0, hits: Vec::new(), items: 0 }
+    }
+
+    /// Takes in a finished search and asks again when `query` changed or the
+    /// crawl found more (at most twice a second) or ended since the last one.
+    /// Returns whether an answer for the latest ask is still due.
+    fn refresh(&mut self, ctx: &egui::Context, query: &str, show_hidden: bool, frecent: impl FnOnce() -> Vec<(PathBuf, f64)>) -> bool {
+        if let Some(answer) = self.searcher.poll() {
+            self.shown = answer.id;
+            self.hits = answer.hits;
+        }
+        // Never wait for the crawl's write lock on the UI thread.
+        if let Ok(index) = self.crawler.index().try_read() {
+            self.items = index.len();
+        }
+        let done = self.crawler.is_done();
+        let now = ctx.input(|i| i.time);
+        let stale = self.asked.as_ref().is_none_or(|a| {
+            a.query != query || a.show_hidden != show_hidden || (!a.done && (done || (self.items > a.items && now - a.at >= REFRESH_SECS)))
+        });
+        if stale {
+            let repaint = ctx.clone();
+            self.searcher.request(query.to_owned(), show_hidden, frecent(), RESULTS, move || repaint.request_repaint());
+            self.asked = Some(Asked { query: query.to_owned(), show_hidden, items: self.items, done, at: now });
+        }
+        if !done {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(REFRESH_SECS));
+        }
+        self.searcher.is_pending(self.shown)
+    }
+
+    /// How many entries are indexed while the crawl is still going.
+    fn indexing(&self) -> Option<usize> {
+        (!self.crawler.is_done()).then_some(self.items)
+    }
+
+    fn reset(&mut self) {
+        self.asked = None;
+        self.hits.clear();
+    }
+}
+
 #[derive(Default)]
 pub struct PathPopup {
     open: bool,
@@ -74,9 +171,24 @@ pub struct PathPopup {
     picked: Option<usize>,
     /// The folder last listed and what it holds (or why it could not be read).
     listing: Option<(PathBuf, Result<Vec<Entry>, String>)>,
+    /// The quick jump; without it a word with no path filters the folder.
+    jump: Option<Jump>,
+    /// Keys that use a row, pressed while its answer was still being searched.
+    held: Keys,
 }
 
 impl PathPopup {
+    /// A box whose words with no path search what `crawler` indexes.
+    pub fn with_crawler(crawler: Crawler) -> Self {
+        Self { jump: Some(Jump::new(crawler)), ..Self::default() }
+    }
+
+    /// Whether the latest search has not answered yet.
+    #[cfg(test)]
+    pub fn is_searching(&self) -> bool {
+        self.jump.as_ref().is_some_and(|j| j.searcher.is_pending(j.shown))
+    }
+
     pub fn open(&mut self) {
         self.open = true;
         self.filled_from = None;
@@ -100,6 +212,10 @@ impl PathPopup {
     fn close(&mut self) {
         self.open = false;
         self.listing = None;
+        self.held = Keys::default();
+        if let Some(jump) = &mut self.jump {
+            jump.reset();
+        }
     }
 
     /// What is in `folder`, read again only when the folder changes.
@@ -119,6 +235,7 @@ impl PathPopup {
         current: &Path,
         home: Option<&Path>,
         show_hidden: bool,
+        frecent: impl FnOnce() -> Vec<(PathBuf, f64)>,
     ) -> Option<PopupEvent> {
         if !self.open {
             return None;
@@ -128,7 +245,7 @@ impl PathPopup {
             // Selected, like File Pilot: typing a name replaces the path.
             self.set_text(initial_text(current), Cursor::SelectAll);
         }
-        let keys = Keys::read(ctx);
+        let mut keys = Keys::read(ctx);
         if keys.escape {
             self.close();
             return None;
@@ -137,12 +254,40 @@ impl PathPopup {
         let (folder_text, typed) = split_input(&self.text);
         let (folder_text, typed) = (folder_text.to_owned(), typed.to_owned());
         let folder = fs::resolve_input_path(&folder_text, current, home);
-        let entries = match self.entries(&folder) {
-            Ok(entries) => entries.clone(),
-            Err(_) => Vec::new(),
+        let global = is_bare_word(&self.text);
+        let mut error = None;
+        let mut indexing = None;
+        let rows: Vec<Row> = match &mut self.jump {
+            Some(jump) if global => {
+                let pending = jump.refresh(ctx, self.text.trim(), show_hidden, frecent);
+                indexing = jump.indexing();
+                if pending {
+                    // A key that uses a row waits for the answer, or it would
+                    // use a row of the word before.
+                    self.held.tab |= std::mem::take(&mut keys.tab);
+                    self.held.enter |= std::mem::take(&mut keys.enter);
+                    self.held.ctrl_enter |= std::mem::take(&mut keys.ctrl_enter);
+                } else {
+                    let held = std::mem::take(&mut self.held);
+                    keys.tab |= held.tab;
+                    keys.enter |= held.enter;
+                    keys.ctrl_enter |= held.ctrl_enter;
+                }
+                jump.hits.iter().map(Row::of_hit).collect()
+            }
+            _ => {
+                self.held = Keys::default();
+                let entries = match self.entries(&folder) {
+                    Ok(entries) => entries.clone(),
+                    Err(_) => Vec::new(),
+                };
+                error = self.listing.as_ref().and_then(|(_, r)| r.as_ref().err().cloned());
+                matches(&entries, &typed, show_hidden)
+                    .into_iter()
+                    .map(|i| Row { ranges: word_ranges(&entries[i].name, &typed).unwrap_or_default(), entry: entries[i].clone(), parent: None })
+                    .collect()
+            }
         };
-        let error = self.listing.as_ref().and_then(|(_, r)| r.as_ref().err().cloned());
-        let rows = matches(&entries, &typed, show_hidden);
         // A typed name picks its first match, so typing it and Enter opens it.
         let first = (!typed.is_empty() && !rows.is_empty()).then_some(0);
 
@@ -154,16 +299,20 @@ impl PathPopup {
         }
         let picked = self.picked.or(first);
         if keys.tab
-            && let Some(&row) = rows.get(picked.unwrap_or(0))
+            && let Some(row) = rows.get(picked.unwrap_or(0))
         {
             // The full path, also when only a name was typed.
-            let folder_text = if folder_text.is_empty() { initial_text(current) } else { folder_text };
-            self.set_text(complete(&folder_text, &entries[row]), Cursor::End);
+            let prefix = match &row.parent {
+                Some(parent) => initial_text(parent),
+                None if folder_text.is_empty() => initial_text(current),
+                None => folder_text,
+            };
+            self.set_text(complete(&prefix, &row.entry), Cursor::End);
             return None;
         }
         if keys.enter || keys.ctrl_enter {
             let (path, select) = match picked.and_then(|p| rows.get(p)) {
-                Some(&row) => entry_target(&entries[row]),
+                Some(row) => entry_target(&row.entry),
                 None => typed_target(&self.text, current, home),
             };
             self.close();
@@ -233,6 +382,9 @@ impl PathPopup {
                     });
                 });
                 ui.separator();
+                if let Some(items) = indexing {
+                    ui.weak(format!("Indexing… {items} items"));
+                }
                 let row_height = ui.spacing().interact_size.y;
                 egui::ScrollArea::vertical()
                     .max_height(VISIBLE_ROWS * row_height)
@@ -240,11 +392,11 @@ impl PathPopup {
                     .show(ui, |ui| {
                         if let Some(error) = &error {
                             ui.weak(error);
-                        } else if rows.is_empty() {
+                        } else if rows.is_empty() && !(global && indexing.is_some()) {
                             ui.weak("Nothing here matches");
                         }
-                        for (shown, &row) in rows.iter().enumerate() {
-                            let entry = &entries[row];
+                        for (shown, row) in rows.iter().enumerate() {
+                            let entry = &row.entry;
                             let picked = picked == Some(shown);
                             let line = egui::UiBuilder::new().id(row_id(shown)).sense(egui::Sense::click());
                             let response = ui
@@ -255,7 +407,17 @@ impl PathPopup {
                                         ui.set_min_width(ui.available_width());
                                         ui.horizontal(|ui| {
                                             crate::ui::icons::show(ui, entry, ui.text_style_height(&egui::TextStyle::Body), None);
-                                            crate::ui::file_list::name_label(ui, entry, &typed);
+                                            match &row.parent {
+                                                // The name keeps its half of the row, so the folders line up.
+                                                Some(parent) => {
+                                                    let size = egui::vec2(ui.available_width() / 2.0, ui.text_style_height(&egui::TextStyle::Body));
+                                                    ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                                        crate::ui::file_list::ranged_name_label(ui, entry, &row.ranges);
+                                                    });
+                                                    ui.add(egui::Label::new(egui::RichText::new(parent.display().to_string()).weak()).selectable(false).truncate());
+                                                }
+                                                None => crate::ui::file_list::ranged_name_label(ui, entry, &row.ranges),
+                                            }
                                         });
                                     });
                                 })
@@ -337,6 +499,14 @@ pub fn button_id(name: &str) -> egui::Id {
 pub fn initial_text(current: &Path) -> String {
     let text = current.display().to_string();
     if text.ends_with(std::path::MAIN_SEPARATOR) { text } else { text + std::path::MAIN_SEPARATOR_STR }
+}
+
+/// Whether the text is a word with no path, searched in every folder.
+fn is_bare_word(text: &str) -> bool {
+    let text = text.trim();
+    // "C:" names a drive on Windows; "." and ".." go to a folder, as before.
+    let drive = cfg!(windows) && matches!(text.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic());
+    !text.is_empty() && !text.contains(['/', '\\']) && !text.starts_with('~') && !drive && !matches!(text, "." | "..")
 }
 
 /// Splits the text after its last separator: the folder part (kept with its
@@ -495,7 +665,7 @@ mod tests {
     }
 
     fn step(ctx: &egui::Context, popup: &mut PathPopup, dir: &Path, events: Vec<Event>) -> Option<PopupEvent> {
-        frame(ctx, events, |ui| popup.show(ui.ctx(), SCREEN, dir, None, false))
+        frame(ctx, events, |ui| popup.show(ui.ctx(), SCREEN, dir, None, false, Vec::new))
     }
 
     fn go(path: PathBuf, select: Option<&str>, new_tab: bool) -> Option<PopupEvent> {
@@ -534,7 +704,7 @@ mod tests {
         let (ctx, mut popup, dir) = opened("popup-centre");
         let list = egui::Rect::from_min_max(egui::pos2(200.0, 60.0), SCREEN.max);
         for _ in 0..3 {
-            frame(&ctx, vec![], |ui| popup.show(ui.ctx(), list, &dir, None, false));
+            frame(&ctx, vec![], |ui| popup.show(ui.ctx(), list, &dir, None, false, Vec::new));
         }
         let area = ctx.memory(|m| m.area_rect(egui::Id::new("lumen_path_popup_area"))).expect("shown");
         assert!((area.center().x - SCREEN.center().x).abs() < 1.0, "centred: {area:?}");
@@ -562,7 +732,7 @@ mod tests {
         step(&ctx, &mut popup, &dir, vec![]);
         let row = ctx.read_response(row_id(1)).expect("drawn").rect.center(); // sub/, a.txt, b.txt
         assert_eq!(
-            click(&ctx, row, |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false)),
+            click(&ctx, row, |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false, Vec::new)),
             Some(PopupEvent::Open(dir.join("a.txt")))
         );
         assert!(!popup.is_open());
@@ -591,6 +761,247 @@ mod tests {
         assert_eq!(used, go(dir.join("sub"), None, true));
     }
 
+    use crate::fs::index::{Index, Rules, crawl};
+    use eframe::egui::{Color32, epaint::ClippedShape};
+
+    /// One frame with these events, and what it painted.
+    fn shown(ctx: &egui::Context, popup: &mut PathPopup, dir: &Path, events: Vec<Event>, frecent: &[(PathBuf, f64)]) -> (Option<PopupEvent>, Vec<ClippedShape>) {
+        let mut event = None;
+        let input = egui::RawInput { events, screen_rect: Some(SCREEN), ..egui::RawInput::default() };
+        let mut output = ctx.run_ui(input, |root| {
+            egui::CentralPanel::default().show(root, |ui| event = popup.show(ui.ctx(), SCREEN, dir, None, false, || frecent.to_vec()));
+        });
+        output.textures_delta.clear();
+        (event, output.shapes)
+    }
+
+    /// Types `query` and runs frames until the search it started has answered;
+    /// returns what one more frame painted (rows are read back from the frame before).
+    fn typed(ctx: &egui::Context, popup: &mut PathPopup, dir: &Path, query: &str, frecent: &[(PathBuf, f64)]) -> Vec<ClippedShape> {
+        shown(ctx, popup, dir, vec![text(query)], frecent);
+        answered(ctx, popup, dir, frecent)
+    }
+
+    /// Runs frames until the search asked for has answered.
+    fn answered(ctx: &egui::Context, popup: &mut PathPopup, dir: &Path, frecent: &[(PathBuf, f64)]) -> Vec<ClippedShape> {
+        for _ in 0..400 {
+            shown(ctx, popup, dir, vec![], frecent);
+            if !popup.is_searching() {
+                return shown(ctx, popup, dir, vec![], frecent).1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the search never answered");
+    }
+
+    /// What was painted inside row `i`, left to right: each text with its
+    /// pieces and their colours.
+    type RowTexts = Vec<(String, Vec<(String, Color32)>)>;
+
+    fn rows(ctx: &egui::Context, shapes: &[ClippedShape]) -> Vec<RowTexts> {
+        let mut rows = Vec::new();
+        while let Some(response) = ctx.read_response(row_id(rows.len())) {
+            let mut texts: Vec<_> = shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if response.rect.contains(t.pos) => Some(t),
+                    _ => None,
+                })
+                .collect();
+            texts.sort_by(|a, b| a.pos.x.total_cmp(&b.pos.x));
+            rows.push(
+                texts
+                    .iter()
+                    .map(|t| {
+                        let job = &t.galley.job;
+                        let pieces = job.sections.iter().map(|s| (job.text[s.byte_range.start.0..s.byte_range.end.0].to_string(), s.format.color));
+                        (t.galley.text().to_string(), pieces.collect())
+                    })
+                    .collect(),
+            );
+        }
+        rows
+    }
+
+    fn painted_texts(shapes: &[ClippedShape]) -> Vec<String> {
+        shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The names in the global rows.
+    fn names(ctx: &egui::Context, shapes: &[ClippedShape]) -> Vec<String> {
+        rows(ctx, shapes).iter().map(|r| r[0].0.clone()).collect()
+    }
+
+    /// The box opened over a small crawled tree: Downloads/ (song.mp3), Windows NT/,
+    /// docs/ (down-notes.txt, win-notes.txt), readme.md. `done`: whether the
+    /// crawl counts as finished. Also the number of entries indexed.
+    fn indexed(name: &str, done: bool) -> (egui::Context, PathPopup, PathBuf, usize) {
+        let dir = crate::fs::ops::tests::fresh_fixture(name);
+        for folder in ["Downloads", "Windows NT", "docs"] {
+            std::fs::create_dir(dir.join(folder)).unwrap();
+        }
+        for file in ["Downloads/song.mp3", "docs/down-notes.txt", "docs/win-notes.txt", "readme.md"] {
+            std::fs::write(dir.join(file), "x").unwrap();
+        }
+        let index = std::sync::RwLock::new(Index::default());
+        crawl(std::slice::from_ref(&dir), &Rules::default(), &index, &std::sync::atomic::AtomicBool::new(false));
+        let index = index.into_inner().unwrap();
+        let entries = index.len();
+        let ctx = egui::Context::default();
+        let mut popup = PathPopup::with_crawler(Crawler::fixed(index, done));
+        popup.open();
+        step(&ctx, &mut popup, &dir, vec![]);
+        (ctx, popup, dir, entries)
+    }
+
+    #[test]
+    fn only_a_word_with_no_path_is_searched_in_every_folder() {
+        assert!(is_bare_word("downloads"));
+        assert!(is_bare_word("  down nt "), "several words are still no path");
+        assert!(!is_bare_word(""));
+        assert!(!is_bare_word("sub/"));
+        assert!(!is_bare_word(r"a\b"));
+        assert!(!is_bare_word("/home/u/"));
+        assert!(!is_bare_word("~"));
+        assert!(!is_bare_word("~/Do"));
+        assert!(!is_bare_word(".."), "up one folder, as before");
+        assert_eq!(is_bare_word("C:"), cfg!(not(windows)), "a bare drive is a path on Windows");
+    }
+
+    #[test]
+    fn a_word_with_no_path_lists_matches_from_every_folder_visited_first_with_letters_marked_and_the_parent_weaker() {
+        let (ctx, mut popup, dir, _) = indexed("popup-global", true);
+        let frecent = [(dir.join("Windows NT"), 5.0)];
+        let shapes = typed(&ctx, &mut popup, &dir, "down", &frecent);
+        assert_eq!(names(&ctx, &shapes), ["Windows NT", "Downloads", "down-notes.txt"], "the visited folder, then the best matches");
+        let visuals = ctx.global_style().visuals.clone();
+        let rows = rows(&ctx, &shapes);
+        let marked = |row: &RowTexts| row[0].1.iter().filter(|(_, c)| *c == visuals.hyperlink_color).map(|(p, _)| p.clone()).collect::<Vec<_>>();
+        assert_eq!(marked(&rows[0]), ["dow", "N"], "letters apart are marked apart");
+        assert_eq!(marked(&rows[1]), ["Down"]);
+        assert_eq!(rows[1][1].0, dir.display().to_string(), "each row also shows its folder");
+        assert_eq!(rows[2][1].0, dir.join("docs").display().to_string());
+        assert_eq!(rows[1][1].1[0].1, visuals.weak_text_color(), "weaker than the name");
+    }
+
+    #[test]
+    fn a_typed_path_still_filters_that_folder() {
+        let (ctx, mut popup, dir, _) = indexed("popup-global-path", true);
+        let shapes = typed(&ctx, &mut popup, &dir, &format!("{}/win", dir.display()), &[]);
+        let rows = rows(&ctx, &shapes);
+        assert_eq!(rows.len(), 1, "only that folder's match, not docs/win-notes.txt");
+        assert_eq!(rows[0].iter().map(|t| t.0.as_str()).collect::<Vec<_>>(), ["Windows NT"], "no parent folder on a folder row");
+        let used = step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert_eq!(used, go(dir.join("Windows NT"), None, false));
+    }
+
+    #[test]
+    fn enter_uses_a_global_row_a_folder_opens_and_a_file_opens_in_its_app() {
+        let (ctx, mut popup, dir, _) = indexed("popup-global-enter", true);
+        typed(&ctx, &mut popup, &dir, "down", &[]);
+        let used = step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert_eq!(used, go(dir.join("Downloads"), None, false), "the first row is picked");
+        assert!(!popup.is_open());
+        popup.open();
+        step(&ctx, &mut popup, &dir, vec![]);
+        typed(&ctx, &mut popup, &dir, "down", &[]);
+        step(&ctx, &mut popup, &dir, vec![key(Key::ArrowDown, Modifiers::NONE)]);
+        let used = step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert_eq!(used, Some(PopupEvent::Open(dir.join("docs/down-notes.txt"))));
+    }
+
+    #[test]
+    fn ctrl_enter_opens_a_global_row_in_a_new_tab_a_file_with_its_folder_selected() {
+        let (ctx, mut popup, dir, _) = indexed("popup-global-ctrl", true);
+        typed(&ctx, &mut popup, &dir, "down", &[]);
+        step(&ctx, &mut popup, &dir, vec![key(Key::ArrowDown, Modifiers::NONE)]);
+        let used = step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::COMMAND)]);
+        assert_eq!(used, go(dir.join("docs"), Some("down-notes.txt"), true));
+        popup.open();
+        step(&ctx, &mut popup, &dir, vec![]);
+        typed(&ctx, &mut popup, &dir, "down", &[]);
+        let used = step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::COMMAND)]);
+        assert_eq!(used, go(dir.join("Downloads"), None, true));
+    }
+
+    #[test]
+    fn tab_completes_to_the_full_path_of_a_global_row_with_a_separator_after_a_folder() {
+        let (ctx, mut popup, dir, _) = indexed("popup-global-tab", true);
+        let sep = std::path::MAIN_SEPARATOR;
+        typed(&ctx, &mut popup, &dir, "down", &[]);
+        step(&ctx, &mut popup, &dir, vec![key(Key::Tab, Modifiers::NONE)]);
+        assert_eq!(popup.text(), format!("{}{sep}Downloads{sep}", dir.display()));
+        assert!(popup.is_open(), "Tab does not leave the box");
+        popup.open();
+        step(&ctx, &mut popup, &dir, vec![]);
+        typed(&ctx, &mut popup, &dir, "down", &[]);
+        step(&ctx, &mut popup, &dir, vec![key(Key::ArrowDown, Modifiers::NONE)]);
+        step(&ctx, &mut popup, &dir, vec![key(Key::Tab, Modifiers::NONE)]);
+        assert_eq!(popup.text(), format!("{}{sep}docs{sep}down-notes.txt", dir.display()), "a file gets no separator");
+    }
+
+    #[test]
+    fn a_click_on_a_global_row_uses_it() {
+        let (ctx, mut popup, dir, _) = indexed("popup-global-click", true);
+        typed(&ctx, &mut popup, &dir, "down", &[]);
+        let row = ctx.read_response(row_id(1)).expect("drawn").rect.center();
+        let used = click(&ctx, row, |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false, Vec::new));
+        assert_eq!(used, Some(PopupEvent::Open(dir.join("docs/down-notes.txt"))));
+        assert!(!popup.is_open());
+    }
+
+    #[test]
+    fn the_indexing_line_and_partial_results_show_while_the_crawl_runs_and_the_line_goes_when_done() {
+        let (ctx, mut popup, dir, entries) = indexed("popup-global-indexing", false);
+        let shapes = typed(&ctx, &mut popup, &dir, "down", &[]);
+        assert!(painted_texts(&shapes).contains(&format!("Indexing… {entries} items")), "{:?}", painted_texts(&shapes));
+        assert_eq!(names(&ctx, &shapes)[0], "Downloads", "what is found so far is listed");
+        let (ctx, mut popup, dir, _) = indexed("popup-global-indexed", true);
+        let shapes = typed(&ctx, &mut popup, &dir, "down", &[]);
+        assert!(painted_texts(&shapes).iter().all(|t| !t.starts_with("Indexing")), "{:?}", painted_texts(&shapes));
+        assert_eq!(names(&ctx, &shapes)[0], "Downloads");
+    }
+
+    #[test]
+    fn the_results_are_searched_again_when_the_crawl_ends() {
+        let (ctx, mut popup, dir, _) = indexed("popup-global-finishes", false);
+        let shapes = typed(&ctx, &mut popup, &dir, "down", &[]);
+        assert!(!names(&ctx, &shapes).contains(&"download-stash".to_string()));
+        {
+            // The crawl finds one more folder and ends.
+            let crawler = &popup.jump.as_ref().expect("with a crawl").crawler;
+            crawler.index().write().unwrap().add(Some(0), "download-stash", true);
+            crawler.finish();
+        }
+        let shapes = answered(&ctx, &mut popup, &dir, &[]);
+        assert!(names(&ctx, &shapes).contains(&"download-stash".to_string()), "{:?}", names(&ctx, &shapes));
+        assert!(painted_texts(&shapes).iter().all(|t| !t.starts_with("Indexing")), "the line goes with the crawl");
+    }
+
+    #[test]
+    fn enter_pressed_before_the_answer_lands_uses_the_answer_not_the_word_before() {
+        let (ctx, mut popup, dir, _) = indexed("popup-global-held", true);
+        shown(&ctx, &mut popup, &dir, vec![text("down")], &[]);
+        let (used, _) = shown(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::NONE)], &[]);
+        assert_eq!(used, None, "the search is still running");
+        assert!(popup.is_open());
+        let mut used = None;
+        for _ in 0..400 {
+            used = shown(&ctx, &mut popup, &dir, vec![], &[]).0;
+            if used.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(used, go(dir.join("Downloads"), None, false));
+    }
+
     #[test]
     fn escape_or_a_click_outside_closes_without_going() {
         let (ctx, mut popup, dir) = opened("popup-esc");
@@ -601,7 +1012,7 @@ mod tests {
         step(&ctx, &mut popup, &dir, vec![]);
         assert_eq!(popup.text(), initial_text(&dir), "opened again: the path, not the old text");
         let outside = SCREEN.left_bottom() + egui::vec2(5.0, -5.0);
-        assert_eq!(click(&ctx, outside, |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false)), None);
+        assert_eq!(click(&ctx, outside, |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false, Vec::new)), None);
         assert!(!popup.is_open());
     }
 
@@ -610,16 +1021,16 @@ mod tests {
         let (ctx, mut popup, dir) = opened("popup-click");
         let at = |id| ctx.read_response(id).expect("drawn").rect.center();
         let up = at(button_id("up"));
-        click(&ctx, up, |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false));
+        click(&ctx, up, |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false, Vec::new));
         assert_eq!(popup.text(), initial_text(dir.parent().unwrap()), "↑ edits the field to the parent");
         assert!(popup.is_open());
         let back = at(button_id("back"));
-        assert_eq!(click(&ctx, back, |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false)), Some(PopupEvent::Back));
+        assert_eq!(click(&ctx, back, |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false, Vec::new)), Some(PopupEvent::Back));
         popup.open();
         step(&ctx, &mut popup, &dir, vec![]);
         step(&ctx, &mut popup, &dir, vec![]);
         let row = at(row_id(0)); // sub/, folders first
-        assert_eq!(click(&ctx, row, |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false)), go(dir.join("sub"), None, false));
+        assert_eq!(click(&ctx, row, |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false, Vec::new)), go(dir.join("sub"), None, false));
     }
 
     #[test]

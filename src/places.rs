@@ -117,7 +117,6 @@ impl Visits {
     }
 
     /// Every folder's score at `now`.
-    #[cfg_attr(not(test), allow(dead_code))] // the quick jump uses it from fase-9 T4 on
     pub fn scores(&self, now: u64) -> Vec<(PathBuf, f64)> {
         self.list.iter().map(|v| (v.path.clone(), faded(v, now))).collect()
     }
