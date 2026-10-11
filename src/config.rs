@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::app::{Sort, SortColumn};
-use crate::ui::file_list::{ALL_SHOWN, DEFAULT_WIDTHS, MAX_ZOOM, MIN_WIDTH, Shown, Widths};
+use crate::ui::file_list::{ALL_SHOWN, DEFAULT_ORDER, DEFAULT_WIDTHS, MAX_ZOOM, MIN_WIDTH, Order, Shown, Widths};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -27,6 +27,8 @@ pub struct Config {
     pub columns: Widths,
     /// Which of the list's columns are shown.
     pub shown_columns: Shown,
+    /// The list's columns from left to right.
+    pub column_order: Order,
 }
 
 impl Default for Config {
@@ -43,6 +45,7 @@ impl Default for Config {
             active_tab: 0,
             columns: DEFAULT_WIDTHS,
             shown_columns: ALL_SHOWN,
+            column_order: DEFAULT_ORDER,
         }
     }
 }
@@ -73,6 +76,7 @@ impl Config {
                 "active_tab" => config.active_tab = value.parse().unwrap_or(config.active_tab),
                 "columns" => config.columns = parse_widths(value).unwrap_or(config.columns),
                 "hidden_columns" => config.shown_columns = parse_hidden(value),
+                "column_order" => config.column_order = parse_order(value).unwrap_or(config.column_order),
                 _ => {}
             }
         }
@@ -97,6 +101,10 @@ impl Config {
         let hidden: Vec<&str> = SORT_COLUMNS.into_iter().zip(self.shown_columns).filter(|(_, shown)| !shown).map(|(c, _)| column_name(c)).collect();
         if !hidden.is_empty() {
             text += &format!("hidden_columns = {}\n", hidden.join(" "));
+        }
+        if self.column_order != DEFAULT_ORDER {
+            let order: Vec<&str> = self.column_order.iter().map(|&c| column_name(SORT_COLUMNS[c])).collect();
+            text += &format!("column_order = {}\n", order.join(" "));
         }
         for path in self.bookmarks.iter().filter_map(|p| one_line(p)) {
             text += &format!("bookmark = {path}\n");
@@ -148,6 +156,9 @@ impl Config {
         }
         if before.shown_columns != after.shown_columns {
             merged.shown_columns = after.shown_columns;
+        }
+        if before.column_order != after.column_order {
+            merged.column_order = after.column_order;
         }
         if (&before.tabs, before.active_tab) != (&after.tabs, after.active_tab) {
             (merged.tabs, merged.active_tab) = (after.tabs.clone(), after.active_tab);
@@ -298,6 +309,18 @@ fn parse_hidden(value: &str) -> Shown {
     shown
 }
 
+/// Every column's name once, left to right.
+fn parse_order(value: &str) -> Option<Order> {
+    let order: Vec<usize> = value
+        .split_whitespace()
+        .map(|word| SORT_COLUMNS.into_iter().position(|c| column_name(c) == word))
+        .collect::<Option<_>>()?;
+    let order: Order = order.try_into().ok()?;
+    let mut sorted = order;
+    sorted.sort_unstable();
+    (sorted == DEFAULT_ORDER).then_some(order)
+}
+
 /// One width per column, separated by spaces; one too narrow gets the minimum.
 fn parse_widths(value: &str) -> Option<Widths> {
     let widths: Vec<f32> = value.split_whitespace().map(|w| w.parse().ok()).collect::<Option<_>>()?;
@@ -341,6 +364,7 @@ mod tests {
             active_tab: 1,
             columns: [250.0, 90.0, 140.0, 55.0, 60.0, 95.0],
             shown_columns: [true, false, true, true, false, true],
+            column_order: [1, 0, 2, 3, 5, 4],
         }
     }
 
@@ -353,6 +377,7 @@ mod tests {
         assert!(text.contains("list_zoom = 2\n"), "{text}");
         assert!(text.contains("columns = 250 90 140 55 60 95\n"), "{text}");
         assert!(text.contains("hidden_columns = type files\n"), "{text}");
+        assert!(text.contains("column_order = type name modified folders size files\n"), "{text}");
         assert!(text.contains("bookmark = /srv/my files\n"), "{text}");
         assert!(text.contains("tab = /home/u\ntab = /srv/my files\nactive_tab = 1\n"), "{text}");
         assert_eq!(Config::parse(&text), sample());
@@ -446,6 +471,26 @@ bookmark =
         let after = Config { shown_columns: parsed, ..before.clone() };
         assert_eq!(Config::merge(&before, &before, &after).shown_columns, parsed);
         assert_eq!(Config::merge(&after, &before, &before).shown_columns, parsed, "another window's stays");
+    }
+
+    #[test]
+    fn a_column_order_that_is_not_every_column_once_keeps_the_default() {
+        assert!(!Config::default().to_text().contains("column_order"), "default order: no line");
+        assert_eq!(Config::parse("list_zoom = 1\n").column_order, DEFAULT_ORDER, "an older file");
+        for bad in [
+            "column_order = type name modified folders files",
+            "column_order = type name modified folders files size size",
+            "column_order = type type modified folders files size",
+            "column_order = type name bogus folders files size",
+        ] {
+            assert_eq!(Config::parse(bad).column_order, DEFAULT_ORDER, "{bad:?}");
+        }
+        let order = Config::parse("column_order = size files folders modified type name").column_order;
+        assert_eq!(order, [5, 4, 3, 2, 1, 0]);
+        let before = Config::default();
+        let after = Config { column_order: order, ..before.clone() };
+        assert_eq!(Config::merge(&before, &before, &after).column_order, order);
+        assert_eq!(Config::merge(&after, &before, &before).column_order, order, "another window's stays");
     }
 
     #[test]
