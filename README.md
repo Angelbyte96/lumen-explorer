@@ -108,6 +108,7 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 | Alt+R | Count the selected folder: its size and how many folders and files it holds, all the way down (runs in the background; symlinks are not followed and other disks are not entered). Folders show `--` until counted; the result stays while you are in this folder |
 | Ctrl+Plus / Ctrl+Minus, Ctrl+wheel | Bigger / smaller icons and rows in the list (5 sizes); the text, side panel and toolbar keep their size |
 | Ctrl+0 | Icons and rows back to the normal size |
+| Ctrl+Shift+F | Size every list column to fit its content (also in the header's right-click menu) |
 | Esc | Clear the filter; with an empty filter, drop a multiple selection, then stop the Alt+R count, then cancel the copy or move in progress with the entries still waiting, then forget a cut waiting to be pasted (holding it stops at the first thing it undid) |
 
 Each tab keeps its own folder, history, filter and selection; a tab is reloaded when you come back to it.
@@ -116,7 +117,7 @@ The side panel on the left (☰ shows or hides it) lists your **Bookmarks** (rig
 
 The toolbar has back, forward and up buttons, the bookmark star and the current path as crumbs (`angelbyte › Descargas`): click a crumb to go there. Inside your home folder the crumbs start at it; elsewhere they start at `/`.
 
-The list and the folder preview show Name, Type, Date Modified, Folders, Files and Size. Click a header to sort by that column; click it again to reverse. Folders always stay on top; counted folders sort by their totals.
+The list and the folder preview show Name, Type, Date Modified, Folders, Files and Size. Click a header to sort by that column; click it again to reverse. Folders always stay on top; counted folders sort by their totals. Drag the border between two headers to resize a column (every column keeps its own width, the last one stretches to the list's edge, and columns wider than the window scroll sideways); the widths are saved. Right-click a header for Size Column To Fit, Size All Columns To Fit (Ctrl+Shift+F) and Restore Default Columns.
 
 Lumen deletes permanently only with Shift+Delete, after asking: Delete moves entries to the system trash, and renaming or pasting onto an existing name asks first and sends the old entry to the trash.
 

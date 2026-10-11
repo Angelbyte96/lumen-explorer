@@ -1214,6 +1214,15 @@ impl LumenApp {
                 let keep = self.tab.view.selected_entry().map(|e| e.name.clone());
                 self.reload(ctx, keep);
             }
+            Command::FitColumn(column) => {
+                self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, self.list_zoom, column);
+            }
+            Command::FitAllColumns => {
+                for column in 0..self.columns.len() {
+                    self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, self.list_zoom, column);
+                }
+            }
+            Command::RestoreColumns => self.columns = ui::file_list::DEFAULT_WIDTHS,
         }
     }
 
@@ -1792,6 +1801,7 @@ impl LumenApp {
             Action::ZoomIn => self.list_zoom = (self.list_zoom + 1).min(ui::file_list::MAX_ZOOM),
             Action::ZoomOut => self.list_zoom = self.list_zoom.saturating_sub(1),
             Action::ZoomReset => self.list_zoom = 0,
+            Action::FitColumns => self.run_command(ctx, Command::FitAllColumns),
             Action::Activate => self.activate_selected(ctx),
             Action::GoParent => {
                 self.hold_absorbed = self.tab.view.pop_filter();
@@ -2046,6 +2056,12 @@ impl eframe::App for LumenApp {
                 }
                 Some(ListEvent::Sort(column)) => self.tab.view.sort_by(column),
                 Some(ListEvent::Resized(widths)) => self.columns = widths,
+                Some(ListEvent::HeaderMenu(column)) => {
+                    if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                        self.context_menu = Some(ContextMenu::new(crate::menu::column_menu(column), pos));
+                        self.context_on_entry = false;
+                    }
+                }
                 Some(ListEvent::RenameEnded(submit)) => {
                     if let Some(edit) = self.rename.take()
                         && submit
@@ -3162,6 +3178,35 @@ mod tests {
         assert_eq!(app.window, Some([1000.0, 700.0]));
         assert_eq!(app.list_zoom, 3);
         assert_eq!(app.columns, [250.0, 90.0, 140.0, 55.0, 60.0, 95.0]);
+    }
+
+    #[test]
+    fn the_header_menu_sizes_columns_to_fit_restores_them_and_saves_them() {
+        let (ctx, _, dir) = app_in("app-fit-columns");
+        std::fs::write(dir.join("a rather long name for a file in this folder.txt"), "x").unwrap();
+        let path = dir.join("cfg/lumen/config");
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
+        let entries = fs::lister::read_entries(&dir).unwrap();
+        let listing = Listing { id: 0, path: dir.clone(), result: Ok(entries), elapsed: Duration::ZERO };
+        app.tab.view.apply_listing(listing, None);
+        // Fonts are loaded by a first frame.
+        ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        let fit = |app: &LumenApp, column| ui::file_list::fit_width(&ctx, &app.tab.view, app.list_zoom, column);
+        app.columns = [100.0; 6];
+        app.run_command(&ctx, Command::FitColumn(0));
+        assert_eq!(app.columns[0], fit(&app, 0));
+        assert!(app.columns[0] > 250.0, "the long name fits: {}", app.columns[0]);
+        assert_eq!(app.columns[1..], [100.0; 5], "only that column");
+        app.run_command(&ctx, Command::RestoreColumns);
+        assert_eq!(app.columns, ui::file_list::DEFAULT_WIDTHS);
+        app.handle_action(&ctx, Action::FitColumns);
+        let all: Vec<f32> = (0..6).map(|c| fit(&app, c)).collect();
+        assert_eq!(app.columns.to_vec(), all, "Ctrl+Shift+F fits every column");
+        app.run_command(&ctx, Command::RestoreColumns);
+        app.run_command(&ctx, Command::FitAllColumns);
+        assert_eq!(app.columns.to_vec(), all, "the menu's Size All Columns To Fit too");
+        app.save_settings(false);
+        assert_eq!(Config::load(&path).unwrap().columns, app.columns);
     }
 
     #[test]
