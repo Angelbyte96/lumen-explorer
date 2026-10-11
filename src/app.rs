@@ -767,6 +767,8 @@ pub struct LumenApp {
     columns: ui::file_list::Widths,
     /// Which list columns are shown.
     shown_columns: ui::file_list::Shown,
+    /// The list's columns from left to right.
+    column_order: ui::file_list::Order,
     /// Folder size and counts being computed (Alt+R); one at a time.
     counting: Option<Count>,
     /// Informational line in the status bar ("1 item copied").
@@ -839,6 +841,7 @@ impl LumenApp {
             list_zoom: 0,
             columns: ui::file_list::DEFAULT_WIDTHS,
             shown_columns: ui::file_list::ALL_SHOWN,
+            column_order: ui::file_list::DEFAULT_ORDER,
             notice: None,
             watcher: Watcher::new({
                 let ctx = ctx.clone();
@@ -880,6 +883,7 @@ impl LumenApp {
         app.list_zoom = config.list_zoom;
         app.columns = config.columns;
         app.shown_columns = config.shown_columns;
+        app.column_order = config.column_order;
         app.bookmarks = Bookmarks::from_paths(config.bookmarks);
         app.window = config.window;
         app.saved = app.settings(true);
@@ -924,6 +928,7 @@ impl LumenApp {
             list_zoom: self.list_zoom,
             columns: self.columns,
             shown_columns: self.shown_columns,
+            column_order: self.column_order,
             tabs: if with_window { self.session().0 } else { self.saved.tabs.clone() },
             active_tab: if with_window { self.session().1 } else { self.saved.active_tab },
         }
@@ -1230,8 +1235,15 @@ impl LumenApp {
             Command::RestoreColumns => {
                 self.columns = ui::file_list::DEFAULT_WIDTHS;
                 self.shown_columns = ui::file_list::ALL_SHOWN;
+                self.column_order = ui::file_list::DEFAULT_ORDER;
             }
             // Name is always shown.
+            Command::ShiftColumnLeft(column) => {
+                self.column_order = ui::file_list::shift(&self.column_order, &self.shown_columns, column, true);
+            }
+            Command::ShiftColumnRight(column) => {
+                self.column_order = ui::file_list::shift(&self.column_order, &self.shown_columns, column, false);
+            }
             Command::ToggleColumn(column) => self.shown_columns[column] = column == 0 || !self.shown_columns[column],
         }
     }
@@ -2047,7 +2059,7 @@ impl eframe::App for LumenApp {
         let list = egui::CentralPanel::default_margins().show(ui, |ui| {
             let scroll = self.tab.view.scroll.take();
             let cut = self.cut_paths().to_vec();
-            let sizes = ui::file_list::Sizes { zoom: self.list_zoom, widths: self.columns, shown: self.shown_columns };
+            let sizes = ui::file_list::Sizes { zoom: self.list_zoom, widths: self.columns, shown: self.shown_columns, order: self.column_order };
             let event = ui::file_list::show(ui, &self.tab.view, &cut, sizes, scroll, self.rename.as_mut(), &self.file_icons);
             // After drawing: the icons the list just asked for go out this frame.
             self.file_icons.poll(&ctx);
@@ -2069,7 +2081,7 @@ impl eframe::App for LumenApp {
                 Some(ListEvent::CloseColumn(column)) => self.run_command(&ctx, Command::ToggleColumn(column)),
                 Some(ListEvent::HeaderMenu(column)) => {
                     if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                        self.context_menu = Some(ContextMenu::new(crate::menu::column_menu(column, &self.shown_columns), pos));
+                        self.context_menu = Some(ContextMenu::new(crate::menu::column_menu(column, &self.shown_columns, &self.column_order), pos));
                         self.context_on_entry = false;
                     }
                 }
@@ -3239,6 +3251,23 @@ mod tests {
         assert_eq!((app.shown_columns, app.columns), (ui::file_list::ALL_SHOWN, ui::file_list::DEFAULT_WIDTHS));
         let reopened = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
         assert_eq!(reopened.shown_columns, [true, true, false, true, true, true], "loaded at startup");
+    }
+
+    #[test]
+    fn columns_shift_left_and_right_are_restored_and_saved() {
+        let (ctx, _, dir) = app_in("app-shift-columns");
+        let path = dir.join("cfg/lumen/config");
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
+        app.run_command(&ctx, Command::ShiftColumnLeft(2));
+        assert_eq!(app.column_order, [0, 2, 1, 3, 4, 5]);
+        app.run_command(&ctx, Command::ShiftColumnRight(0));
+        assert_eq!(app.column_order, [2, 0, 1, 3, 4, 5]);
+        app.save_settings(false);
+        assert_eq!(Config::load(&path).unwrap().column_order, [2, 0, 1, 3, 4, 5]);
+        let reopened = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
+        assert_eq!(reopened.column_order, [2, 0, 1, 3, 4, 5], "loaded at startup");
+        app.run_command(&ctx, Command::RestoreColumns);
+        assert_eq!(app.column_order, ui::file_list::DEFAULT_ORDER);
     }
 
     #[test]

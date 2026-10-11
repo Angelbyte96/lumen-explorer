@@ -46,6 +46,25 @@ pub type Shown = [bool; COLUMNS.len()];
 
 pub const ALL_SHOWN: Shown = [true; COLUMNS.len()];
 
+/// The columns from left to right, as indices into `COLUMNS`.
+pub type Order = [usize; COLUMNS.len()];
+
+pub const DEFAULT_ORDER: Order = [0, 1, 2, 3, 4, 5];
+
+/// `order` with `column` swapped with the nearest shown column on its left
+/// (or right); unchanged at that end.
+pub fn shift(order: &Order, shown: &Shown, column: usize, left: bool) -> Order {
+    let mut order = *order;
+    let Some(at) = order.iter().position(|&c| c == column) else { return order };
+    // Name is always shown.
+    let visible = |i: &usize| order[*i] == 0 || shown[order[*i]];
+    let next = if left { (0..at).rev().find(visible) } else { (at + 1..order.len()).find(visible) };
+    if let Some(next) = next {
+        order.swap(at, next);
+    }
+    order
+}
+
 /// No column is dragged narrower than this.
 pub const MIN_WIDTH: f32 = 40.0;
 
@@ -91,11 +110,12 @@ pub struct Sizes {
     pub zoom: u8,
     pub widths: Widths,
     pub shown: Shown,
+    pub order: Order,
 }
 
 impl Default for Sizes {
     fn default() -> Self {
-        Self { zoom: 0, widths: DEFAULT_WIDTHS, shown: ALL_SHOWN }
+        Self { zoom: 0, widths: DEFAULT_WIDTHS, shown: ALL_SHOWN, order: DEFAULT_ORDER }
     }
 }
 
@@ -140,8 +160,8 @@ pub fn show(
         // Every column has its own width, like File Pilot: the last one stretches
         // over whatever room the others leave, and columns wider than the list
         // scroll sideways.
-        // Name is always shown.
-        let shown: Vec<usize> = (0..COLUMNS.len()).filter(|&c| c == 0 || sizes.shown[c]).collect();
+        // In their order; Name is always shown.
+        let shown: Vec<usize> = sizes.order.into_iter().filter(|&c| c == 0 || sizes.shown[c]).collect();
         let (&last, others) = shown.split_last().expect("Name is shown");
         for &column in others {
             table = table.column(Column::exact(widths[column]).clip(true));
@@ -964,6 +984,64 @@ mod tests {
         };
         assert!(matches!(middle(egui::pos2(lefts[2] + 80.0, 10.0)), Some(ListEvent::CloseColumn(2))));
         assert!(middle(egui::pos2(lefts[0] + 5.0, 10.0)).is_none(), "Name stays");
+    }
+
+    #[test]
+    fn shifting_a_column_skips_hidden_ones_and_stops_at_the_ends() {
+        let all = ALL_SHOWN;
+        assert_eq!(shift(&DEFAULT_ORDER, &all, 2, true), [0, 2, 1, 3, 4, 5]);
+        assert_eq!(shift(&DEFAULT_ORDER, &all, 2, false), [0, 1, 3, 2, 4, 5]);
+        assert_eq!(shift(&DEFAULT_ORDER, &all, 0, true), DEFAULT_ORDER, "Name is already first");
+        assert_eq!(shift(&DEFAULT_ORDER, &all, 5, false), DEFAULT_ORDER, "Size is already last");
+        assert_eq!(shift(&DEFAULT_ORDER, &all, 0, false), [1, 0, 2, 3, 4, 5], "Name moves too");
+        let no_type = [true, false, true, true, true, true];
+        assert_eq!(shift(&DEFAULT_ORDER, &no_type, 2, true), [2, 1, 0, 3, 4, 5], "past the hidden Type, onto Name");
+        let no_size = [true, true, true, true, true, false];
+        assert_eq!(shift(&DEFAULT_ORDER, &no_size, 4, false), DEFAULT_ORDER, "only hidden ones on the right");
+        let moved = [3, 0, 1, 2, 4, 5];
+        assert_eq!(shift(&moved, &all, 3, false), [0, 3, 1, 2, 4, 5], "follows the current order");
+    }
+
+    #[test]
+    fn columns_are_drawn_in_their_order() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt"]);
+        let order = [2, 0, 1, 3, 4, 5];
+        let mut lefts = Vec::new();
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        show(ui, &view, &[], Sizes { order, ..Sizes::default() }, None, None, &FileIcons::default());
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            shapes = output.shapes;
+            lefts = COLUMNS
+                .iter()
+                .map(|(label, _)| {
+                    shapes
+                        .iter()
+                        .find_map(|s| match &s.shape {
+                            egui::Shape::Text(t) if t.galley.text().trim_end_matches([' ', '⏶', '⏷']) == *label => Some(t.pos.x),
+                            _ => None,
+                        })
+                        .expect("header painted")
+                })
+                .collect::<Vec<_>>();
+        }
+        assert!(lefts[2] < lefts[0] && lefts[0] < lefts[1] && lefts[1] < lefts[3], "Date Modified, Name, Type, ...: {lefts:?}");
+        let name = shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == "a.txt" => Some(t.pos.x),
+                _ => None,
+            })
+            .expect("name painted");
+        assert!(name > lefts[0] && name < lefts[1], "the name sits under its header: {name} in {lefts:?}");
     }
 
     /// What is painted of the row whose name starts like `name`, with Name `width` wide.

@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use crate::app::{Sort, SortColumn};
 use crate::fs::Entry;
-use crate::ui::file_list::{COLUMNS, SORT_ASCENDING, SORT_DESCENDING, Shown};
+use crate::ui::file_list::{COLUMNS, Order, SORT_ASCENDING, SORT_DESCENDING, Shown, shift};
 use crate::ui::path_popup::word_ranges;
 
 /// An application that can open a file ("Open With").
@@ -52,6 +52,9 @@ pub enum Command {
     /// Every column's width to its content (Ctrl+Shift+F).
     FitAllColumns,
     RestoreColumns,
+    /// Move the column one place left, past hidden ones.
+    ShiftColumnLeft(usize),
+    ShiftColumnRight(usize),
     /// Show the column again, or hide it.
     ToggleColumn(usize),
 }
@@ -123,6 +126,7 @@ impl MenuIcon {
             Command::Refresh => Self::Refresh,
             Command::Sort(_) | Command::Shell(_) => return None,
             Command::FitColumn(_) | Command::FitAllColumns | Command::RestoreColumns | Command::ToggleColumn(_) => return None,
+            Command::ShiftColumnLeft(_) | Command::ShiftColumnRight(_) => return None,
         })
     }
 }
@@ -455,11 +459,14 @@ pub fn sort_menu(sort: Sort) -> Item {
 
 /// Right click on the list's header `column`, like File Pilot's.
 /// The checkboxes show or hide each column; Name is always shown.
-pub fn column_menu(column: usize, shown: &Shown) -> Vec<Item> {
+pub fn column_menu(column: usize, shown: &Shown, order: &Order) -> Vec<Item> {
+    let can_shift = |left| shift(order, shown, column, left) != *order;
     let mut items = vec![
+        Item::run("Shift Column Left", None, can_shift(true), Command::ShiftColumnLeft(column)),
+        Item::run("Shift Column Right", None, can_shift(false), Command::ShiftColumnRight(column)),
         Item::run("Size Column To Fit", None, true, Command::FitColumn(column)),
-        Item::run("Size All Columns To Fit", Some("Ctrl+Shift+F"), true, Command::FitAllColumns),
         Item::run("Close Column", Some("Middle click"), column != 0, Command::ToggleColumn(column)),
+        Item::run("Size All Columns To Fit", Some("Ctrl+Shift+F"), true, Command::FitAllColumns),
         Item::separator(),
         Item::run("Restore Default Columns", None, true, Command::RestoreColumns),
         Item::separator(),
@@ -779,12 +786,15 @@ pub(crate) mod tests {
     #[test]
     fn the_header_menu_fits_closes_restores_and_shows_or_hides_each_column() {
         let shown = [true, true, false, true, true, true];
+        let order = crate::ui::file_list::DEFAULT_ORDER;
         assert_eq!(
-            lines(&column_menu(1, &shown)),
+            lines(&column_menu(1, &shown, &order)),
             [
+                ("Shift Column Left", None, Some(&Command::ShiftColumnLeft(1)), true, None),
+                ("Shift Column Right", None, Some(&Command::ShiftColumnRight(1)), true, None),
                 ("Size Column To Fit", None, Some(&Command::FitColumn(1)), true, None),
-                ("Size All Columns To Fit", Some("Ctrl+Shift+F"), Some(&Command::FitAllColumns), true, None),
                 ("Close Column", Some("Middle click"), Some(&Command::ToggleColumn(1)), true, None),
+                ("Size All Columns To Fit", Some("Ctrl+Shift+F"), Some(&Command::FitAllColumns), true, None),
                 ("", None, None, false, None),
                 ("Restore Default Columns", None, Some(&Command::RestoreColumns), true, None),
                 ("", None, None, false, None),
@@ -796,8 +806,14 @@ pub(crate) mod tests {
                 ("Size", None, Some(&Command::ToggleColumn(5)), true, Some(true)),
             ]
         );
-        let name = column_menu(0, &shown);
-        let close = name.iter().find(|i| i.label == "Close Column").expect("listed");
-        assert!(!close.enabled, "Name is never closed");
+        let name = column_menu(0, &shown, &order);
+        let enabled = |items: &[Item], label: &str| items.iter().find(|i| i.label == label).expect("listed").enabled;
+        assert!(!enabled(&name, "Close Column"), "Name is never closed");
+        assert!(!enabled(&name, "Shift Column Left"), "Name is first");
+        assert!(enabled(&name, "Shift Column Right"));
+        let size = column_menu(5, &shown, &order);
+        assert!(!enabled(&size, "Shift Column Right"), "Size is last");
+        let moved = column_menu(5, &shown, &[0, 1, 2, 3, 5, 4]);
+        assert!(enabled(&moved, "Shift Column Right"), "follows the order");
     }
 }
