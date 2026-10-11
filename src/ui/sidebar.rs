@@ -138,6 +138,14 @@ fn item(ui: &mut egui::Ui, icon: ItemIcon, label: &str, hint: &str, path: &Path,
     // Behind the row, filled once its size is known: the hover highlight.
     let backdrop = ui.painter().add(egui::Shape::Noop);
     let inner = ui.scope_builder(row, |ui| {
+        // The row lights up as a whole (below): the name's button draws no box
+        // of its own on hover or click; the folder on screen keeps its fill.
+        let widgets = &mut ui.visuals_mut().widgets;
+        for state in [&mut widgets.hovered, &mut widgets.active] {
+            state.bg_stroke = egui::Stroke::NONE;
+            state.weak_bg_fill = egui::Color32::TRANSPARENT;
+            state.bg_fill = egui::Color32::TRANSPARENT;
+        }
         ui.horizontal(|ui| {
             ui.set_min_width(ui.available_width());
             match (own, icon) {
@@ -262,6 +270,18 @@ mod tests {
             "the whole row lights up, even past the name: {:?} for {row:?}",
             fills(&hovered)
         );
+        // Over the name itself: the row's highlight only, no outline of its own.
+        draw(&ctx, vec![egui::Event::PointerMoved(row.left_center() + egui::vec2(40.0, 0.0))]);
+        let (over_name, _) = draw(&ctx, vec![]);
+        let outlines: Vec<egui::Rect> = over_name
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke.color.a() > 0 => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        assert!(outlines.is_empty(), "no box around the name: {outlines:?}");
+        assert!(fills(&over_name).iter().any(|r| r.width() >= row.width() - 1.0), "the row is lit");
     }
 
     #[test]
