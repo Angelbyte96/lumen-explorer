@@ -29,6 +29,9 @@ pub struct ContextMenu {
     /// Where the pointer was last frame (`None` before the first one): a
     /// row takes the highlight only when the pointer moves onto it.
     pointer: Option<Option<egui::Pos2>>,
+    /// A key moved the cursor: the list scrolls to its line once. Never just
+    /// because it is the cursor's, or a flick over a hovered row snaps back.
+    follow: bool,
 }
 
 /// What the open menu did this frame.
@@ -40,7 +43,7 @@ pub enum MenuEvent {
 
 impl ContextMenu {
     pub fn new(items: Vec<Item>, pos: egui::Pos2) -> Self {
-        Self { menu: Menu::new(items), pos, content: None, textures: std::collections::HashMap::new(), pointer: None }
+        Self { menu: Menu::new(items), pos, content: None, textures: std::collections::HashMap::new(), pointer: None, follow: false }
     }
 
     #[cfg(test)]
@@ -145,6 +148,7 @@ impl ContextMenu {
         if escape {
             return Some(MenuEvent::Closed);
         }
+        self.follow |= !keys.is_empty();
         keys.into_iter().find_map(|key| self.menu.key(key)).map(MenuEvent::Run)
     }
 
@@ -227,8 +231,9 @@ impl ContextMenu {
                     });
                 })
                 .response;
-            if cursor == Some(index) {
+            if self.follow && cursor == Some(index) {
                 response.scroll_to_me(None);
+                self.follow = false;
             }
             if moving && response.hovered() && cursor != Some(index) {
                 hovered = Some(index);
@@ -375,6 +380,62 @@ mod tests {
         step(&ctx, &mut menu, vec![key(K::ArrowUp)]);
         step(&ctx, &mut menu, vec![]);
         assert_eq!(menu.menu.cursor(), Some(0), "a pointer resting on a row does not pull the cursor back");
+    }
+
+    /// A frame runner whose clock moves 1/60 s a frame, as on screen: egui's
+    /// smooth scrolling needs time to run.
+    fn timed(ctx: &egui::Context) -> impl FnMut(&mut ContextMenu, Vec<Event>) + '_ {
+        let mut time = 0.0;
+        move |menu, events| {
+            time += 1.0 / 60.0;
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+            let input = egui::RawInput { events, time: Some(time), screen_rect: Some(screen), ..Default::default() };
+            ctx.run_ui(input, |root| {
+                egui::CentralPanel::default().show(root, |ui| menu.show(ui.ctx()));
+            })
+            .drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn a_fast_touchpad_flick_over_a_hovered_row_stays_scrolled() {
+        let ctx = egui::Context::default();
+        let items = (0..40).map(|n| Item::run(n.to_string(), None, true, Command::Shell(n))).collect();
+        let mut menu = ContextMenu::new(items, egui::pos2(100.0, 20.0));
+        let mut step = timed(&ctx);
+        for _ in 0..3 {
+            step(&mut menu, vec![]);
+        }
+        let over = row_rect(&ctx, 2).center();
+        step(&mut menu, vec![Event::PointerMoved(over)]);
+        step(&mut menu, vec![]);
+        assert_eq!(menu.menu.cursor(), Some(2), "the hovered row");
+        let wheel = Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -150.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move };
+        for _ in 0..6 {
+            step(&mut menu, vec![wheel.clone()]);
+        }
+        for _ in 0..60 {
+            step(&mut menu, vec![]);
+        }
+        let shown = ctx.data(|d| d.get_temp::<egui::Rect>(list_id())).expect("list drawn");
+        assert!(!shown.intersects(row_rect(&ctx, 0)), "the list stayed scrolled down: first row {:?}, list {shown:?}", row_rect(&ctx, 0));
+    }
+
+    #[test]
+    fn a_key_that_moves_the_cursor_out_of_view_scrolls_to_it() {
+        let ctx = egui::Context::default();
+        let items = (0..40).map(|n| Item::run(n.to_string(), None, true, Command::Shell(n))).collect();
+        let mut menu = ContextMenu::new(items, egui::pos2(100.0, 20.0));
+        let mut step = timed(&ctx);
+        for _ in 0..3 {
+            step(&mut menu, vec![]);
+        }
+        step(&mut menu, vec![key(K::End)]);
+        for _ in 0..60 {
+            step(&mut menu, vec![]);
+        }
+        let shown = ctx.data(|d| d.get_temp::<egui::Rect>(list_id())).expect("list drawn");
+        assert!(shown.contains_rect(row_rect(&ctx, 39)), "the last row came into view: {:?} in {shown:?}", row_rect(&ctx, 39));
     }
 
     fn list_width(ctx: &egui::Context, menu: &mut ContextMenu) -> f32 {
