@@ -172,10 +172,11 @@ impl IconTheme {
         Self { themes }
     }
 
-    /// The file of the first of `names` the theme chain has, closest to
-    /// `size` pixels (a 32 px icon at scale 2 is 64 pixels).
+    /// The file closest to `size` pixels (a 32 px icon at scale 2 is 64
+    /// pixels) of the first theme in the chain having any of `names`, the
+    /// first of them it has: as GTK looks, so Lumen shows what Nautilus does.
     pub fn find(&self, names: &[&str], size: u32) -> Option<PathBuf> {
-        names.iter().find_map(|name| self.themes.iter().find_map(|theme| theme.closest(name, size)))
+        self.themes.iter().find_map(|theme| names.iter().find_map(|name| theme.closest(name, size)))
     }
 }
 
@@ -281,6 +282,11 @@ mod tests {
         assert_eq!(theme.find(&["application-pdf"], 48), Some(dir.join("system/icons/Base/48x48/mimetypes/application-pdf.png")), "inherited");
         assert_eq!(theme.find(&["lumen"], 48), Some(dir.join("system/icons/hicolor/48x48/apps/lumen.png")), "hicolor, never named");
         assert_eq!(theme.find(&["nothing-here"], 48), None);
+        assert_eq!(
+            theme.find(&["lumen", "folder"], 48),
+            Some(dir.join("user/icons/Color/48x48/places/folder.png")),
+            "like GTK: each theme tries every name before the next theme, so the user's theme wins over a better name in hicolor"
+        );
     }
 
     #[test]

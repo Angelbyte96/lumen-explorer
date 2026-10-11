@@ -56,6 +56,9 @@ pub struct FileIcons {
     /// shell about; sent on the next poll.
     wanted: RefCell<HashMap<Key, PathBuf>>,
     pending: HashSet<Key>,
+    /// One texture per icon file (and way of drawing it), shared by every
+    /// key showing it: a thousand folders upload one folder icon.
+    by_file: HashMap<(PathBuf, bool), egui::TextureHandle>,
     worker: Option<native::Worker>,
     /// Where the icon theme and the MIME tables are, and the special folders.
     #[cfg(not(windows))]
@@ -153,11 +156,17 @@ impl FileIcons {
             // Drawn already this frame: the next one shows them.
             ctx.request_repaint();
         }
-        for (key, icon) in answers {
+        for (key, file, icon) in answers {
             self.pending.remove(&key);
-            let texture = icon.map(|(size, rgba)| {
+            let shared = file.as_ref().and_then(|file| self.by_file.get(file)).cloned();
+            let texture = shared.or_else(|| {
+                let (size, rgba) = icon?;
                 let image = egui::ColorImage::from_rgba_premultiplied(size, &rgba);
-                ctx.load_texture(format!("lumen_file_icon_{key:?}"), image, egui::TextureOptions::LINEAR)
+                let texture = ctx.load_texture(format!("lumen_file_icon_{key:?}"), image, egui::TextureOptions::LINEAR);
+                if let Some(file) = file {
+                    self.by_file.insert(file, texture.clone());
+                }
+                Some(texture)
             });
             self.loaded.insert(key, texture);
         }
@@ -201,6 +210,9 @@ pub mod native {
         answers: Receiver<(Key, Icon)>,
     }
 
+    /// The shell's answers: one per key, none shared (see the Linux worker).
+    pub type Answer = (Key, Option<(PathBuf, bool)>, Icon);
+
     impl Worker {
         pub fn start(ctx: egui::Context) -> Self {
             let (asks, requests) = channel::<(Key, PathBuf)>();
@@ -229,15 +241,15 @@ pub mod native {
             let _ = self.asks.send((key, path));
         }
 
-        pub fn answers(&self) -> Vec<(Key, Icon)> {
-            self.answers.try_iter().collect()
+        pub fn answers(&self) -> Vec<Answer> {
+            self.answers.try_iter().map(|(key, icon)| (key, None, icon)).collect()
         }
     }
 }
 
 #[cfg(not(windows))]
 pub mod native {
-    use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -329,32 +341,47 @@ pub mod native {
     /// order, so the list never waits on the disk.
     pub struct Worker {
         asks: Sender<(Key, PathBuf)>,
-        answers: Receiver<(Key, Icon)>,
+        answers: Receiver<Answer>,
     }
+
+    /// A key's icon and the file it came from (drawn as a symbolic shape or
+    /// not), so keys showing one file share its texture.
+    pub type Answer = (Key, Option<(PathBuf, bool)>, Icon);
+
+    /// The icons' thread stack: resvg walks an SVG's nesting recursively, and
+    /// a theme's file is not ours to trust.
+    const STACK: usize = 32 << 20;
 
     impl Worker {
         pub fn start(ctx: egui::Context, setup: Setup) -> Self {
             let (asks, requests) = channel::<(Key, PathBuf)>();
             let (send, answers) = channel();
-            let spawned = std::thread::Builder::new().name("lumen-file-icons".into()).spawn(move || {
+            let spawned = std::thread::Builder::new().name("lumen-file-icons".into()).stack_size(STACK).spawn(move || {
                 let config = crate::apps::Dirs::from_env().config.into_iter().next().unwrap_or_default();
                 let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
                 let theme = setup.theme.or_else(|| icon_theme::theme_name(&desktop, &config, icon_theme::ask_gsettings));
                 let theme = IconTheme::load(theme.as_deref().unwrap_or(FALLBACK_THEME), &setup.bases);
                 let names = IconNames::read(&setup.data, setup.folders);
-                // Many types share one file (text-x-generic): drawn once.
-                let mut drawn: HashMap<PathBuf, Icon> = HashMap::new();
+                // Many keys share one file (text-x-generic, folder): drawn once.
+                let mut drawn: HashSet<(PathBuf, bool)> = HashSet::new();
                 for (key, _) in requests {
-                    let (wanted, side, draw): (Vec<String>, u32, Draw) = match &key {
-                        Key::Type(ext) => (names.for_type(ext), super::SIDE as u32, load),
-                        Key::Path(path, _) => (names.for_folder(path), super::SIDE as u32, load),
-                        Key::Symbolic(name) => (vec![format!("{name}-symbolic"), "folder-symbolic".into()], SYMBOLIC_SIDE, symbolic),
+                    let (wanted, side, draw, shape): (Vec<String>, u32, Draw, bool) = match &key {
+                        Key::Type(ext) => (names.for_type(ext), super::SIDE as u32, load, false),
+                        Key::Path(path, _) => (names.for_folder(path), super::SIDE as u32, load, false),
+                        Key::Symbolic(name) => (vec![format!("{name}-symbolic"), "folder-symbolic".into()], SYMBOLIC_SIDE, symbolic, true),
                     };
                     let wanted: Vec<&str> = wanted.iter().map(String::as_str).collect();
-                    let icon = theme
-                        .find(&wanted, side)
-                        .and_then(|file| drawn.entry(file.clone()).or_insert_with(|| draw(&file, side)).clone());
-                    if send.send((key, icon)).is_err() {
+                    let answer = match theme.find(&wanted, side) {
+                        Some(file) => {
+                            let source = (file, shape);
+                            // Sent once per file: the UI keeps its texture for the next keys.
+                            let icon = if drawn.contains(&source) { None } else { draw(&source.0, side) };
+                            drawn.insert(source.clone());
+                            (key, Some(source), icon)
+                        }
+                        None => (key, None, None),
+                    };
+                    if send.send(answer).is_err() {
                         break;
                     }
                     ctx.request_repaint();
@@ -371,7 +398,7 @@ pub mod native {
             let _ = self.asks.send((key, path));
         }
 
-        pub fn answers(&self) -> Vec<(Key, Icon)> {
+        pub fn answers(&self) -> Vec<Answer> {
             self.answers.try_iter().collect()
         }
     }
@@ -480,6 +507,9 @@ mod tests {
         let shown = icons.texture(&pdf).expect("the type's PNG");
         assert_eq!(icons.texture(&other_pdf), Some(shown));
         assert!(icons.texture(&folder).is_some(), "the folder's SVG");
+        let other_folder = Entry { is_dir: true, ..entry("Music") };
+        answered(&mut icons, &ctx, &[&other_folder]);
+        assert_eq!(icons.texture(&other_folder), icons.texture(&folder), "one texture per icon file, shared by every folder");
         assert_eq!(icons.loaded.get(&key_of(&text)).map(Option::is_none), Some(true), "the theme has no text icon: the painted one");
         assert!(icons.wanted.borrow().is_empty() && icons.pending.is_empty(), "nothing asked again");
     }
