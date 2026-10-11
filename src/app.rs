@@ -23,7 +23,7 @@ use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::ui::tabs::TabEvent;
 use crate::ui::toolbar::{Nav, ToolbarEvent};
 use crate::ui::context_menu::{ContextMenu, MenuEvent};
-use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_popup::{PathPopup, PopupEvent}, preview::PreviewPane, status_bar::Status};
+use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_popup::{PathPopup, PopupEvent}, preview::PreviewPane, status_bar::{PickedSize, Status}};
 
 /// How the table should bring the selection into view on the next frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,6 +290,22 @@ impl View {
     /// Picked rows shown.
     pub fn picked_count(&self) -> usize {
         (0..self.rows.len()).filter(|&row| self.is_picked(row)).count()
+    }
+
+    /// The picked rows' total size, for the status bar.
+    pub fn picked_size(&self) -> PickedSize {
+        let mut size = PickedSize::default();
+        for row in (0..self.rows.len()).filter(|&row| self.is_picked(row)) {
+            let entry = &self.entries[self.rows[row]];
+            let bytes = if entry.is_dir { self.totals.get(&entry.name).map(|t| t.bytes) } else { entry.size };
+            match bytes {
+                Some(bytes) => size.bytes += bytes,
+                None if entry.is_dir => size.uncounted += 1,
+                // An unreadable file: nothing to add.
+                None => {}
+            }
+        }
+        size
     }
 
     /// What an operation acts on, in display order: the picked rows shown, or
@@ -2002,6 +2018,7 @@ impl eframe::App for LumenApp {
                     folder_count: self.tab.view.folder_count(),
                     selected: self.tab.view.selected,
                     picked: self.tab.view.picked_count(),
+                    picked_size: self.tab.view.picked_size(),
                     counting: self.counting.as_ref().map(|c| {
                         let name = file_name(&c.path).unwrap_or_default();
                         ui::status_bar::counting_text(&name, &c.progress)
@@ -3838,6 +3855,31 @@ mod tests {
         v.apply_listing(ok_listing("/y", vec![entry("a.txt", false), entry("b.txt", false)]), None);
         assert_eq!(v.picked_count(), 0, "same names, another folder");
         assert_eq!(selection_names(&v), ["a.txt"]);
+    }
+
+    #[test]
+    fn picked_size_adds_files_and_counted_folders_and_tells_the_uncounted_ones() {
+        let mut v = View::default();
+        let mut big = entry("big.iso", false);
+        big.size = Some(3 << 20);
+        let entries = vec![entry("src", true), entry("docs", true), big, entry("a.txt", false), entry("b.txt", false)];
+        v.apply_listing(ok_listing("/x", entries), None);
+        v.set_totals("src".into(), Totals { folders: 1, files: 2, bytes: 1000, ..Totals::default() });
+        let row = |v: &View, name: &str| (0..v.rows.len()).find(|&r| v.entries[v.rows[r]].name == name).unwrap();
+        assert_eq!(v.picked_size(), PickedSize { bytes: 0, uncounted: 0 }, "nothing picked");
+        for name in ["src", "docs", "big.iso", "a.txt"] {
+            let r = row(&v, name);
+            v.toggle_pick(r);
+        }
+        // toggle_pick keeps the cursor row picked too: drop whatever else got in.
+        let extra: Vec<usize> = (0..v.rows.len())
+            .filter(|&r| v.is_picked(r) && !["src", "docs", "big.iso", "a.txt"].contains(&v.entries[v.rows[r]].name.as_str()))
+            .collect();
+        for r in extra {
+            v.toggle_pick(r);
+        }
+        assert_eq!(v.picked_count(), 4);
+        assert_eq!(v.picked_size(), PickedSize { bytes: 1000 + (3 << 20) + 1, uncounted: 1 });
     }
 
     #[test]
