@@ -328,27 +328,60 @@ pub mod native {
     /// resvg would recurse that deep (a theme's file is not ours to trust).
     pub const MAX_NESTING: usize = 256;
 
-    /// How deep the SVG's elements nest, counted from its tags without
-    /// parsing (comments and the like counted loosely: an overestimate only).
+    /// How deep the SVG's elements nest, read from its tags without parsing
+    /// (resvg's XML parser itself recurses per level). Quoted attribute
+    /// values, comments, CDATA and processing instructions are skipped
+    /// whole; a DOCTYPE with an internal subset (entities, which could nest
+    /// unseen) or a file whose tags do not close is past any limit.
     pub fn nesting(bytes: &[u8]) -> usize {
-        let (mut depth, mut deepest) = (0usize, 0usize);
-        let mut rest = bytes;
-        while let Some(at) = rest.iter().position(|&b| b == b'<') {
-            rest = &rest[at + 1..];
-            let end = rest.iter().position(|&b| b == b'>').unwrap_or(rest.len());
-            match rest.first() {
-                Some(b'/') => depth = depth.saturating_sub(1),
-                // Declarations, comments, processing instructions.
-                Some(b'!' | b'?') => {}
-                _ if end > 0 && rest[end - 1] == b'/' => {}
-                _ => {
-                    depth += 1;
-                    deepest = deepest.max(depth);
+        const PAST: usize = usize::MAX;
+        let find = |from: usize, what: &[u8]| bytes.get(from..)?.windows(what.len()).position(|w| w == what).map(|at| from + at);
+        // The `>` ending a tag that starts at `from`, quotes skipped; whether
+        // an unquoted `[` came first.
+        let tag_end = |from: usize| -> Option<(usize, bool)> {
+            let (mut quote, mut bracket) = (None, false);
+            for (at, &b) in bytes.iter().enumerate().skip(from) {
+                match (quote, b) {
+                    (Some(q), _) if b == q => quote = None,
+                    (Some(_), _) => {}
+                    (None, b'"' | b'\'') => quote = Some(b),
+                    (None, b'[') => bracket = true,
+                    (None, b'>') => return Some((at, bracket)),
+                    _ => {}
                 }
             }
-            rest = &rest[end.min(rest.len())..];
+            None
+        };
+        let (mut depth, mut deepest, mut at) = (0usize, 0usize, 0usize);
+        while let Some(lt) = find(at, b"<") {
+            let rest = &bytes[lt + 1..];
+            let end = if rest.starts_with(b"!--") {
+                find(lt + 4, b"-->").map(|e| e + 3)
+            } else if rest.starts_with(b"![CDATA[") {
+                find(lt + 9, b"]]>").map(|e| e + 3)
+            } else if rest.starts_with(b"?") {
+                find(lt + 2, b"?>").map(|e| e + 2)
+            } else {
+                let Some((gt, bracket)) = tag_end(lt + 1) else { return PAST };
+                match rest.first() {
+                    Some(b'!') if bracket => return PAST,
+                    Some(b'!') => {}
+                    Some(b'/') => match depth.checked_sub(1) {
+                        Some(up) => depth = up,
+                        None => return PAST,
+                    },
+                    _ if bytes[..gt].trim_ascii_end().ends_with(b"/") => {}
+                    _ => {
+                        depth += 1;
+                        deepest = deepest.max(depth);
+                    }
+                }
+                Some(gt + 1)
+            };
+            let Some(end) = end else { return PAST };
+            at = end;
         }
-        deepest
+        if depth == 0 { deepest } else { PAST }
     }
 
     /// The SVG scaled to fit a `side` square, centred; tiny-skia's pixels
@@ -518,6 +551,20 @@ mod tests {
         let dir = crate::fs::ops::tests::fresh_fixture("file-icons-deep");
         std::fs::write(dir.join("deep.svg"), deep(100_000)).unwrap();
         assert_eq!(native::load(&dir.join("deep.svg"), 64), None, "not drawn, so resvg never recurses that deep");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn quoted_or_commented_tags_do_not_hide_nesting() {
+        let n = native::MAX_NESTING + 1;
+        let attr = format!("<svg>{}{}</svg>", r#"<g x="/>">"#.repeat(n), "</g>".repeat(n));
+        let comment = format!("<svg>{}{}</svg>", "<g><!-- x></g> -->".repeat(n), "</g>".repeat(n));
+        assert!(native::nesting(attr.as_bytes()) > native::MAX_NESTING, "'/>' inside a quoted value");
+        assert!(native::nesting(comment.as_bytes()) > native::MAX_NESTING, "'</g>' inside a comment");
+        assert!(native::nesting(b"<svg><g>") > native::MAX_NESTING, "not XML: usvg would refuse it too");
+        assert!(native::nesting(br#"<!DOCTYPE svg [<!ENTITY a "<g><g>">]><svg>&a;</svg>"#) > native::MAX_NESTING, "entities could nest unseen");
+        assert_eq!(native::nesting(br#"<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "x.dtd"><svg><g/></svg>"#), 1);
+        assert_eq!(native::nesting(br#"<svg><g x="a>b" y='/'><![CDATA[</g>]]></g></svg>"#), 2);
     }
 
     /// Polls until every entry has an answer, or 20 s pass.
