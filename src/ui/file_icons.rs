@@ -324,10 +324,40 @@ pub mod native {
         Some((size, rgba))
     }
 
+    /// Icons nest a handful of groups; past this an SVG is not drawn, as
+    /// resvg would recurse that deep (a theme's file is not ours to trust).
+    pub const MAX_NESTING: usize = 256;
+
+    /// How deep the SVG's elements nest, counted from its tags without
+    /// parsing (comments and the like counted loosely: an overestimate only).
+    pub fn nesting(bytes: &[u8]) -> usize {
+        let (mut depth, mut deepest) = (0usize, 0usize);
+        let mut rest = bytes;
+        while let Some(at) = rest.iter().position(|&b| b == b'<') {
+            rest = &rest[at + 1..];
+            let end = rest.iter().position(|&b| b == b'>').unwrap_or(rest.len());
+            match rest.first() {
+                Some(b'/') => depth = depth.saturating_sub(1),
+                // Declarations, comments, processing instructions.
+                Some(b'!' | b'?') => {}
+                _ if end > 0 && rest[end - 1] == b'/' => {}
+                _ => {
+                    depth += 1;
+                    deepest = deepest.max(depth);
+                }
+            }
+            rest = &rest[end.min(rest.len())..];
+        }
+        deepest
+    }
+
     /// The SVG scaled to fit a `side` square, centred; tiny-skia's pixels
     /// are premultiplied already.
     fn draw_svg(bytes: &[u8], side: u32) -> Icon {
         use resvg::{tiny_skia, usvg};
+        if nesting(bytes) > MAX_NESTING {
+            return None;
+        }
         let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).ok()?;
         let size = tree.size();
         let scale = side as f32 / size.width().max(size.height());
@@ -476,6 +506,18 @@ mod tests {
         assert_eq!(native::load(&dir.join("missing.svg"), 64), None);
         std::fs::write(dir.join("broken.png"), "not a picture").unwrap();
         assert_eq!(native::load(&dir.join("broken.png"), 64), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn an_svg_nested_too_deep_is_measured_before_it_is_drawn() {
+        let deep = |levels: usize| format!("<svg>{}<rect/>{}</svg>", "<g>".repeat(levels), "</g>".repeat(levels));
+        assert_eq!(native::nesting(deep(3).as_bytes()), 4, "svg and three groups");
+        assert_eq!(native::nesting(br#"<?xml version="1.0"?><svg><!-- note --><g><path d="M0 0"/></g><g/></svg>"#), 2);
+        assert_eq!(native::nesting(deep(native::MAX_NESTING + 1).as_bytes()), native::MAX_NESTING + 2);
+        let dir = crate::fs::ops::tests::fresh_fixture("file-icons-deep");
+        std::fs::write(dir.join("deep.svg"), deep(100_000)).unwrap();
+        assert_eq!(native::load(&dir.join("deep.svg"), 64), None, "not drawn, so resvg never recurses that deep");
     }
 
     /// Polls until every entry has an answer, or 20 s pass.
