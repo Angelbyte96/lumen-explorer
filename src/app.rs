@@ -2176,15 +2176,18 @@ pub enum Start {
 }
 
 /// From the command line (without the program name): a folder argument
-/// opens it; otherwise `--restore` (the desktop entry) or Windows restores
-/// the last session, and Linux opens the working directory (a terminal's).
+/// opens it; otherwise `--restore` (the desktop entry), Windows, or Linux
+/// without a terminal (a double click in a file manager) restores the last
+/// session, and Linux in a terminal opens the working directory.
 pub fn start(args: &[String]) -> Start {
-    start_from(args, std::env::current_dir().ok(), fs::home_dir(), cfg!(windows))
+    use std::io::IsTerminal;
+    let terminal = std::io::stdin().is_terminal();
+    start_from(args, std::env::current_dir().ok(), fs::home_dir(), cfg!(windows), terminal)
 }
 
-fn start_from(args: &[String], cwd: Option<PathBuf>, home: Option<PathBuf>, windows: bool) -> Start {
+fn start_from(args: &[String], cwd: Option<PathBuf>, home: Option<PathBuf>, windows: bool, terminal: bool) -> Start {
     let folder = args.iter().find(|a| *a != RESTORE).cloned();
-    if folder.is_none() && (windows || args.iter().any(|a| a == RESTORE)) {
+    if folder.is_none() && (windows || !terminal || args.iter().any(|a| a == RESTORE)) {
         return Start::Restore;
     }
     // Windows hands a GUI app whatever working directory its launcher had
@@ -2237,12 +2240,22 @@ mod tests {
     fn the_session_is_restored_on_windows_and_with_restore_and_never_over_a_folder() {
         let cwd = Some(PathBuf::from("/srv/work"));
         let home = Some(PathBuf::from("/home/u"));
-        let start = |list: &[&str], windows| start_from(&args(list), cwd.clone(), home.clone(), windows);
+        let start = |list: &[&str], windows| start_from(&args(list), cwd.clone(), home.clone(), windows, true);
         assert_eq!(start(&[], true), Start::Restore, "Windows without a folder");
         assert_eq!(start(&["--restore"], false), Start::Restore, "the desktop entry on Linux");
         assert_eq!(start(&[], false), Start::Folder("/srv/work".into()), "a terminal on Linux");
         assert_eq!(start(&["--restore", "docs"], false), Start::Folder("/srv/work/docs".into()), "a folder opened with Lumen");
         assert_eq!(start(&["docs"], true), Start::Folder("/srv/work/docs".into()));
+    }
+
+    #[test]
+    fn without_a_terminal_linux_restores_the_session_unless_given_a_folder() {
+        let cwd = Some(PathBuf::from("/srv/work"));
+        let home = Some(PathBuf::from("/home/u"));
+        let start = |list: &[&str]| start_from(&args(list), cwd.clone(), home.clone(), false, false);
+        assert_eq!(start(&[]), Start::Restore, "a double click in a file manager");
+        assert_eq!(start(&["--restore"]), Start::Restore);
+        assert_eq!(start(&["docs"]), Start::Folder("/srv/work/docs".into()), "a folder argument still wins");
     }
 
     #[test]
