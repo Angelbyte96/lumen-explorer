@@ -239,9 +239,11 @@ mod tests {
     fn texts(ctx: &egui::Context, prompt: &Prompt) -> Vec<String> {
         let mut out = Vec::new();
         for _ in 0..2 {
-            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                 show(ui.ctx(), prompt);
             });
+            // No renderer here: the font atlas upload is dropped on purpose.
+            output.textures_delta.clear();
             out = output
                 .shapes
                 .iter()
