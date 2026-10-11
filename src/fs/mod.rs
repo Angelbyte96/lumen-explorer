@@ -2,6 +2,7 @@
 
 pub mod count;
 pub mod entry;
+pub mod index;
 pub mod lister;
 pub mod ops;
 pub mod preview;
