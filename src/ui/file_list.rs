@@ -403,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_whose_own_icon_is_loaded_shows_it_and_other_files_keep_the_painted_one() {
+    fn a_file_whose_icon_is_loaded_shows_it_and_one_still_loading_keeps_the_painted_one() {
         let ctx = egui::Context::default();
         let mut view = View::default();
         (view.entries, view.rows) = (vec![entry("setup.exe"), entry("notes.txt")], vec![0, 1]);
