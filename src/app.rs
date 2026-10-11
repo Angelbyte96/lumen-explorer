@@ -763,6 +763,8 @@ pub struct LumenApp {
     sidebar_open: bool,
     /// Icon and row size in the list, shared by every tab.
     list_zoom: u8,
+    /// The list's column widths.
+    columns: ui::file_list::Widths,
     /// Folder size and counts being computed (Alt+R); one at a time.
     counting: Option<Count>,
     /// Informational line in the status bar ("1 item copied").
@@ -833,6 +835,7 @@ impl LumenApp {
             disks: (None, Vec::new()),
             sidebar_open: true,
             list_zoom: 0,
+            columns: ui::file_list::DEFAULT_WIDTHS,
             notice: None,
             watcher: Watcher::new({
                 let ctx = ctx.clone();
@@ -872,6 +875,7 @@ impl LumenApp {
         app.sidebar_open = config.sidebar;
         app.preview_open = config.preview;
         app.list_zoom = config.list_zoom;
+        app.columns = config.columns;
         app.bookmarks = Bookmarks::from_paths(config.bookmarks);
         app.window = config.window;
         app.saved = app.settings(true);
@@ -914,6 +918,7 @@ impl LumenApp {
             window: if with_window { self.window } else { self.saved.window },
             bookmarks: self.bookmarks.paths().to_vec(),
             list_zoom: self.list_zoom,
+            columns: self.columns,
             tabs: if with_window { self.session().0 } else { self.saved.tabs.clone() },
             active_tab: if with_window { self.session().1 } else { self.saved.active_tab },
         }
@@ -2022,7 +2027,8 @@ impl eframe::App for LumenApp {
         let list = egui::CentralPanel::default_margins().show(ui, |ui| {
             let scroll = self.tab.view.scroll.take();
             let cut = self.cut_paths().to_vec();
-            let event = ui::file_list::show(ui, &self.tab.view, &cut, self.list_zoom, scroll, self.rename.as_mut(), &self.file_icons);
+            let sizes = ui::file_list::Sizes { zoom: self.list_zoom, widths: self.columns };
+            let event = ui::file_list::show(ui, &self.tab.view, &cut, sizes, scroll, self.rename.as_mut(), &self.file_icons);
             // After drawing: the icons the list just asked for go out this frame.
             self.file_icons.poll(&ctx);
             match event {
@@ -2039,6 +2045,7 @@ impl eframe::App for LumenApp {
                     self.activate_selected(&ctx);
                 }
                 Some(ListEvent::Sort(column)) => self.tab.view.sort_by(column),
+                Some(ListEvent::Resized(widths)) => self.columns = widths,
                 Some(ListEvent::RenameEnded(submit)) => {
                     if let Some(edit) = self.rename.take()
                         && submit
@@ -3136,6 +3143,7 @@ mod tests {
             window: Some([1000.0, 700.0]),
             bookmarks: vec![PathBuf::from("/srv"), PathBuf::from("/srv")],
             list_zoom: 3,
+            columns: [250.0, 90.0, 140.0, 55.0, 60.0, 95.0],
             ..Config::default()
         }
     }
@@ -3153,6 +3161,17 @@ mod tests {
         assert_eq!(app.bookmarks.paths(), [PathBuf::from("/srv")], "repeats dropped");
         assert_eq!(app.window, Some([1000.0, 700.0]));
         assert_eq!(app.list_zoom, 3);
+        assert_eq!(app.columns, [250.0, 90.0, 140.0, 55.0, 60.0, 95.0]);
+    }
+
+    #[test]
+    fn resized_columns_are_saved() {
+        let (ctx, _, dir) = app_in("app-columns");
+        let path = dir.join("cfg/lumen/config");
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
+        app.columns[0] = 410.0;
+        app.save_settings(false);
+        assert_eq!(Config::load(&path).unwrap().columns[0], 410.0);
     }
 
     #[test]
