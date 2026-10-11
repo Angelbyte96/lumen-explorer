@@ -15,7 +15,7 @@ use crate::input::{self, Action, Confirm};
 use crate::menu::Command;
 #[cfg(not(windows))]
 use crate::menu;
-use crate::places::{self, Bookmarks, Mount, Place, Recents, Usage};
+use crate::places::{self, Bookmarks, Mount, Place, Recents, Usage, Visits};
 use crate::fs::ops::Renamed;
 use crate::fs::preview::Previewer;
 use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
@@ -770,6 +770,8 @@ pub struct LumenApp {
     batch: Option<Batch>,
     bookmarks: Bookmarks,
     recents: Recents,
+    /// Folders visited, scored for the quick jump.
+    visits: Visits,
     /// Home, Downloads... and the trash, found once at startup.
     places: Vec<Place>,
     /// Where trashed files live; nothing in it may be trashed again.
@@ -850,6 +852,7 @@ impl LumenApp {
             counting: None,
             bookmarks: Bookmarks::default(),
             recents: Recents::default(),
+            visits: Visits::default(),
             places: Vec::new(),
             trash: None,
             disks: (None, Vec::new()),
@@ -906,6 +909,7 @@ impl LumenApp {
         app.shown_columns = config.shown_columns;
         app.column_order = config.column_order;
         app.bookmarks = Bookmarks::from_paths(config.bookmarks);
+        app.visits = Visits::from_list(config.visited);
         app.window = config.window;
         app.saved = app.settings(true);
         app.config_path = path;
@@ -952,6 +956,7 @@ impl LumenApp {
             column_order: self.column_order,
             tabs: if with_window { self.session().0 } else { self.saved.tabs.clone() },
             active_tab: if with_window { self.session().1 } else { self.saved.active_tab },
+            visited: if with_window { self.visits.list().to_vec() } else { self.saved.visited.clone() },
         }
     }
 
@@ -1796,6 +1801,7 @@ impl LumenApp {
             self.watcher.watch(&self.tab.view.current);
             if self.tab.pending_nav != NavKind::Refresh {
                 self.recents.visit(&self.tab.view.current);
+                self.visits.visit(&self.tab.view.current, unix_now());
             }
         } else if self.tab.pending_nav == NavKind::Refresh {
             // The open folder is gone; watch it afresh if it comes back.
@@ -2244,6 +2250,12 @@ fn start_dir_from(arg: Option<String>, cwd: Option<PathBuf>, home: Option<PathBu
         None if use_cwd => cwd.or(home).unwrap_or_else(root),
         None => home.or(cwd).unwrap_or_else(root),
     }
+}
+
+
+/// Seconds since the Unix epoch; 0 if the clock is before it.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]
@@ -3473,6 +3485,26 @@ mod tests {
             }
             assert_eq!(app.tab_labels().len(), app.tabs.len());
         }
+    }
+
+    #[test]
+    fn visited_folders_are_scored_for_the_quick_jump_and_saved_on_closing() {
+        let (ctx, _, dir) = app_in("app-visits");
+        let saved = vec![places::Visit { path: dir.join("old"), score: 3.0, at: 5 }];
+        let config = Config { visited: saved.clone(), ..Config::default() };
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, Settings { config, path: None, error: None });
+        assert_eq!(app.visits.list(), saved, "loaded from the settings");
+        app.apply(listing_of(&dir.join("sub")));
+        app.tab.pending_nav = NavKind::Refresh;
+        app.apply(listing_of(&dir.join("sub")));
+        app.tab.pending_nav = NavKind::New;
+        let failed = Listing { id: 0, path: dir.join("gone"), result: Err(ListError::NotFound(dir.join("gone"))), elapsed: Duration::ZERO };
+        app.apply(failed);
+        let paths: Vec<PathBuf> = app.visits.list().iter().map(|v| v.path.clone()).collect();
+        assert_eq!(paths, [dir.join("sub"), dir.join("old")], "a refresh or a failure is no visit");
+        assert_eq!(app.visits.list()[0].score, 1.0);
+        assert_eq!(app.settings(false).visited, saved, "written when Lumen closes");
+        assert_eq!(app.settings(true).visited, app.visits.list());
     }
 
     #[test]
