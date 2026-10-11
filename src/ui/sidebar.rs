@@ -7,6 +7,7 @@ use eframe::egui;
 
 use crate::format::format_size;
 use crate::places::{Mount, Place, Usage};
+use crate::ui::file_icons::FileIcons;
 use crate::ui::icons;
 
 pub const TOGGLE: &str = "☰";
@@ -19,6 +20,8 @@ pub struct Sidebar<'a> {
     pub places: &'a [Place],
     pub disks: &'a [(Mount, Option<Usage>)],
     pub recents: &'a [PathBuf],
+    /// Windows' icons for the folders and disks, once loaded.
+    pub icons: &'a FileIcons,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +66,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
                 ui.weak("Ctrl+D or ☆ adds the folder you are in");
             }
             for path in sidebar.bookmarks {
-                let response = item(ui, ItemIcon::Folder, &label_of(path), &path.display().to_string(), path, sidebar.current);
+                let response = item(ui, ItemIcon::Folder, &label_of(path), &path.display().to_string(), path, sidebar.current, sidebar.icons);
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(path.clone()));
                 }
@@ -78,7 +81,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
         section(ui, "Places", true, |ui| {
             for place in sidebar.places {
                 let icon = if place.trash { ItemIcon::Glyph(TRASH) } else { ItemIcon::Folder };
-                if item(ui, icon, &place.label, &place.path.display().to_string(), &place.path, sidebar.current).clicked() {
+                if item(ui, icon, &place.label, &place.path.display().to_string(), &place.path, sidebar.current, sidebar.icons).clicked() {
                     event = Some(SidebarEvent::Open(place.path.clone()));
                 }
             }
@@ -87,7 +90,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
             for (mount, usage) in sidebar.disks {
                 // The bar is only 4 px tall: the whole row tells the free space too.
                 let hint = disk_hint(&mount.path, usage.as_ref());
-                let response = item(ui, ItemIcon::Glyph(DISK), &mount.label, &hint, &mount.path, sidebar.current);
+                let response = item(ui, ItemIcon::Glyph(DISK), &mount.label, &hint, &mount.path, sidebar.current, sidebar.icons);
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(mount.path.clone()));
                 }
@@ -99,7 +102,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
         });
         section(ui, "Recents", false, |ui| {
             for path in sidebar.recents {
-                if item(ui, ItemIcon::Folder, &label_of(path), &path.display().to_string(), path, sidebar.current).clicked() {
+                if item(ui, ItemIcon::Folder, &label_of(path), &path.display().to_string(), path, sidebar.current, sidebar.icons).clicked() {
                     event = Some(SidebarEvent::Open(path.clone()));
                 }
             }
@@ -121,18 +124,38 @@ enum ItemIcon {
 
 /// One clickable row, the panel's full width; the folder on screen is
 /// highlighted. `hint` shows on hover anywhere on it, icon and empty end included.
-fn item(ui: &mut egui::Ui, icon: ItemIcon, label: &str, hint: &str, path: &Path, current: &Path) -> egui::Response {
+fn item(ui: &mut egui::Ui, icon: ItemIcon, label: &str, hint: &str, path: &Path, current: &Path, icons: &FileIcons) -> egui::Response {
+    // Windows' icon for folders and disks once loaded (Downloads' arrow, the
+    // drive's); the painted folder or the glyph meanwhile. The trash has no
+    // folder of its own to ask about.
+    let own = match icon {
+        ItemIcon::Glyph(TRASH) => None,
+        _ => icons.folder_texture(path),
+    };
     let selected = path == current;
     // Senses clicks below the name button, so the button keeps its own.
     let row = egui::UiBuilder::new().sense(egui::Sense::click());
+    // Behind the row, filled once its size is known: the hover highlight.
+    let backdrop = ui.painter().add(egui::Shape::Noop);
     let inner = ui.scope_builder(row, |ui| {
+        // The row lights up as a whole (below): the name's button draws no box
+        // of its own on hover or click; the folder on screen keeps its fill.
+        let widgets = &mut ui.visuals_mut().widgets;
+        for state in [&mut widgets.hovered, &mut widgets.active] {
+            state.bg_stroke = egui::Stroke::NONE;
+            state.weak_bg_fill = egui::Color32::TRANSPARENT;
+            state.bg_fill = egui::Color32::TRANSPARENT;
+        }
         ui.horizontal(|ui| {
             ui.set_min_width(ui.available_width());
-            match icon {
-                ItemIcon::Folder => {
+            match (own, icon) {
+                (Some(texture), _) => {
+                    icons::image(ui, texture);
+                }
+                (None, ItemIcon::Folder) => {
                     icons::folder(ui);
                 }
-                ItemIcon::Glyph(glyph) => {
+                (None, ItemIcon::Glyph(glyph)) => {
                     // Not selectable, or it would take the row's click.
                     ui.add(egui::Label::new(glyph).selectable(false));
                 }
@@ -141,7 +164,13 @@ fn item(ui: &mut egui::Ui, icon: ItemIcon, label: &str, hint: &str, path: &Path,
         })
         .inner
     });
-    inner.response.union(inner.inner).on_hover_text(hint)
+    let response = inner.response.union(inner.inner);
+    // The whole row, as the file rows do, also where the name's button is.
+    if response.contains_pointer() && !selected {
+        let fill = ui.visuals().widgets.hovered.bg_fill;
+        ui.painter().set(backdrop, egui::Shape::rect_filled(response.rect, egui::CornerRadius::same(3), fill));
+    }
+    response.on_hover_text(hint)
 }
 
 #[cfg(test)]
@@ -161,7 +190,8 @@ mod tests {
     fn the_whole_row_carries_the_hint_and_the_click() {
         let ctx = egui::Context::default();
         let (mut row, mut avail) = (egui::Rect::NOTHING, 0.0);
-        let draw = |ui: &mut egui::Ui| item(ui, ItemIcon::Glyph(DISK), "File System", "/\nfree", Path::new("/"), Path::new("/home"));
+        let icons = FileIcons::default();
+        let draw = |ui: &mut egui::Ui| item(ui, ItemIcon::Glyph(DISK), "File System", "/\nfree", Path::new("/"), Path::new("/home"), &icons);
         crate::ui::testing::frame(&ctx, vec![], |ui| {
             avail = ui.available_width();
             row = draw(ui).rect;
@@ -171,6 +201,87 @@ mod tests {
         for pos in [row.left_center() + egui::vec2(2.0, 0.0), row.right_center() - egui::vec2(5.0, 0.0)] {
             assert!(crate::ui::testing::click(&ctx, pos, |ui| draw(ui).clicked()), "a click at {pos:?} opens it");
         }
+    }
+
+    #[test]
+    fn places_and_disks_show_the_shells_icon_once_loaded_and_the_painted_one_meanwhile() {
+        let ctx = egui::Context::default();
+        let mut icons = FileIcons::default();
+        let red = |name: &str| ctx.load_texture(name, egui::ColorImage::new([4, 4], vec![egui::Color32::RED; 16]), egui::TextureOptions::LINEAR);
+        let (downloads, disk) = (red("downloads"), red("disk"));
+        icons.insert_folder(Path::new("/home/me/Downloads"), downloads.clone());
+        icons.insert_folder(Path::new("/"), disk.clone());
+        let places = [Place { label: "Downloads".into(), path: "/home/me/Downloads".into(), trash: false }];
+        let disks = [(Mount { label: "File System".into(), path: "/".into() }, None)];
+        let bookmarks = [PathBuf::from("/home/me/work")];
+        let sidebar = Sidebar { current: Path::new("/home/me"), bookmarks: &bookmarks, places: &places, disks: &disks, recents: &[], icons: &icons };
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                show(ui, &sidebar);
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let drawn = |texture: &egui::TextureHandle| {
+            shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Mesh(m) if m.texture_id == texture.id())).count()
+        };
+        assert_eq!(drawn(&downloads), 1, "the place's own icon");
+        assert_eq!(drawn(&disk), 1, "the disk's icon, not the glyph");
+        let glyphs = shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == DISK)).count();
+        assert_eq!(glyphs, 0, "no glyph once the disk's icon is in");
+        let meshes = shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Mesh(m) if m.texture_id != egui::TextureId::default())).count();
+        assert_eq!(meshes, 2, "the bookmark, still loading, keeps the painted folder");
+    }
+
+    #[test]
+    fn a_row_under_the_pointer_is_highlighted_across_the_panel_like_the_file_rows() {
+        let ctx = egui::Context::default();
+        let icons = FileIcons::default();
+        let draw = |ctx: &egui::Context, events| {
+            let mut row = egui::Rect::NOTHING;
+            let input = egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+            let mut output = ctx.run_ui(input, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    row = item(ui, ItemIcon::Folder, "Downloads", "hint", Path::new("/d"), Path::new("/home"), &icons).rect;
+                });
+            });
+            output.textures_delta.clear();
+            (output.shapes, row)
+        };
+        let hover = ctx.global_style().visuals.widgets.hovered.bg_fill;
+        let fills = |shapes: &[egui::epaint::ClippedShape]| -> Vec<egui::Rect> {
+            shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Rect(r) if r.fill == hover => Some(r.rect),
+                    _ => None,
+                })
+                .collect()
+        };
+        draw(&ctx, vec![]);
+        let (still, row) = draw(&ctx, vec![]);
+        assert!(fills(&still).iter().all(|r| r.width() < row.width() - 1.0), "no row highlight without the pointer");
+        let end = row.right_center() - egui::vec2(5.0, 0.0);
+        draw(&ctx, vec![egui::Event::PointerMoved(end)]);
+        let (hovered, _) = draw(&ctx, vec![]);
+        assert!(
+            fills(&hovered).iter().any(|r| r.width() >= row.width() - 1.0 && r.contains(row.center())),
+            "the whole row lights up, even past the name: {:?} for {row:?}",
+            fills(&hovered)
+        );
+        // Over the name itself: the row's highlight only, no outline of its own.
+        draw(&ctx, vec![egui::Event::PointerMoved(row.left_center() + egui::vec2(40.0, 0.0))]);
+        let (over_name, _) = draw(&ctx, vec![]);
+        let outlines: Vec<egui::Rect> = over_name
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke.color.a() > 0 => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        assert!(outlines.is_empty(), "no box around the name: {outlines:?}");
+        assert!(fills(&over_name).iter().any(|r| r.width() >= row.width() - 1.0), "the row is lit");
     }
 
     #[test]

@@ -5,6 +5,8 @@ pub mod entry;
 pub mod lister;
 pub mod ops;
 pub mod preview;
+#[cfg(windows)]
+pub mod pdf;
 pub mod transfer;
 pub mod watch;
 

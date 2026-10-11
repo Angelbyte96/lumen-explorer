@@ -1,6 +1,6 @@
 [package]
 name = "lumen"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 description = "A fast, lightweight, keyboard-first file explorer"
@@ -35,6 +35,22 @@ open = "5"
 # identities for renames; opening files as File Explorer does. The same
 # windows-sys eframe already uses: only adds the feature.
 [target.'cfg(windows)'.dependencies]
+# The shell's right-click menu (COM) and PDF pages (Windows.Data.Pdf). The same windows crate `trash` already
+# uses: only adds features.
+windows = { version = "0.62", features = [
+    "Data_Pdf",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# The window handle the shell's menu items are run for.
+raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
@@ -55,3 +71,11 @@ lto = true          # link-time optimization across all crates
 codegen-units = 1   # better optimization, slower compile
 panic = "abort"     # no unwinding machinery
 strip = true        # remove debug symbols
+
+# The Menu key (next to the right Ctrl) arrives as Shift+F10: egui-winit 0.36.2
+# with one small change, see vendor/egui-winit/LUMEN.md. Redo it on every egui update.
+[patch.crates-io]
+egui-winit = { path = "vendor/egui-winit" }
+
+[build-dependencies]
+winresource = "0.1.31"

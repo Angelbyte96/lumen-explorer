@@ -111,6 +111,10 @@ mod tests {
     fn listing_the_folder_or_reading_a_file_is_not_a_change() {
         let dir = fresh_fixture("watch-read");
         std::fs::write(dir.join("a.txt"), "x").unwrap();
+        // A test spawning a program at that moment forks a copy of a.txt's write
+        // handle, closed only when the child starts its program: under load that
+        // late close came after watch() as a finished write. Let it land first.
+        std::thread::sleep(SETTLE);
         let (mut w, _woke) = watcher();
         w.watch(&dir);
         crate::fs::lister::read_entries(&dir).unwrap();
@@ -135,6 +139,10 @@ mod tests {
         assert!(w.take_changed());
     }
 
+    /// Not on Windows: there a write inside a subfolder changes the
+    /// subfolder's own date, which the folder reports (sometimes, as NTFS
+    /// updates it lazily), and reloading for it is right: the list shows that date.
+    #[cfg(not(windows))]
     #[test]
     fn subfolders_are_not_watched() {
         let dir = fresh_fixture("watch-shallow");

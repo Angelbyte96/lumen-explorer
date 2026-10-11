@@ -1,4 +1,5 @@
-//! File operations started by the user. Deleting always goes to the trash.
+//! File operations started by the user. Deleting goes to the trash; only
+//! Shift+Delete, after its own question, deletes for good.
 
 use std::path::{Path, PathBuf};
 
@@ -9,6 +10,14 @@ pub fn trash(path: &Path) -> Result<(), String> {
         return Err(format!("No longer exists: {}", path.display()));
     }
     trash::delete(path).map_err(|e| format!("Cannot move {} to trash: {e}", path.display()))
+}
+
+/// Deletes `path` for good, without the trash. A folder goes with everything
+/// in it; a symlink is removed itself, never what it points to.
+pub fn delete_forever(path: &Path) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|_| format!("No longer exists: {}", path.display()))?;
+    let result = if meta.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+    result.map_err(|e| format!("Cannot delete {}: {e}", path.display()))
 }
 
 /// Opens a file with its default app, without waiting for it.
@@ -77,14 +86,23 @@ fn skip_zone_check(dangerous: Option<bool>) -> bool {
     dangerous == Some(false)
 }
 
+/// Whether the system allows `c` in a file name: never "/" or NUL; on Windows
+/// also \ : * ? " < > | and control characters.
+pub fn allowed_in_name(c: char) -> bool {
+    if c == '/' || c == '\0' {
+        return false;
+    }
+    !(cfg!(windows) && (c.is_ascii_control() || matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')))
+}
+
 /// Checks a name typed by the user for a new or renamed entry.
 pub fn validate_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
         Err("Name cannot be empty".into())
-    } else if name.contains('/') {
-        Err("Name cannot contain “/”".into())
     } else if name.contains('\0') {
         Err("Name cannot contain a NUL character".into())
+    } else if let Some(c) = name.chars().find(|&c| !allowed_in_name(c)) {
+        Err(format!("Name cannot contain “{c}”"))
     } else if name == "." || name == ".." {
         Err(format!("“{name}” is not a valid name"))
     } else {
@@ -220,6 +238,42 @@ pub fn create_folder(parent: &Path) -> Result<PathBuf, String> {
     unreachable!("the name counter is unbounded")
 }
 
+/// Creates a file in `parent`: empty and called "New File", or a copy of
+/// `template` under its name. A taken name gets a number ("Report 2.odt");
+/// nothing existing is ever overwritten. Returns the created file.
+pub fn create_file(parent: &Path, template: Option<&Path>) -> Result<PathBuf, String> {
+    use std::io::Write;
+    let fail = |e: std::io::Error| format!("Cannot create a file in {}: {e}", parent.display());
+    let contents = match template {
+        Some(t) => std::fs::read(t).map_err(|e| format!("Cannot read the template {}: {e}", t.display()))?,
+        None => Vec::new(),
+    };
+    let name = template.and_then(|t| t.file_name()).map_or_else(|| NEW_FILE.to_owned(), |n| n.to_string_lossy().into_owned());
+    let (stem, ext) = match name.rfind('.').filter(|&dot| dot > 0) {
+        Some(dot) => name.split_at(dot),
+        None => (name.as_str(), ""),
+    };
+    for n in 1.. {
+        let path = parent.join(if n == 1 { name.clone() } else { format!("{stem} {n}{ext}") });
+        // `create_new` fails on a taken name, so there is no check-then-create race.
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(&contents) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                    return Err(fail(e));
+                }
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(fail(e)),
+        }
+    }
+    unreachable!("the name counter is unbounded")
+}
+
+pub const NEW_FILE: &str = "New File";
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -234,23 +288,39 @@ pub(crate) mod tests {
             .join("ops")
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
+        // A run that failed or was stopped before its own purge left items in the
+        // trash; tests that count this fixture's trashed items would see them.
+        purge_trashed_from(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    /// Removes this fixture's items from the trash so test runs do not pile up there.
+    /// Everything in the trash. Tests run in parallel, and the trash crate panics
+    /// when it reads an item's .trashinfo while another test is still writing it
+    /// ("Absolute path to trashed item should have a parent"): read it again.
+    fn trash_items() -> Vec<trash::TrashItem> {
+        for _ in 0..50 {
+            if let Ok(items) = std::panic::catch_unwind(trash::os_limited::list) {
+                return items.unwrap_or_default();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the trash could not be listed");
+    }
+
+    /// Removes the items trashed from this fixture, or from a folder inside it,
+    /// so test runs do not pile up in the trash.
     pub(crate) fn purge_trashed_from(dir: &Path) {
-        let items: Vec<_> = trash::os_limited::list()
-            .unwrap_or_default()
+        let items: Vec<_> = trash_items()
             .into_iter()
-            .filter(|item| item.original_parent == dir)
+            .filter(|item| item.original_parent.starts_with(dir))
             .collect();
         let _ = trash::os_limited::purge_all(items);
     }
 
     /// Names of this fixture's items in the trash, sorted, as `as_trashed` gives them.
     pub(crate) fn trashed_names_from(dir: &Path) -> Vec<String> {
-        let items = trash::os_limited::list().unwrap_or_default();
+        let items = trash_items();
         let names = items.iter().filter(|item| item.original_parent == dir).map(|item| item.name.to_string_lossy());
         as_trashed(&names.collect::<Vec<_>>())
     }
@@ -289,6 +359,55 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn delete_forever_removes_a_file_and_a_whole_folder_without_the_trash() {
+        let dir = fresh_fixture("delete-forever");
+        std::fs::write(dir.join("a.txt"), "A").unwrap();
+        std::fs::create_dir_all(dir.join("tree/deep")).unwrap();
+        std::fs::write(dir.join("tree/deep/x.txt"), "X").unwrap();
+        delete_forever(&dir.join("a.txt")).unwrap();
+        delete_forever(&dir.join("tree")).unwrap();
+        assert!(!exists(&dir.join("a.txt")) && !exists(&dir.join("tree")));
+        assert_eq!(trashed_names_from(&dir), Vec::<String>::new(), "nothing went to the trash");
+        assert_eq!(
+            delete_forever(&dir.join("a.txt")),
+            Err(format!("No longer exists: {}", dir.join("a.txt").display()))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_forever_removes_a_link_and_never_what_it_points_to() {
+        let dir = fresh_fixture("delete-forever-link");
+        std::fs::create_dir(dir.join("real")).unwrap();
+        std::fs::write(dir.join("real/keep.txt"), "K").unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        delete_forever(&dir.join("link")).unwrap();
+        assert!(std::fs::symlink_metadata(dir.join("link")).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("real/keep.txt")).unwrap(), "K");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_forever_never_follows_links_inside_a_folder() {
+        let dir = fresh_fixture("delete-forever-nested");
+        std::fs::create_dir_all(dir.join("outside/deep")).unwrap();
+        std::fs::write(dir.join("outside/keep.txt"), "K").unwrap();
+        std::fs::write(dir.join("outside/deep/keep2.txt"), "K2").unwrap();
+        std::fs::create_dir_all(dir.join("tree/inner")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outside"), dir.join("tree/link_dir")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outside"), dir.join("tree/inner/link_dir2")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outside/keep.txt"), dir.join("tree/link_file")).unwrap();
+        std::os::unix::fs::symlink(dir.join("nowhere"), dir.join("tree/dangling")).unwrap();
+        std::os::unix::fs::symlink(dir.join("nowhere"), dir.join("dangling_top")).unwrap();
+        delete_forever(&dir.join("tree")).unwrap();
+        delete_forever(&dir.join("dangling_top")).unwrap();
+        assert!(std::fs::symlink_metadata(dir.join("tree")).is_err());
+        assert!(std::fs::symlink_metadata(dir.join("dangling_top")).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("outside/keep.txt")).unwrap(), "K");
+        assert_eq!(std::fs::read_to_string(dir.join("outside/deep/keep2.txt")).unwrap(), "K2");
+    }
+
+    #[test]
     fn trashing_a_missing_path_is_an_error() {
         let dir = fresh_fixture("trash-missing");
         let err = trash(&dir.join("ghost.txt")).unwrap_err();
@@ -305,6 +424,27 @@ pub(crate) mod tests {
         for good in ["notes.txt", ".hidden", " spaced name ", "ñandú", "a..b"] {
             assert_eq!(validate_name(good), Ok(()), "{good:?} should be valid");
         }
+    }
+
+    #[test]
+    fn the_characters_a_name_cannot_hold_follow_the_system() {
+        for c in ['/', '\0'] {
+            assert!(!allowed_in_name(c), "{c:?} is never allowed");
+        }
+        for c in ['a', 'ñ', ' ', '.', '-', '(', 'é'] {
+            assert!(allowed_in_name(c), "{c:?} is always allowed");
+        }
+        let windows_only = ['\\', ':', '*', '?', '"', '<', '>', '|', '\u{1}', '\u{1f}'];
+        for c in windows_only {
+            assert_eq!(allowed_in_name(c), cfg!(not(windows)), "{c:?}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rejects_its_forbidden_characters_on_confirm() {
+        assert_eq!(validate_name("a:b").unwrap_err(), "Name cannot contain “:”");
+        assert_eq!(validate_name("a\\b").unwrap_err(), "Name cannot contain “\\”");
     }
 
     #[test]
@@ -440,6 +580,30 @@ pub(crate) mod tests {
         assert_eq!(create_folder(&dir).unwrap(), dir.join("New Folder 4"));
         assert!(dir.join("New Folder").is_dir() && dir.join("New Folder 4").is_dir());
         assert!(dir.join("New Folder 3").is_file(), "existing file untouched");
+    }
+
+    #[test]
+    fn new_file_gets_a_free_name_and_never_overwrites() {
+        let dir = fresh_fixture("new-file");
+        assert_eq!(create_file(&dir, None).unwrap(), dir.join("New File"));
+        std::fs::write(dir.join("New File 2"), "KEEP").unwrap();
+        assert_eq!(create_file(&dir, None).unwrap(), dir.join("New File 3"));
+        assert_eq!(std::fs::read_to_string(dir.join("New File 2")).unwrap(), "KEEP");
+        assert_eq!(std::fs::read(dir.join("New File")).unwrap(), b"", "empty");
+    }
+
+    #[test]
+    fn a_new_file_from_a_template_copies_it_and_numbers_before_the_extension() {
+        let dir = fresh_fixture("new-file-template");
+        let templates = fresh_fixture("new-file-templates");
+        std::fs::write(templates.join("Report.odt"), "TEMPLATE").unwrap();
+        let template = templates.join("Report.odt");
+        assert_eq!(create_file(&dir, Some(&template)).unwrap(), dir.join("Report.odt"));
+        assert_eq!(create_file(&dir, Some(&template)).unwrap(), dir.join("Report 2.odt"));
+        assert_eq!(std::fs::read_to_string(dir.join("Report 2.odt")).unwrap(), "TEMPLATE");
+        let missing = templates.join("gone.txt");
+        assert!(create_file(&dir, Some(&missing)).is_err());
+        assert!(!dir.join("gone.txt").exists(), "nothing left behind");
     }
 
     #[test]

@@ -25,6 +25,8 @@ pub struct Status<'a> {
     pub folder_count: usize,
     /// Selected row, as an index into the rows shown.
     pub selected: Option<usize>,
+    /// Rows picked with Ctrl+A, Ctrl+click or Shift.
+    pub picked: usize,
 }
 
 pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
@@ -55,6 +57,10 @@ pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
             ui.spinner();
             ui.label(counting);
             ui.weak("Esc to cancel");
+        }
+        if let Some(picked) = picked_text(status.picked) {
+            ui.separator();
+            ui.strong(picked);
         }
         if let Some(notice) = status.notice {
             ui.separator();
@@ -114,6 +120,11 @@ pub fn filter_placeholder(items: usize) -> String {
     format!("Filter {items} {noun}…")
 }
 
+/// "5 selected" while rows are picked.
+pub fn picked_text(picked: usize) -> Option<String> {
+    (picked > 0).then(|| format!("{picked} selected"))
+}
+
 /// "9/10": the selected row, counted from 1, of the rows shown.
 pub fn position_text(selected: Option<usize>, rows: usize) -> String {
     format!("{}/{rows}", selected.map_or(0, |i| i + 1))
@@ -136,12 +147,14 @@ pub fn counting_text(name: &str, totals: &Totals) -> String {
 }
 
 /// "Copying 3/10 — 45%": files done of total, then share of bytes.
-pub fn progress_text(mode: Mode, progress: &Progress) -> String {
+/// `item` is which entry of a several-entry paste is running, and of how many.
+pub fn progress_text(mode: Mode, progress: &Progress, item: Option<(usize, usize)>) -> String {
     let verb = match mode {
         Mode::Copy => "Copying",
         Mode::Move => "Moving",
     };
-    format!("{verb} {}/{} — {}%", progress.files_done, progress.files_total, progress.percent())
+    let item = item.map(|(n, total)| format!("item {n} of {total}: ")).unwrap_or_default();
+    format!("{verb} {item}{}/{} — {}%", progress.files_done, progress.files_total, progress.percent())
 }
 
 #[cfg(test)]
@@ -165,6 +178,7 @@ mod tests {
             counting: None,
             folder_count: 0,
             selected: None,
+            picked: 0,
         };
         let mut shapes = Vec::new();
         for _ in 0..2 {
@@ -186,6 +200,20 @@ mod tests {
             _ => None,
         });
         (text, cursor)
+    }
+
+    #[test]
+    fn a_paste_of_several_items_says_which_one_is_running() {
+        let p = Progress { files_done: 1, files_total: 4, bytes_done: 50, bytes_total: 100 };
+        assert_eq!(progress_text(Mode::Copy, &p, None), "Copying 1/4 — 50%");
+        assert_eq!(progress_text(Mode::Move, &p, Some((2, 5))), "Moving item 2 of 5: 1/4 — 50%");
+    }
+
+    #[test]
+    fn picked_rows_are_counted_only_when_there_are_some() {
+        assert_eq!(picked_text(0), None);
+        assert_eq!(picked_text(1).as_deref(), Some("1 selected"));
+        assert_eq!(picked_text(5).as_deref(), Some("5 selected"));
     }
 
     #[test]
@@ -220,6 +248,7 @@ mod tests {
             counting: None,
             folder_count: 2,
             selected: None,
+            picked: 0,
         };
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 200.0));
         let mut shapes = Vec::new();
@@ -289,7 +318,7 @@ mod tests {
     #[test]
     fn progress_reads_files_then_percent() {
         let p = Progress { files_done: 3, files_total: 10, bytes_done: 45, bytes_total: 100 };
-        assert_eq!(progress_text(Mode::Copy, &p), "Copying 3/10 — 45%");
-        assert_eq!(progress_text(Mode::Move, &Progress::default()), "Moving 0/0 — 100%");
+        assert_eq!(progress_text(Mode::Copy, &p, None), "Copying 3/10 — 45%");
+        assert_eq!(progress_text(Mode::Move, &Progress::default(), None), "Moving 0/0 — 100%");
     }
 }
