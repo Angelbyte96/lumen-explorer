@@ -928,7 +928,7 @@ impl LumenApp {
         // Only here, never in `new`, and not under test: a test must not
         // crawl the machine.
         if !cfg!(test) {
-            app.path_popup = PathPopup::with_crawler(start_index(ctx));
+            app.path_popup = PathPopup::with_crawler(start_index(ctx), Box::new(start_index));
         }
         // The others list when they are first shown (see `select_tab`).
         app.tabs = tabs
@@ -1360,6 +1360,7 @@ impl LumenApp {
                 self.reload(ctx, file_name(&path));
                 return;
             }
+            self.path_popup.mark_stale();
         }
         self.reload(ctx, select);
     }
@@ -1373,6 +1374,7 @@ impl LumenApp {
     fn new_file(&mut self, ctx: &egui::Context, template: Option<&Path>) {
         match fs::ops::create_file(&self.tab.view.current, template) {
             Ok(path) => {
+                self.path_popup.mark_stale();
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
                 self.tab.rename_after_load = Some(path);
                 self.reload(ctx, name);
@@ -1384,6 +1386,7 @@ impl LumenApp {
     fn new_folder(&mut self, ctx: &egui::Context) {
         match fs::ops::create_folder(&self.tab.view.current) {
             Ok(path) => {
+                self.path_popup.mark_stale();
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
                 self.tab.rename_after_load = Some(path);
                 self.reload(ctx, name);
@@ -1396,6 +1399,7 @@ impl LumenApp {
     fn finish_rename(&mut self, ctx: &egui::Context, mut edit: RenameEdit, replace: bool) {
         match fs::ops::rename(&edit.path, &edit.text, replace) {
             Ok(Renamed::To(_)) => {
+                self.path_popup.mark_stale();
                 self.tab.view.error = None;
                 self.reload(ctx, Some(edit.text));
             }
@@ -1557,6 +1561,7 @@ impl LumenApp {
         let mode = running.job.mode;
         let stop = match result {
             Ok(Outcome::Done) => {
+                self.path_popup.mark_stale();
                 if let Some(batch) = self.batch.as_mut() {
                     batch.landed = Some(running.target);
                 }
@@ -2731,6 +2736,26 @@ mod tests {
         app.path_popup = PathPopup::default();
         app.raise_parked_question();
         assert!(app.dialog.is_some());
+    }
+
+    #[test]
+    fn a_folder_made_by_lumen_marks_the_index_stale_so_the_next_opening_renews_it() {
+        let (ctx, mut app, dir) = app_in("app-index-stale");
+        let starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = starts.clone();
+        let restart: Box<dyn Fn(&egui::Context) -> Crawler> = Box::new(move |_| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Crawler::fixed(fs::index::Index::default(), false)
+        });
+        app.path_popup = PathPopup::with_crawler(Crawler::fixed(fs::index::Index::default(), true), restart);
+        app.new_folder(&ctx);
+        app.path_popup.open();
+        let input = egui::RawInput { time: Some(5.0), screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))), ..egui::RawInput::default() };
+        ctx.run_ui(input, |root| {
+            egui::CentralPanel::default().show(root, |ui| app.path_popup.show(ui.ctx(), ui.max_rect(), &dir, None, false, Vec::new));
+        })
+        .drop_without_applying_deltas();
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1, "five seconds old, yet renewed");
     }
 
     #[test]
