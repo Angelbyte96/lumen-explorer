@@ -66,7 +66,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
                 ui.weak("Ctrl+D or ☆ adds the folder you are in");
             }
             for path in sidebar.bookmarks {
-                let response = item(ui, ItemIcon::Folder, &label_of(path), &path.display().to_string(), path, sidebar.current, sidebar.icons);
+                let response = item(ui, ItemIcon::Folder, "folder", &label_of(path), &path.display().to_string(), path, sidebar.current, sidebar.icons);
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(path.clone()));
                 }
@@ -81,7 +81,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
         section(ui, "Places", true, |ui| {
             for place in sidebar.places {
                 let icon = if place.trash { ItemIcon::Glyph(TRASH) } else { ItemIcon::Folder };
-                if item(ui, icon, &place.label, &place.path.display().to_string(), &place.path, sidebar.current, sidebar.icons).clicked() {
+                if item(ui, icon, place.icon, &place.label, &place.path.display().to_string(), &place.path, sidebar.current, sidebar.icons).clicked() {
                     event = Some(SidebarEvent::Open(place.path.clone()));
                 }
             }
@@ -90,7 +90,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
             for (mount, usage) in sidebar.disks {
                 // The bar is only 4 px tall: the whole row tells the free space too.
                 let hint = disk_hint(&mount.path, usage.as_ref());
-                let response = item(ui, ItemIcon::Glyph(DISK), &mount.label, &hint, &mount.path, sidebar.current, sidebar.icons);
+                let response = item(ui, ItemIcon::Glyph(DISK), "drive-harddisk", &mount.label, &hint, &mount.path, sidebar.current, sidebar.icons);
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(mount.path.clone()));
                 }
@@ -102,7 +102,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
         });
         section(ui, "Recents", false, |ui| {
             for path in sidebar.recents {
-                if item(ui, ItemIcon::Folder, &label_of(path), &path.display().to_string(), path, sidebar.current, sidebar.icons).clicked() {
+                if item(ui, ItemIcon::Folder, "folder", &label_of(path), &path.display().to_string(), path, sidebar.current, sidebar.icons).clicked() {
                     event = Some(SidebarEvent::Open(path.clone()));
                 }
             }
@@ -123,15 +123,24 @@ enum ItemIcon {
 }
 
 /// One clickable row, the panel's full width; the folder on screen is
-/// highlighted. `hint` shows on hover anywhere on it, icon and empty end included.
-fn item(ui: &mut egui::Ui, icon: ItemIcon, label: &str, hint: &str, path: &Path, current: &Path, icons: &FileIcons) -> egui::Response {
+/// highlighted. `hint` shows on hover anywhere on it, icon and empty end
+/// included. `theme` is its freedesktop icon name ("folder-download").
+#[allow(clippy::too_many_arguments)]
+fn item(ui: &mut egui::Ui, icon: ItemIcon, theme: &'static str, label: &str, hint: &str, path: &Path, current: &Path, icons: &FileIcons) -> egui::Response {
     // Windows' icon for folders and disks once loaded (Downloads' arrow, the
     // drive's); the painted folder or the glyph meanwhile. The trash has no
-    // folder of its own to ask about.
-    let own = match icon {
-        ItemIcon::Glyph(TRASH) => None,
-        _ => icons.folder_texture(path),
+    // folder of its own to ask about. Elsewhere the icon theme's one-colour
+    // icon, as Nautilus shows them, tinted like the text.
+    #[cfg(windows)]
+    let own = {
+        let _ = theme;
+        match icon {
+            ItemIcon::Glyph(TRASH) => None,
+            _ => icons.folder_texture(path),
+        }
     };
+    #[cfg(not(windows))]
+    let own = icons.symbolic_texture(theme);
     let selected = path == current;
     // Senses clicks below the name button, so the button keeps its own.
     let row = egui::UiBuilder::new().sense(egui::Sense::click());
@@ -149,8 +158,11 @@ fn item(ui: &mut egui::Ui, icon: ItemIcon, label: &str, hint: &str, path: &Path,
         ui.horizontal(|ui| {
             ui.set_min_width(ui.available_width());
             match (own, icon) {
-                (Some(texture), _) => {
+                (Some(texture), _) if cfg!(windows) => {
                     icons::image(ui, texture);
+                }
+                (Some(texture), _) => {
+                    icons::symbol(ui, texture);
                 }
                 (None, ItemIcon::Folder) => {
                     icons::folder(ui);
@@ -191,7 +203,7 @@ mod tests {
         let ctx = egui::Context::default();
         let (mut row, mut avail) = (egui::Rect::NOTHING, 0.0);
         let icons = FileIcons::default();
-        let draw = |ui: &mut egui::Ui| item(ui, ItemIcon::Glyph(DISK), "File System", "/\nfree", Path::new("/"), Path::new("/home"), &icons);
+        let draw = |ui: &mut egui::Ui| item(ui, ItemIcon::Glyph(DISK), "drive-harddisk", "File System", "/\nfree", Path::new("/"), Path::new("/home"), &icons);
         crate::ui::testing::frame(&ctx, vec![], |ui| {
             avail = ui.available_width();
             row = draw(ui).rect;
@@ -203,6 +215,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn places_and_disks_show_the_shells_icon_once_loaded_and_the_painted_one_meanwhile() {
         let ctx = egui::Context::default();
@@ -234,6 +247,49 @@ mod tests {
         assert_eq!(meshes, 2, "the bookmark, still loading, keeps the painted folder");
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn every_row_shows_the_themes_symbolic_icon_in_the_text_colour_once_loaded() {
+        let ctx = egui::Context::default();
+        let mut icons = FileIcons::default();
+        let white = |name: &str| ctx.load_texture(name, egui::ColorImage::new([4, 4], vec![egui::Color32::WHITE; 16]), egui::TextureOptions::LINEAR);
+        let (downloads, trash, disk, folder) = (white("downloads"), white("trash"), white("disk"), white("folder"));
+        icons.insert_symbolic("folder-download", downloads.clone());
+        icons.insert_symbolic("user-trash", trash.clone());
+        icons.insert_symbolic("drive-harddisk", disk.clone());
+        icons.insert_symbolic("folder", folder.clone());
+        let places = [
+            Place { label: "Downloads".into(), path: "/home/me/Downloads".into(), trash: false, icon: "folder-download" },
+            Place { label: "Trash".into(), path: "/home/me/.local/share/Trash/files".into(), trash: true, icon: "user-trash" },
+            Place { label: "Music".into(), path: "/home/me/Music".into(), trash: false, icon: "folder-music" },
+        ];
+        let disks = [(Mount { label: "File System".into(), path: "/".into() }, None)];
+        let (bookmarks, recents) = ([PathBuf::from("/home/me/work")], [PathBuf::from("/tmp")]);
+        let sidebar = Sidebar { current: Path::new("/home/me"), bookmarks: &bookmarks, places: &places, disks: &disks, recents: &recents, icons: &icons };
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                show(ui, &sidebar);
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let text = ctx.global_style().visuals.text_color();
+        let tinted = |texture: &egui::TextureHandle| {
+            shapes
+                .iter()
+                .filter(|s| matches!(&s.shape, egui::Shape::Mesh(m) if m.texture_id == texture.id() && m.vertices.iter().all(|v| v.color == text)))
+                .count()
+        };
+        assert_eq!(tinted(&downloads), 1, "the place's symbolic icon, in the text colour");
+        assert_eq!(tinted(&trash), 1, "the trash has one too");
+        assert_eq!(tinted(&disk), 1, "the disk's, not the glyph");
+        assert_eq!(tinted(&folder), 1, "the bookmark's");
+        let glyphs = shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Text(t) if [DISK, TRASH].contains(&t.galley.text()))).count();
+        assert_eq!(glyphs, 0, "no glyphs once the icons are in");
+        assert!(icons.wanted_symbolic().contains(&"folder-music"), "Music, still loading, was asked for");
+    }
+
     #[test]
     fn a_row_under_the_pointer_is_highlighted_across_the_panel_like_the_file_rows() {
         let ctx = egui::Context::default();
@@ -243,7 +299,7 @@ mod tests {
             let input = egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
             let mut output = ctx.run_ui(input, |root| {
                 egui::CentralPanel::default().show(root, |ui| {
-                    row = item(ui, ItemIcon::Folder, "Downloads", "hint", Path::new("/d"), Path::new("/home"), &icons).rect;
+                    row = item(ui, ItemIcon::Folder, "folder-download", "Downloads", "hint", Path::new("/d"), Path::new("/home"), &icons).rect;
                 });
             });
             output.textures_delta.clear();
