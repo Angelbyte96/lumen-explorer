@@ -127,11 +127,14 @@ pub fn show(
             // Text sits in the middle of rows made taller by the zoom.
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .sense(egui::Sense::click());
-        // Every column has its own width, like File Pilot: what the columns do not
-        // fill stays empty, and columns wider than the list scroll sideways.
-        for width in widths {
+        // Every column has its own width, like File Pilot: the last one stretches
+        // over whatever room the others leave, and columns wider than the list
+        // scroll sideways.
+        let (last, others) = widths.split_last().expect("columns");
+        for &width in others {
             table = table.column(Column::exact(width).clip(true));
         }
+        table = table.column(Column::remainder().at_least(*last).clip(true));
         if let Some(scroll) = scroll
             && let Some(sel) = selected
         {
@@ -266,7 +269,8 @@ fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths
         if response.drag_started()
             && let Some(start) = ui.input(|i| i.pointer.press_origin()).or(pointer)
         {
-            let drag = Drag { column, start_x: start.x, start_width: widths[column], widths: *widths };
+            // The width drawn: the last column may be stretched past its own.
+            let drag = Drag { column, start_x: start.x, start_width: cell.width(), widths: *widths };
             ui.ctx().data_mut(|d| d.insert_temp(drag_id(), drag));
         }
         if response.drag_stopped()
@@ -756,6 +760,35 @@ mod tests {
             scrolled = draw_list(&ctx, &view, &wide_widths, vec![]).lefts;
         }
         assert!(scrolled[5].is_some_and(|x| x < 800.0), "Size scrolled into view: {scrolled:?}");
+    }
+
+    #[test]
+    fn the_last_column_stretches_to_the_lists_edge_when_the_columns_leave_room() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt"]);
+        let narrow = [150.0, 60.0, 60.0, 40.0, 40.0, 50.0];
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        show(ui, &view, &[], Sizes { widths: narrow, ..Sizes::default() }, None, None, &FileIcons::default());
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let size_right = shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == "1 B" => Some(t.pos.x + t.galley.size().x),
+                _ => None,
+            })
+            .expect("size painted");
+        // The 800 pt screen less the panel's margin and the scroll bar's room.
+        assert!(size_right > 750.0, "Size is right-aligned at the list's edge, not after 50 pt: {size_right}");
     }
 
     #[test]
