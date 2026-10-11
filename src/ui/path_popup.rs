@@ -74,6 +74,10 @@ const RESULTS: usize = 50;
 /// How often the results are searched again while the crawl goes on.
 const REFRESH_SECS: f64 = 0.5;
 
+/// An index older than this (seconds since its crawl started) is crawled
+/// again when the box opens.
+const STALE_SECS: f64 = 600.0;
+
 /// One row of the list: a folder's entry, or a hit of the whole index.
 struct Row {
     entry: Entry,
@@ -101,9 +105,20 @@ struct Asked {
     at: f64,
 }
 
+/// Starts a crawl of the whole scope: the first one, and every re-crawl.
+pub type Restart = Box<dyn Fn(&egui::Context) -> Crawler>;
+
 /// The quick jump: the crawl and the searches over what it finds.
 struct Jump {
     crawler: Crawler,
+    /// Starts the next crawl.
+    restart: Restart,
+    /// The crawl whose index replaces `crawler`'s once it is done.
+    recrawl: Option<Crawler>,
+    /// When the crawl of `crawler` started, in seconds of the session.
+    started: f64,
+    /// Lumen changed files since that crawl started.
+    changed: bool,
     searcher: Searcher,
     asked: Option<Asked>,
     /// The request whose answer `hits` holds.
@@ -114,9 +129,36 @@ struct Jump {
 }
 
 impl Jump {
-    fn new(crawler: Crawler) -> Self {
+    fn new(crawler: Crawler, restart: Restart) -> Self {
         let searcher = Searcher::new(crawler.index().clone());
-        Self { crawler, searcher, asked: None, shown: 0, hits: Vec::new(), items: 0 }
+        // The first crawl starts with the app, at second 0 of its session.
+        Self { crawler, restart, recrawl: None, started: 0.0, changed: false, searcher, asked: None, shown: 0, hits: Vec::new(), items: 0 }
+    }
+
+    /// Puts a finished re-crawl's index in place of the old one; the next
+    /// frame searches the word again and the old index is dropped.
+    fn swap_in_recrawl(&mut self) {
+        if self.recrawl.as_ref().is_some_and(Crawler::is_done)
+            && let Some(crawler) = self.recrawl.take()
+        {
+            self.searcher = Searcher::new(crawler.index().clone());
+            self.crawler = crawler;
+            self.shown = 0;
+            // The old hits stay on screen until the new answer lands.
+            self.asked = None;
+        }
+    }
+
+    /// Starts a re-crawl when the index is older than [`STALE_SECS`] or Lumen
+    /// changed files since it started. Never while a crawl is going on: the
+    /// first one has no finished index to renew yet.
+    fn renew_if_stale(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if self.recrawl.is_none() && self.crawler.is_done() && (self.changed || now - self.started >= STALE_SECS) {
+            self.recrawl = Some((self.restart)(ctx));
+            self.started = now;
+            self.changed = false;
+        }
     }
 
     /// Takes in a finished search and asks again when `query` changed or the
@@ -175,12 +217,28 @@ pub struct PathPopup {
     jump: Option<Jump>,
     /// Keys that use a row, pressed while its answer was still being searched.
     held: Keys,
+    /// The box just opened: the index may need a re-crawl.
+    check_index: bool,
 }
 
 impl PathPopup {
-    /// A box whose words with no path search what `crawler` indexes.
-    pub fn with_crawler(crawler: Crawler) -> Self {
-        Self { jump: Some(Jump::new(crawler)), ..Self::default() }
+    /// A box whose words with no path search what `crawler` indexes;
+    /// `restart` starts the crawl that renews a stale index.
+    pub fn with_crawler(crawler: Crawler, restart: Restart) -> Self {
+        Self { jump: Some(Jump::new(crawler, restart)), ..Self::default() }
+    }
+
+    /// Lumen changed the files: the index no longer matches the disk.
+    pub fn mark_stale(&mut self) {
+        if let Some(jump) = &mut self.jump {
+            jump.changed = true;
+        }
+    }
+
+    /// Whether a re-crawl is going on behind the index that answers.
+    #[cfg(test)]
+    pub fn is_recrawling(&self) -> bool {
+        self.jump.as_ref().is_some_and(|j| j.recrawl.is_some())
     }
 
     /// Whether the latest search has not answered yet.
@@ -191,6 +249,7 @@ impl PathPopup {
 
     pub fn open(&mut self) {
         self.open = true;
+        self.check_index = true;
         self.filled_from = None;
     }
 
@@ -239,6 +298,12 @@ impl PathPopup {
     ) -> Option<PopupEvent> {
         if !self.open {
             return None;
+        }
+        if let Some(jump) = &mut self.jump {
+            jump.swap_in_recrawl();
+            if std::mem::take(&mut self.check_index) {
+                jump.renew_if_stale(ctx);
+            }
         }
         if self.filled_from.as_deref() != Some(current) {
             self.filled_from = Some(current.to_path_buf());
@@ -762,6 +827,8 @@ mod tests {
     }
 
     use crate::fs::index::{Index, Rules, crawl};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use eframe::egui::{Color32, epaint::ClippedShape};
 
     /// One frame with these events, and what it painted.
@@ -842,6 +909,11 @@ mod tests {
     /// docs/ (down-notes.txt, win-notes.txt), readme.md. `done`: whether the
     /// crawl counts as finished. Also the number of entries indexed.
     fn indexed(name: &str, done: bool) -> (egui::Context, PathPopup, PathBuf, usize) {
+        indexed_with(name, done, Box::new(|_| Crawler::fixed(Index::default(), true)))
+    }
+
+    /// [`indexed`] with the crawl that renews the index chosen.
+    fn indexed_with(name: &str, done: bool, restart: Restart) -> (egui::Context, PathPopup, PathBuf, usize) {
         let dir = crate::fs::ops::tests::fresh_fixture(name);
         for folder in ["Downloads", "Windows NT", "docs"] {
             std::fs::create_dir(dir.join(folder)).unwrap();
@@ -854,7 +926,7 @@ mod tests {
         let index = index.into_inner().unwrap();
         let entries = index.len();
         let ctx = egui::Context::default();
-        let mut popup = PathPopup::with_crawler(Crawler::fixed(index, done));
+        let mut popup = PathPopup::with_crawler(Crawler::fixed(index, done), restart);
         popup.open();
         step(&ctx, &mut popup, &dir, vec![]);
         (ctx, popup, dir, entries)
@@ -1130,5 +1202,109 @@ mod tests {
         assert_eq!(typed_target(&format!("{}/sub/", dir.display()), &dir, None), (dir.join("sub"), None));
         assert_eq!(typed_target("a.txt", &dir, None), (dir.clone(), Some("a.txt".into())));
         assert_eq!(typed_target("missing", &dir, None), (dir.join("missing"), None), "the listing reports it");
+    }
+
+    /// A re-crawl that never ends, and how many times one was started.
+    fn endless() -> (Arc<AtomicUsize>, Restart) {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let counter = starts.clone();
+        let restart: Restart = Box::new(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Crawler::fixed(Index::default(), false)
+        });
+        (starts, restart)
+    }
+
+    /// Closes the box and opens it again on a frame `time` seconds into the session.
+    fn reopened_at(ctx: &egui::Context, popup: &mut PathPopup, dir: &Path, time: f64) {
+        popup.close();
+        popup.open();
+        let input = egui::RawInput { time: Some(time), screen_rect: Some(SCREEN), ..egui::RawInput::default() };
+        ctx.run_ui(input, |root| {
+            egui::CentralPanel::default().show(root, |ui| popup.show(ui.ctx(), SCREEN, dir, None, false, Vec::new));
+        })
+        .drop_without_applying_deltas();
+        // The field takes focus on the first frame; only then does it take typing.
+        step(ctx, popup, dir, vec![]);
+    }
+
+    #[test]
+    fn opening_the_box_on_an_index_older_than_ten_minutes_starts_a_recrawl_and_the_old_results_show_meanwhile() {
+        let (starts, restart) = endless();
+        let (ctx, mut popup, dir, _) = indexed_with("popup-stale-age", true, restart);
+        assert_eq!(starts.load(Ordering::SeqCst), 0, "the index is as old as the app: nothing to renew");
+        reopened_at(&ctx, &mut popup, &dir, 601.0);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert!(popup.is_recrawling());
+        let shapes = typed(&ctx, &mut popup, &dir, "down", &[]);
+        assert_eq!(names(&ctx, &shapes)[0], "Downloads", "the old index keeps answering");
+        assert!(painted_texts(&shapes).iter().all(|t| !t.starts_with("Indexing")), "{:?}", painted_texts(&shapes));
+        reopened_at(&ctx, &mut popup, &dir, 1300.0);
+        assert_eq!(starts.load(Ordering::SeqCst), 1, "one crawl at a time");
+    }
+
+    #[test]
+    fn a_file_created_after_the_first_crawl_is_found_once_the_recrawl_ends() {
+        let dir = crate::fs::ops::tests::fresh_fixture("popup-stale-found");
+        std::fs::create_dir(dir.join("Downloads")).unwrap();
+        let roots = vec![dir.clone()];
+        let restart: Restart = Box::new(move |ctx| {
+            let ctx = ctx.clone();
+            Crawler::start(roots.clone(), Rules::default(), move || ctx.request_repaint())
+        });
+        let ctx = egui::Context::default();
+        let first = restart(&ctx);
+        while !first.is_done() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let mut popup = PathPopup::with_crawler(first, restart);
+        std::fs::write(dir.join("download-new.txt"), "x").unwrap();
+        popup.open();
+        step(&ctx, &mut popup, &dir, vec![]);
+        let shapes = typed(&ctx, &mut popup, &dir, "down", &[]);
+        assert!(!names(&ctx, &shapes).contains(&"download-new.txt".to_string()), "the first crawl did not see it");
+        reopened_at(&ctx, &mut popup, &dir, 601.0);
+        for _ in 0..400 {
+            shown(&ctx, &mut popup, &dir, vec![], &[]);
+            if !popup.is_recrawling() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!popup.is_recrawling(), "the re-crawl never ended");
+        let shapes = typed(&ctx, &mut popup, &dir, "down", &[]);
+        assert!(names(&ctx, &shapes).contains(&"download-new.txt".to_string()), "{:?}", names(&ctx, &shapes));
+        assert!(names(&ctx, &shapes).contains(&"Downloads".to_string()));
+    }
+
+    #[test]
+    fn a_marked_index_is_renewed_at_the_next_opening_even_if_young() {
+        let (starts, restart) = endless();
+        let (ctx, mut popup, dir, _) = indexed_with("popup-stale-marked", true, restart);
+        popup.mark_stale();
+        reopened_at(&ctx, &mut popup, &dir, 5.0);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert!(popup.is_recrawling());
+    }
+
+    #[test]
+    fn a_young_index_nobody_changed_is_not_crawled_again_on_opening() {
+        let (starts, restart) = endless();
+        let (ctx, mut popup, dir, _) = indexed_with("popup-stale-fresh", true, restart);
+        reopened_at(&ctx, &mut popup, &dir, 599.0);
+        reopened_at(&ctx, &mut popup, &dir, 599.0);
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        assert!(!popup.is_recrawling());
+    }
+
+    #[test]
+    fn the_first_crawl_is_never_restarted_and_keeps_its_indexing_line() {
+        let (starts, restart) = endless();
+        let (ctx, mut popup, dir, entries) = indexed_with("popup-stale-first", false, restart);
+        popup.mark_stale();
+        reopened_at(&ctx, &mut popup, &dir, 9999.0);
+        assert_eq!(starts.load(Ordering::SeqCst), 0, "there is no finished index to renew yet");
+        let shapes = typed(&ctx, &mut popup, &dir, "down", &[]);
+        assert!(painted_texts(&shapes).contains(&format!("Indexing… {entries} items")), "{:?}", painted_texts(&shapes));
     }
 }
