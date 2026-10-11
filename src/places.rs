@@ -124,6 +124,55 @@ pub fn places(home: &Path, user_dirs: Option<&str>, trash: Option<&Path>) -> Vec
     places
 }
 
+/// The folder whose files New ▸ offers: XDG_TEMPLATES_DIR, else ~/Templates;
+/// `None` when user-dirs.dirs sets it to the home folder (meaning "none").
+pub fn templates_dir(home: &Path, user_dirs: Option<&str>) -> Option<PathBuf> {
+    let named = user_dirs.map(|text| named_user_dirs(text, home)).unwrap_or_default();
+    match named.into_iter().find(|(key, _)| key == "TEMPLATES") {
+        Some((_, path)) => path,
+        None => Some(home.join("Templates")),
+    }
+}
+
+/// The visible files in `dir`, by name; none when it cannot be read.
+/// Windows' own New ▸ (the shell's) lists its templates instead.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn templates(dir: &Path) -> Vec<PathBuf> {
+    let Ok(read) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut files: Vec<PathBuf> = read
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && !e.file_name().to_string_lossy().starts_with('.'))
+        .map(|e| e.path())
+        .collect();
+    files.sort();
+    files
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+
+    #[test]
+    fn the_templates_folder_comes_from_user_dirs_or_defaults_to_templates() {
+        let home = Path::new("/home/u");
+        let es = "XDG_TEMPLATES_DIR=\"$HOME/Plantillas\"\n";
+        assert_eq!(templates_dir(home, Some(es)), Some(home.join("Plantillas")));
+        assert_eq!(templates_dir(home, None), Some(home.join("Templates")));
+        assert_eq!(templates_dir(home, Some("XDG_TEMPLATES_DIR=\"$HOME/\"\n")), None, "set to home: none");
+    }
+
+    #[test]
+    fn templates_are_the_visible_files_of_the_folder_by_name() {
+        let dir = crate::fs::ops::tests::fresh_fixture("templates-list");
+        for name in ["Spreadsheet.ods", "Note.txt", ".hidden"] {
+            std::fs::write(dir.join(name), "").unwrap();
+        }
+        std::fs::create_dir(dir.join("folder")).unwrap();
+        assert_eq!(templates(&dir), [dir.join("Note.txt"), dir.join("Spreadsheet.ods")]);
+        assert_eq!(templates(&dir.join("missing")), Vec::<PathBuf>::new());
+    }
+}
+
 /// Folder names used when user-dirs.dirs does not name them.
 const ENGLISH_DIRS: [&str; 6] = ["Desktop", "Downloads", "Documents", "Music", "Pictures", "Videos"];
 

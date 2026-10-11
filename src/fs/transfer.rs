@@ -153,7 +153,7 @@ pub fn run(
             "“{}” already exists",
             target.file_name().unwrap_or_default().to_string_lossy()
         )),
-        Mode::Move => match std::fs::rename(source, target) {
+        Mode::Move => match rename(source, target, cancel) {
             Ok(()) => {
                 on_progress(&Progress { files_done: 1, files_total: 1, ..Progress::default() });
                 Ok(Outcome::Done)
@@ -164,6 +164,31 @@ pub fn run(
             Err(e) => Err(format!("Cannot move {}: {e}", source.display())),
         },
     }
+}
+
+/// Waits between tries of a rename Windows refuses for now.
+#[cfg(windows)]
+const RENAME_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
+#[cfg(windows)]
+const RENAME_TRIES: u32 = 10;
+
+/// `std::fs::rename`. On Windows a folder holding a file another program has
+/// open (an antivirus scanning what was just written, the search indexer)
+/// cannot be renamed until it lets go: "access denied" is tried again for
+/// about a second, as File Explorer does, unless cancelled.
+fn rename(source: &Path, target: &Path, cancel: &AtomicBool) -> std::io::Result<()> {
+    #[cfg(windows)]
+    for _ in 1..RENAME_TRIES {
+        match std::fs::rename(source, target) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && !cancel.load(Ordering::Relaxed) => {
+                std::thread::sleep(RENAME_RETRY);
+            }
+            other => return other,
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = cancel;
+    std::fs::rename(source, target)
 }
 
 /// The cross-device half of a move: copy everything, then trash the source.
@@ -626,6 +651,28 @@ mod tests {
         assert!(!src.exists());
         assert_same_tree(&dir.join("to/src"));
         assert_eq!(in_trash(&dir), Vec::<String>::new(), "a rename trashes nothing");
+    }
+
+    /// Windows: a folder whose file another program holds open (an antivirus
+    /// scanning what was just written) cannot be renamed for a moment.
+    #[cfg(windows)]
+    #[test]
+    fn a_move_waits_out_a_file_held_open_for_a_moment() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = fresh_fixture("xfer-move-held");
+        let src = sample_tree(&dir);
+        std::fs::create_dir(dir.join("to")).unwrap();
+        // FILE_SHARE_READ | FILE_SHARE_WRITE, no FILE_SHARE_DELETE: like a scanner's handle.
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0x1 | 0x2).open(src.join("a.txt")).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            drop(held);
+        });
+        let done = run(&src, &dir.join("to/src"), Mode::Move, false, &never(), |_| {});
+        release.join().unwrap();
+        assert_eq!(done, Ok(Outcome::Done));
+        assert!(!src.exists());
+        assert_same_tree(&dir.join("to/src"));
     }
 
     #[test]

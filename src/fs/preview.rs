@@ -21,6 +21,11 @@ pub const IMAGE_LIMIT: u64 = 50 * 1024 * 1024;
 pub const IMAGE_MEMORY_LIMIT: u64 = 192 * 1024 * 1024;
 /// Decoded images are scaled down so their longest side fits this.
 pub const IMAGE_MAX_SIDE: u32 = 2048;
+/// A PDF's first page is drawn with its longest side this long.
+pub const PDF_SIDE: u32 = 1024;
+/// A PDF that takes longer to draw is left without a preview.
+#[cfg(not(windows))]
+const PDF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Decoded pixels, ready for the UI to upload as a texture.
 pub struct Picture {
@@ -53,6 +58,9 @@ pub fn load(path: &Path) -> Content {
     if !meta.is_file() {
         return Content::Info("Special file: no preview".into());
     }
+    if has_extension(path, &["pdf"]) {
+        return pdf_page(path);
+    }
     if is_image(path) {
         if meta.len() > IMAGE_LIMIT {
             return Content::Info("Image larger than 50 MB: no preview".into());
@@ -71,15 +79,102 @@ pub fn load(path: &Path) -> Content {
 }
 
 fn is_image(path: &Path) -> bool {
+    has_extension(path, &["png", "jpg", "jpeg"])
+}
+
+fn has_extension(path: &Path, extensions: &[&str]) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| ["png", "jpg", "jpeg"].contains(&e.to_ascii_lowercase().as_str()))
+        .is_some_and(|e| extensions.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// A PDF's first page, drawn by poppler's pdftoppm (the system's renderer;
+/// nothing is added to Lumen).
+#[cfg(not(windows))]
+fn pdf_page(path: &Path) -> Content {
+    pdf_page_with("pdftoppm", path)
+}
+
+#[cfg(not(windows))]
+fn pdf_page_with(program: &str, path: &Path) -> Content {
+    let mut command = std::process::Command::new(program);
+    command
+        .args(["-png", "-f", "1", "-l", "1", "-singlefile", "-scale-to"])
+        .arg(PDF_SIDE.to_string())
+        .arg(path);
+    match run_for(command, PDF_TIMEOUT) {
+        Ok(png) => match decode_reader(image::ImageReader::new(std::io::Cursor::new(png))) {
+            Ok(picture) => Content::Image(picture),
+            Err(_) => Content::Info("Cannot preview this PDF".into()),
+        },
+        Err(RunError::Missing) => Content::Info("Install poppler-utils to preview PDFs".into()),
+        Err(RunError::TimedOut) => Content::Info("This PDF takes too long to preview".into()),
+        Err(RunError::Failed) => Content::Info("Cannot preview this PDF".into()),
+    }
+}
+
+/// A PDF's first page, drawn by Windows' own PDF renderer.
+#[cfg(windows)]
+fn pdf_page(path: &Path) -> Content {
+    let picture = crate::fs::pdf::first_page_png(path, PDF_SIDE)
+        .ok()
+        .and_then(|png| decode_reader(image::ImageReader::new(std::io::Cursor::new(png))).ok());
+    match picture {
+        Some(picture) => Content::Image(picture),
+        None => Content::Info("Cannot preview this PDF".into()),
+    }
+}
+
+#[cfg(not(windows))]
+#[derive(Debug, PartialEq, Eq)]
+enum RunError {
+    /// The program is not installed.
+    Missing,
+    /// It ran past the time allowed and was stopped.
+    TimedOut,
+    /// It failed or could not be read.
+    Failed,
+}
+
+/// Runs `command` and returns what it wrote, stopping it after `timeout`.
+#[cfg(not(windows))]
+fn run_for(mut command: std::process::Command, timeout: std::time::Duration) -> Result<Vec<u8>, RunError> {
+    use std::process::Stdio;
+    let mut child = match command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(RunError::Missing),
+        Err(_) => return Err(RunError::Failed),
+    };
+    // Read on its own thread: a full pipe would otherwise stall the child.
+    let mut stdout = child.stdout.take().ok_or(RunError::Failed)?;
+    let reader = thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).map(|_| out)
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => thread::sleep(std::time::Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(RunError::TimedOut);
+            }
+        }
+    };
+    let out = reader.join().map_err(|_| RunError::Failed)?.map_err(|_| RunError::Failed)?;
+    if status.success() { Ok(out) } else { Err(RunError::Failed) }
 }
 
 fn decode_image(path: &Path) -> Result<Picture, image::ImageError> {
-    // The format comes from the bytes, so a PNG named .jpg still works. The
-    // size in the header is checked against the limit before any pixel is read.
-    let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
+    // The format comes from the bytes, so a PNG named .jpg still works.
+    decode_reader(image::ImageReader::open(path)?)
+}
+
+fn decode_reader<R: std::io::BufRead + std::io::Seek>(reader: image::ImageReader<R>) -> Result<Picture, image::ImageError> {
+    // The size in the header is checked against the limit before any pixel is read.
+    let mut reader = reader.with_guessed_format()?;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(IMAGE_MEMORY_LIMIT);
     reader.limits(limits);
@@ -202,6 +297,76 @@ mod tests {
             Content::Info(reason) => panic!("expected an image, got info: {reason}"),
             _ => panic!("expected an image"),
         }
+    }
+
+    /// A one-page PDF, 200 x 100 points, its left half red, with a correct xref.
+    fn write_pdf(path: &Path) {
+        let content = "1 0 0 rg 0 0 100 100 re f\n";
+        let objects = [
+            "<</Type/Catalog/Pages 2 0 R>>".to_owned(),
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_owned(),
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Contents 4 0 R>>".to_owned(),
+            format!("<</Length {}>>stream\n{content}endstream", content.len()),
+        ];
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (i, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf += &format!("{} 0 obj\n{object}\nendobj\n", i + 1);
+        }
+        let xref = pdf.len();
+        pdf += &format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
+        for offset in offsets {
+            pdf += &format!("{offset:010} 00000 n \n");
+        }
+        pdf += &format!("trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1);
+        std::fs::write(path, pdf).unwrap();
+    }
+
+    #[test]
+    fn a_pdf_shows_its_first_page() {
+        let dir = fresh_fixture("preview-pdf");
+        write_pdf(&dir.join("page.PDF"));
+        let picture = picture_of(load(&dir.join("page.PDF")));
+        let [w, h] = picture.size;
+        assert_eq!((w, h), (PDF_SIDE as usize, PDF_SIDE as usize / 2), "the page's shape, longest side {PDF_SIDE}");
+        let pixel = |x: usize, y: usize| &picture.rgba[(y * w + x) * 4..][..4];
+        assert_eq!(pixel(w / 4, h / 2), [255, 0, 0, 255], "the red half");
+        assert_eq!(pixel(3 * w / 4, h / 2), [255, 255, 255, 255], "the blank half");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_broken_pdf_or_no_poppler_says_why() {
+        let dir = fresh_fixture("preview-pdf-broken");
+        std::fs::write(dir.join("bad.pdf"), "not a pdf").unwrap();
+        assert_eq!(info_of(load(&dir.join("bad.pdf"))), "Cannot preview this PDF");
+        write_pdf(&dir.join("good.pdf"));
+        assert_eq!(info_of(pdf_page_with("lumen-no-such-pdftoppm", &dir.join("good.pdf"))), "Install poppler-utils to preview PDFs");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_broken_pdf_says_why() {
+        let dir = fresh_fixture("preview-pdf-broken-windows");
+        std::fs::write(dir.join("bad.pdf"), "not a pdf").unwrap();
+        assert_eq!(info_of(load(&dir.join("bad.pdf"))), "Cannot preview this PDF");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_renderer_that_hangs_is_stopped() {
+        let started = std::time::Instant::now();
+        let mut sleeper = std::process::Command::new("sleep");
+        sleeper.arg("10");
+        assert_eq!(run_for(sleeper, Duration::from_millis(200)), Err(RunError::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(3), "killed, not waited for");
+        let mut echo = std::process::Command::new("printf");
+        echo.arg("hi");
+        assert_eq!(run_for(echo, Duration::from_secs(5)), Ok(b"hi".to_vec()));
+        let mut fails = std::process::Command::new("false");
+        fails.arg("x");
+        assert_eq!(run_for(fails, Duration::from_secs(5)), Err(RunError::Failed));
     }
 
     #[test]

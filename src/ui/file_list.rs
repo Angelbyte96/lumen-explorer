@@ -9,16 +9,64 @@ use crate::app::{Scroll, Sort, SortColumn, View};
 use crate::format::{format_size, format_time};
 use crate::fs::Entry;
 use crate::fs::count::Totals;
+use crate::ui::file_icons::FileIcons;
 use crate::ui::icons;
 use crate::ui::path_popup::{marked_name, word_ranges};
 
 pub enum ListEvent {
     Select(usize),
+    /// Ctrl+click: add or remove the row.
+    Toggle(usize),
+    /// Shift+click: select the range up to the row.
+    Extend(usize),
+    /// Right click on the row: its menu.
+    Menu(usize),
+    /// A click below the rows; `menu` for a right click.
+    Empty { menu: bool },
     Activate(usize),
     Sort(SortColumn),
     /// The in-place rename ended: `true` with Enter, `false` with Escape or a click elsewhere.
     RenameEnded(bool),
+    /// A column border was dragged and let go: the new widths.
+    Resized(Widths),
+    /// Right click on a column's header: its menu.
+    HeaderMenu(usize),
+    /// Middle click on a column's header: hide it (never Name).
+    CloseColumn(usize),
 }
+
+/// Each column's width in points, in `COLUMNS` order.
+pub type Widths = [f32; COLUMNS.len()];
+
+/// The widths Lumen starts with and goes back to.
+pub const DEFAULT_WIDTHS: Widths = [320.0, 110.0, 130.0, 60.0, 60.0, 80.0];
+
+/// Which columns are shown, in `COLUMNS` order; Name always is.
+pub type Shown = [bool; COLUMNS.len()];
+
+pub const ALL_SHOWN: Shown = [true; COLUMNS.len()];
+
+/// The columns from left to right, as indices into `COLUMNS`.
+pub type Order = [usize; COLUMNS.len()];
+
+pub const DEFAULT_ORDER: Order = [0, 1, 2, 3, 4, 5];
+
+/// `order` with `column` swapped with the nearest shown column on its left
+/// (or right); unchanged at that end.
+pub fn shift(order: &Order, shown: &Shown, column: usize, left: bool) -> Order {
+    let mut order = *order;
+    let Some(at) = order.iter().position(|&c| c == column) else { return order };
+    // Name is always shown.
+    let visible = |i: &usize| order[*i] == 0 || shown[order[*i]];
+    let next = if left { (0..at).rev().find(visible) } else { (at + 1..order.len()).find(visible) };
+    if let Some(next) = next {
+        order.swap(at, next);
+    }
+    order
+}
+
+/// No column is dragged narrower than this.
+pub const MIN_WIDTH: f32 = 40.0;
 
 /// An entry whose name is being edited in its row.
 pub struct RenameEdit {
@@ -34,6 +82,9 @@ impl RenameEdit {
         Self { path, is_dir, text: name.to_owned(), focus: true }
     }
 }
+
+/// How opaque a cut entry's icon and name are until it is pasted.
+const CUT_OPACITY: f32 = 0.5;
 
 /// Highest list zoom level (Ctrl+wheel, Ctrl+Plus); 0 is the normal size.
 pub const MAX_ZOOM: u8 = 4;
@@ -52,89 +103,271 @@ pub fn row_height(zoom: u8, text_height: f32) -> f32 {
     icon_side(zoom, text_height) + 4.0
 }
 
-/// Draws `view`'s rows, icons and rows sized by `zoom`; `scroll` brings the
-/// selection into view.
+/// How big the list is drawn.
+#[derive(Clone, Copy)]
+pub struct Sizes {
+    /// Icon and row size, 0 (normal) to `MAX_ZOOM`.
+    pub zoom: u8,
+    pub widths: Widths,
+    pub shown: Shown,
+    pub order: Order,
+}
+
+impl Default for Sizes {
+    fn default() -> Self {
+        Self { zoom: 0, widths: DEFAULT_WIDTHS, shown: ALL_SHOWN, order: DEFAULT_ORDER }
+    }
+}
+
+/// Draws `view`'s rows at `sizes`; `scroll` brings the selection into view.
 pub fn show(
     ui: &mut egui::Ui,
     view: &View,
-    zoom: u8,
+    cut: &[PathBuf],
+    sizes: Sizes,
     scroll: Option<Scroll>,
     mut edit: Option<&mut RenameEdit>,
+    file_icons: &FileIcons,
 ) -> Option<ListEvent> {
+    let zoom = sizes.zoom;
     let View { entries, rows, totals, selected, sort, .. } = view;
     let (selected, sort) = (*selected, *sort);
     let text_height = ui.text_style_height(&egui::TextStyle::Body);
     let header_height = row_height(0, text_height);
     let (icon, row_height) = (icon_side(zoom, text_height), row_height(zoom, text_height));
+    // With rows picked, they are the highlight; the cursor row alone otherwise.
+    let multi = view.picked_count() > 0;
     let mut event = None;
+    // Set again below if the cursor row is drawn this frame.
+    ui.ctx().data_mut(|d| d.remove::<egui::Rect>(cursor_row_id()));
 
-    let mut table = TableBuilder::new(ui)
-        .striped(true)
-        // Text sits in the middle of rows made taller by the zoom.
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .sense(egui::Sense::click())
-        .column(Column::remainder().at_least(200.0).clip(true))
-        .column(Column::exact(110.0).clip(true))
-        .column(Column::exact(130.0))
-        .column(Column::exact(60.0))
-        .column(Column::exact(60.0))
-        .column(Column::exact(80.0));
-    if let Some(scroll) = scroll
-        && let Some(sel) = selected
-    {
-        table = table
-            .scroll_to_row(sel, None)
-            .animate_scrolling(scroll == Scroll::Smooth);
-    }
+    // While a border is dragged, the widths the pointer gives now; the saved ones otherwise.
+    let pointer = ui.input(|i| i.pointer.latest_pos());
+    let widths = match (ui.ctx().data(|d| d.get_temp::<Drag>(drag_id())), pointer) {
+        (Some(drag), Some(pointer)) => drag.at(pointer.x),
+        _ => sizes.widths,
+    };
+    let mut cells = [egui::Rect::NOTHING; COLUMNS.len()];
 
-    table
-        .header(header_height, |mut header| {
-            for (label, column) in COLUMNS {
-                header.col(|ui| {
-                    if sort_header(ui, label, column, sort) {
-                        event = Some(ListEvent::Sort(column));
+    egui::ScrollArea::horizontal().id_salt("lumen_list_columns").auto_shrink(false).show(ui, |ui| {
+        let mut table = TableBuilder::new(ui)
+            .striped(true)
+            // The vertical scroll bar at the list's right edge, not after the last column.
+            .auto_shrink([false, true])
+            // Text sits in the middle of rows made taller by the zoom.
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .sense(egui::Sense::click());
+        // Every column has its own width, like File Pilot: the last one stretches
+        // over whatever room the others leave, and columns wider than the list
+        // scroll sideways.
+        // In their order; Name is always shown.
+        let shown: Vec<usize> = sizes.order.into_iter().filter(|&c| c == 0 || sizes.shown[c]).collect();
+        let (&last, others) = shown.split_last().expect("Name is shown");
+        for &column in others {
+            table = table.column(Column::exact(widths[column]).clip(true));
+        }
+        table = table.column(Column::remainder().at_least(widths[last]).clip(true));
+        if let Some(scroll) = scroll
+            && let Some(sel) = selected
+        {
+            table = table
+                .scroll_to_row(sel, None)
+                .animate_scrolling(scroll == Scroll::Smooth);
+        }
+
+        table
+            .header(header_height, |mut header| {
+                for &i in &shown {
+                    let (label, column) = COLUMNS[i];
+                    header.col(|ui| {
+                        cells[i] = ui.max_rect();
+                        // The whole header, not only its label: a click sorts, a right click opens its menu.
+                        let cell = ui.interact(ui.max_rect(), egui::Id::new(("lumen_header", i)), egui::Sense::click());
+                        let label = sort_header(ui, label, column, sort);
+                        if label.clicked() || cell.clicked() {
+                            event = Some(ListEvent::Sort(column));
+                        } else if label.secondary_clicked() || cell.secondary_clicked() {
+                            event = Some(ListEvent::HeaderMenu(i));
+                        } else if (label.middle_clicked() || cell.middle_clicked()) && i != 0 {
+                            event = Some(ListEvent::CloseColumn(i));
+                        }
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(row_height, rows.len(), |mut row| {
+                    let i = row.index();
+                    let entry = &entries[rows[i]];
+                    row.set_selected(if multi { view.is_picked(i) } else { selected == Some(i) });
+                    let counts = count_cells(entry, totals.get(&entry.name));
+                    for &column in &shown {
+                        row.col(|ui| match column {
+                            0 => {
+                                // Icon and name on one line as tall as the row, centred in it:
+                                // a plain `horizontal` is one text line tall, so a zoomed icon
+                                // would hang below the row and be clipped (and the name with it).
+                                let line = egui::vec2(ui.available_width(), row_height);
+                                ui.allocate_ui_with_layout(line, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    // Cut and not pasted yet: faded, like other explorers.
+                                    if cut.contains(&entry.path) {
+                                        ui.set_opacity(CUT_OPACITY);
+                                    }
+                                    icons::show(ui, entry, icon, file_icons.texture(entry));
+                                    if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
+                                        if let Some(submit) = rename_field(ui, edit) {
+                                            event = Some(ListEvent::RenameEnded(submit));
+                                        }
+                                        return;
+                                    }
+                                    name_label(ui, entry, view.filter());
+                                });
+                            }
+                            1 => {
+                                ui.add(egui::Label::new(entry.kind()).selectable(false).truncate());
+                            }
+                            2 => {
+                                let date = entry.modified.map(format_time).unwrap_or_default();
+                                ui.add(egui::Label::new(date).selectable(false));
+                            }
+                            _ => count_cell(ui, column - 3, &counts[column - 3]),
+                        });
+                    }
+                    let response = row.response();
+                    if selected == Some(i) {
+                        response.ctx.data_mut(|d| d.insert_temp(cursor_row_id(), response.rect));
+                    }
+                    if response.secondary_clicked() {
+                        event = Some(ListEvent::Menu(i));
+                    } else if response.double_clicked() {
+                        event = Some(ListEvent::Activate(i));
+                    } else if response.clicked() {
+                        let m = response.ctx.input(|input| input.modifiers);
+                        event = Some(if m.command {
+                            ListEvent::Toggle(i)
+                        } else if m.shift {
+                            ListEvent::Extend(i)
+                        } else {
+                            ListEvent::Select(i)
+                        });
                     }
                 });
+            });
+        if let Some(resized) = column_borders(ui, &cells, &widths) {
+            event = Some(resized);
+        }
+        // Whatever space the rows leave below them.
+        let rest = ui.available_rect_before_wrap();
+        if event.is_none() && rest.height() > 0.0 {
+            let response = ui.interact(rest, egui::Id::new("lumen_list_empty"), egui::Sense::click());
+            if response.clicked() {
+                event = Some(ListEvent::Empty { menu: false });
+            } else if response.secondary_clicked() {
+                event = Some(ListEvent::Empty { menu: true });
+            }
+        }
+    });
+    event
+}
+
+/// The width that shows every cell of `column` and its header whole, for
+/// `view`'s rows at `zoom`.
+pub fn fit_width(ctx: &egui::Context, view: &View, zoom: u8, column: usize) -> f32 {
+    let style = ctx.global_style();
+    let font = egui::TextStyle::Body.resolve(&style);
+    let measure = |text: String| ctx.fonts_mut(|f| f.layout_no_wrap(text, font.clone(), egui::Color32::WHITE).size().x);
+    // The header with room for the sort arrow, which may show up later.
+    let header = measure(format!("{} {SORT_DESCENDING}", COLUMNS[column].0)) + 2.0 * style.spacing.button_padding.x;
+    let icon = icon_side(zoom, ctx.fonts_mut(|f| f.row_height(&font))) + style.spacing.item_spacing.x;
+    let widest = view
+        .rows
+        .iter()
+        .map(|&row| {
+            let entry = &view.entries[row];
+            match column {
+                0 => icon + measure(entry.name.clone()),
+                1 => measure(entry.kind().to_string()),
+                2 => measure(entry.modified.map(format_time).unwrap_or_default()),
+                _ => {
+                    let cells = count_cells(entry, view.totals.get(&entry.name));
+                    measure(cells[column - 3].clone())
+                }
             }
         })
-        .body(|body| {
-            body.rows(row_height, rows.len(), |mut row| {
-                let i = row.index();
-                let entry = &entries[rows[i]];
-                row.set_selected(selected == Some(i));
-                row.col(|ui| {
-                    // Icon and name on one line as tall as the row, centred in it:
-                    // a plain `horizontal` is one text line tall, so a zoomed icon
-                    // would hang below the row and be clipped (and the name with it).
-                    let line = egui::vec2(ui.available_width(), row_height);
-                    ui.allocate_ui_with_layout(line, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        icons::show(ui, entry, icon);
-                        if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
-                            if let Some(submit) = rename_field(ui, edit) {
-                                event = Some(ListEvent::RenameEnded(submit));
-                            }
-                            return;
-                        }
-                        name_label(ui, entry, view.filter());
-                    });
-                });
-                row.col(|ui| {
-                    ui.add(egui::Label::new(entry.kind()).selectable(false).truncate());
-                });
-                row.col(|ui| {
-                    let date = entry.modified.map(format_time).unwrap_or_default();
-                    ui.add(egui::Label::new(date).selectable(false));
-                });
-                count_cols(&mut row, &count_cells(entry, totals.get(&entry.name)));
-                let response = row.response();
-                if response.double_clicked() {
-                    event = Some(ListEvent::Activate(i));
-                } else if response.clicked() {
-                    event = Some(ListEvent::Select(i));
-                }
-            });
-        });
+        .fold(header, f32::max);
+    // Whole points: the config keeps them so.
+    (widest + FIT_MARGIN).max(MIN_WIDTH).ceil()
+}
+
+/// Air left after the widest cell of a column sized to fit.
+const FIT_MARGIN: f32 = 6.0;
+
+/// A column border being dragged: which column, where the pointer and the
+/// column's width were when it was grabbed, and the widths before it.
+#[derive(Clone)]
+struct Drag {
+    column: usize,
+    start_x: f32,
+    start_width: f32,
+    widths: Widths,
+}
+
+impl Drag {
+    /// The widths with the pointer at `x`.
+    fn at(&self, x: f32) -> Widths {
+        let mut widths = self.widths;
+        widths[self.column] = (self.start_width + x - self.start_x).max(MIN_WIDTH);
+        widths
+    }
+}
+
+fn drag_id() -> egui::Id {
+    egui::Id::new("lumen_column_drag")
+}
+
+/// How far either side of a border the pointer grabs it.
+const BORDER_GRAB: f32 = 4.0;
+
+/// The draggable border on the right of each header `cells` holds, drawn
+/// over the header. Returns the new widths when a border is let go.
+fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths: &Widths) -> Option<ListEvent> {
+    let gap = ui.spacing().item_spacing.x;
+    let mut event = None;
+    for (column, cell) in cells.iter().enumerate().filter(|(_, cell)| cell.is_positive()) {
+        let x = cell.right() + gap / 2.0;
+        let rect = egui::Rect::from_x_y_ranges(x - BORDER_GRAB..=x + BORDER_GRAB, cell.y_range());
+        let response = ui.interact(rect, egui::Id::new(("lumen_column_border", column)), egui::Sense::drag());
+        if response.hovered() || response.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+            let stroke = if response.dragged() { ui.visuals().widgets.active.fg_stroke } else { ui.visuals().widgets.hovered.fg_stroke };
+            ui.painter().vline(x, cell.y_range(), stroke);
+        }
+        let pointer = response.interact_pointer_pos();
+        // From where the button went down: egui starts a drag only once the pointer moved.
+        if response.drag_started()
+            && let Some(start) = ui.input(|i| i.pointer.press_origin()).or(pointer)
+        {
+            // The width drawn: the last column may be stretched past its own.
+            let drag = Drag { column, start_x: start.x, start_width: cell.width(), widths: *widths };
+            ui.ctx().data_mut(|d| d.insert_temp(drag_id(), drag));
+        }
+        if response.drag_stopped()
+            && let Some(drag) = ui.ctx().data(|d| d.get_temp::<Drag>(drag_id()))
+        {
+            ui.ctx().data_mut(|d| d.remove::<Drag>(drag_id()));
+            let x = pointer.or_else(|| ui.input(|i| i.pointer.latest_pos())).map_or(drag.start_x, |p| p.x);
+            event = Some(ListEvent::Resized(drag.at(x)));
+        }
+    }
     event
+}
+
+fn cursor_row_id() -> egui::Id {
+    egui::Id::new("lumen_cursor_row")
+}
+
+/// Where the cursor row was last drawn: Shift+F10 opens its menu there.
+pub fn cursor_row_rect(ctx: &egui::Context) -> Option<egui::Rect> {
+    ctx.data(|d| d.get_temp(cursor_row_id()))
 }
 
 /// The entry's name, dimmed when hidden, cut with "…" when too long. The
@@ -179,17 +412,20 @@ pub fn count_cells(entry: &Entry, totals: Option<&Totals>) -> [String; 3] {
 /// Draws the Folders, Files and Size cells. Size is right-aligned so the
 /// units line up, like File Pilot; the counts stay under their headers.
 pub fn count_cols(row: &mut egui_extras::TableRow<'_, '_>, cells: &[String; 3]) {
-    let [folders, files, size] = cells;
-    for cell in [folders, files] {
-        row.col(|ui| {
-            ui.add(egui::Label::new(cell.as_str()).selectable(false));
+    for (i, cell) in cells.iter().enumerate() {
+        row.col(|ui| count_cell(ui, i, cell));
+    }
+}
+
+/// Cell `i` of the Folders, Files and Size cells.
+fn count_cell(ui: &mut egui::Ui, i: usize, text: &str) {
+    if i < 2 {
+        ui.add(egui::Label::new(text).selectable(false));
+    } else {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add(egui::Label::new(text).selectable(false));
         });
     }
-    row.col(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add(egui::Label::new(size.as_str()).selectable(false));
-        });
-    });
 }
 
 /// Id of the rename field, so the app can tell when it lost focus silently.
@@ -200,6 +436,18 @@ pub fn rename_id() -> egui::Id {
 /// The text field drawn in place of the name while renaming.
 fn rename_field(ui: &mut egui::Ui, edit: &mut RenameEdit) -> Option<bool> {
     let id = rename_id();
+    // Characters a name cannot hold are dropped before the field reads them, as
+    // File Pilot does: typing one does nothing, a pasted name keeps the rest.
+    if ui.memory(|m| m.has_focus(id)) {
+        ui.input_mut(|i| {
+            for event in &mut i.events {
+                if let egui::Event::Text(text) | egui::Event::Paste(text) = event {
+                    text.retain(crate::fs::ops::allowed_in_name);
+                }
+            }
+            i.events.retain(|e| !matches!(e, egui::Event::Text(t) | egui::Event::Paste(t) if t.is_empty()));
+        });
+    }
     let mut output = egui::TextEdit::singleline(&mut edit.text)
         .id(id)
         .desired_width(f32::INFINITY)
@@ -222,14 +470,14 @@ fn rename_field(ui: &mut egui::Ui, edit: &mut RenameEdit) -> Option<bool> {
 }
 
 /// A header label that sorts on click; the active column shows its direction.
-fn sort_header(ui: &mut egui::Ui, label: &str, column: SortColumn, sort: Sort) -> bool {
+fn sort_header(ui: &mut egui::Ui, label: &str, column: SortColumn, sort: Sort) -> egui::Response {
     let arrow = match (sort.column == column, sort.descending) {
         (false, _) => "",
         (true, false) => SORT_ASCENDING,
         (true, true) => SORT_DESCENDING,
     };
     let text = egui::RichText::new(format!("{label} {arrow}")).strong();
-    ui.add(egui::Button::new(text).frame(false)).clicked()
+    ui.add(egui::Button::new(text).frame(false))
 }
 
 /// Characters of `name` selected when renaming starts: the part before the
@@ -259,6 +507,33 @@ mod tests {
         assert_eq!(stem_chars(".bashrc", false), 7);
         assert_eq!(stem_chars("Makefile", false), 8);
         assert_eq!(stem_chars("v1.2", true), 4, "folders have no extension");
+    }
+
+    /// Focuses the rename field (name selected), then sends these events to it.
+    fn type_into_rename(name: &str, events: Vec<egui::Event>) -> String {
+        let ctx = egui::Context::default();
+        let mut edit = RenameEdit { path: PathBuf::from("/x").join(name), is_dir: false, text: name.into(), focus: true };
+        for events in [Vec::new(), events] {
+            let input = egui::RawInput { events, ..egui::RawInput::default() };
+            ctx.run_ui(input, |ui| {
+                rename_field(ui, &mut edit);
+            })
+            .drop_without_applying_deltas();
+        }
+        edit.text
+    }
+
+    #[test]
+    fn forbidden_characters_are_never_typed_into_the_rename_field() {
+        let typed = type_into_rename("notes.txt", vec![egui::Event::Text("a/b".into())]);
+        assert_eq!(typed, "ab.txt", "the slash is dropped, the rest is typed");
+        let pasted = type_into_rename("notes.txt", vec![egui::Event::Paste("x/y\0z".into())]);
+        assert_eq!(pasted, "xyz.txt", "pasted text keeps its other characters");
+        let windows = type_into_rename("notes.txt", vec![egui::Event::Text("a:b*c?".into())]);
+        let expected = if cfg!(windows) { "abc.txt" } else { "a:b*c?.txt" };
+        assert_eq!(windows, expected, "Windows' own forbidden characters");
+        let only_forbidden = type_into_rename("notes.txt", vec![egui::Event::Text("/".into())]);
+        assert_eq!(only_forbidden, "notes.txt", "a forbidden key leaves the selected name alone");
     }
 
     fn entry(name: &str) -> Entry {
@@ -302,12 +577,47 @@ mod tests {
         let mut shapes = Vec::new();
         for _ in 0..3 {
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                show(ui, &view, zoom, None, None);
+                show(ui, &view, &[], Sizes { zoom, ..Sizes::default() }, None, None, &FileIcons::default());
             });
             output.textures_delta.clear();
             shapes = output.shapes;
         }
         shapes
+    }
+
+    #[test]
+    fn a_file_whose_icon_is_loaded_shows_it_and_one_still_loading_keeps_the_painted_one() {
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        (view.entries, view.rows) = (vec![entry("setup.exe"), entry("notes.txt")], vec![0, 1]);
+        let mut icons = FileIcons::default();
+        let image = egui::ColorImage::new([4, 4], vec![egui::Color32::RED; 16]);
+        let texture = ctx.load_texture("test icon", image, egui::TextureOptions::LINEAR);
+        icons.insert(&view.entries[0], texture.clone());
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                show(ui, &view, &[], Sizes::default(), None, None, &icons);
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let drawn: Vec<egui::Rect> = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Mesh(mesh) if mesh.texture_id == texture.id() => Some(s.shape.visual_bounding_rect()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(drawn.len(), 1, "the .exe's icon, once: {drawn:?}");
+        let row = |text: &str| {
+            shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos.y + t.galley.rect.center().y),
+                _ => None,
+            })
+        };
+        let (exe, txt) = (row("setup.exe").unwrap(), row("notes.txt").unwrap());
+        assert!((drawn[0].center().y - exe).abs() < 2.0, "on the .exe's row, not on {txt}");
     }
 
     #[test]
@@ -349,7 +659,7 @@ mod tests {
         let mut shapes = Vec::new();
         for _ in 0..3 {
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                show(ui, &view, 0, None, None);
+                show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default());
             });
             output.textures_delta.clear();
             shapes = output.shapes;
@@ -372,6 +682,413 @@ mod tests {
         assert_eq!(coloured, ["Sli", "contenido"]);
     }
 
+    fn press(pos: egui::Pos2, button: egui::PointerButton) -> Vec<egui::Event> {
+        let event = |pressed| egui::Event::PointerButton { pos, button, pressed, modifiers: egui::Modifiers::NONE };
+        vec![event(true), event(false)]
+    }
+
+    /// One entry listed, then a left and a right click well below it.
+    #[test]
+    fn a_click_below_the_rows_is_a_click_on_the_empty_space() {
+        use crate::ui::testing::frame;
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        (view.entries, view.rows, view.selected) = (vec![entry("a.txt")], vec![0], Some(0));
+        let below = egui::pos2(300.0, 500.0);
+        let mut draw = |ui: &mut egui::Ui| show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default());
+        frame(&ctx, vec![egui::Event::PointerMoved(below)], &mut draw);
+        let left = frame(&ctx, press(below, egui::PointerButton::Primary), &mut draw);
+        assert!(matches!(left, Some(ListEvent::Empty { menu: false })), "left click");
+        let right = frame(&ctx, press(below, egui::PointerButton::Secondary), &mut draw);
+        assert!(matches!(right, Some(ListEvent::Empty { menu: true })), "right click");
+    }
+
+    /// How opaque the first letter of `name` was painted, with `cut` waiting to be pasted.
+    fn name_opacity(name: &str, cut: &[PathBuf]) -> f32 {
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        (view.entries, view.rows) = (vec![entry("a.txt"), entry("b.txt")], vec![0, 1]);
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                show(ui, &view, cut, Sizes::default(), None, None, &FileIcons::default());
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == name => {
+                    let glyph = t.galley.rows[0].visuals.mesh.vertices[0].color;
+                    Some(f32::from(glyph.a()) / 255.0)
+                }
+                _ => None,
+            })
+            .expect("name painted")
+    }
+
+    #[test]
+    fn cut_entries_are_greyed_until_pasted() {
+        let cut = [PathBuf::from("/x/a.txt")];
+        assert!(name_opacity("a.txt", &cut) < 0.7, "the cut one is faded");
+        assert_eq!(name_opacity("b.txt", &cut), 1.0, "the others are not");
+        assert_eq!(name_opacity("a.txt", &[]), 1.0);
+    }
+
+    #[test]
+    fn the_cursor_row_is_remembered_for_shift_f10() {
+        use crate::ui::testing::frame;
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        (view.entries, view.rows, view.selected) = (vec![entry("a.txt"), entry("b.txt")], vec![0, 1], Some(1));
+        frame(&ctx, vec![], |ui| show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default()));
+        let second = cursor_row_rect(&ctx).expect("drawn");
+        view.selected = Some(0);
+        frame(&ctx, vec![], |ui| show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default()));
+        let first = cursor_row_rect(&ctx).expect("drawn");
+        assert!(first.bottom() <= second.top() + 1.0, "{first:?} above {second:?}");
+        // A cursor row scrolled out of view was not drawn: no stale place.
+        view.entries = (0..300).map(|i| entry(&format!("f{i}"))).collect();
+        view.rows = (0..300).collect();
+        view.selected = Some(250);
+        frame(&ctx, vec![], |ui| show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default()));
+        assert_eq!(cursor_row_rect(&ctx), None);
+    }
+
+    /// One frame of the list: where each header text starts (`None` when it
+    /// is out of view), the list's event and the pointer's look.
+    struct Drawn {
+        lefts: Vec<Option<f32>>,
+        event: Option<ListEvent>,
+        cursor: egui::CursorIcon,
+    }
+
+    fn draw_list(ctx: &egui::Context, view: &View, widths: &Widths, events: Vec<egui::Event>) -> Drawn {
+        let mut event = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
+            |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    event = show(ui, view, &[], Sizes { widths: *widths, ..Sizes::default() }, None, None, &FileIcons::default());
+                });
+            },
+        );
+        output.textures_delta.clear();
+        let lefts = COLUMNS
+            .iter()
+            .map(|(label, _)| {
+                output.shapes.iter().find_map(|s| match &s.shape {
+                    egui::Shape::Text(t)
+                        if t.galley.text().trim_end_matches([' ', '⏶', '⏷']) == *label
+                            && s.clip_rect.intersects(egui::Rect::from_min_max(t.pos, t.pos + t.galley.size())) =>
+                    {
+                        Some(t.pos.x)
+                    }
+                    _ => None,
+                })
+            })
+            .collect();
+        Drawn { lefts, event, cursor: output.platform_output.cursor_icon }
+    }
+
+    /// The header text lefts once the list has settled, all in view.
+    fn settled(ctx: &egui::Context, view: &View, widths: &Widths) -> Vec<f32> {
+        let mut lefts = Vec::new();
+        for _ in 0..3 {
+            lefts = draw_list(ctx, view, widths, vec![]).lefts;
+        }
+        lefts.into_iter().map(|l| l.expect("header in view")).collect()
+    }
+
+    fn listed(names: &[&str]) -> View {
+        let mut view = View::default();
+        view.entries = names.iter().map(|n| entry(n)).collect();
+        view.rows = (0..names.len()).collect();
+        view
+    }
+
+    fn button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+    }
+
+    #[test]
+    fn every_column_keeps_its_own_width_even_past_the_window() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt"]);
+        let normal = settled(&ctx, &view, &DEFAULT_WIDTHS);
+        let wide_widths = [600.0, 110.0, 130.0, 60.0, 60.0, 80.0];
+        for _ in 0..2 {
+            draw_list(&ctx, &view, &wide_widths, vec![]);
+        }
+        let wide = draw_list(&ctx, &view, &wide_widths, vec![]).lefts;
+        let (name, ty) = (wide[0].expect("Name in view"), wide[1].expect("Type in view"));
+        assert!((ty - name - (normal[1] - normal[0]) - 280.0).abs() < 1.0, "Name is 280 wider: {normal:?} {wide:?}");
+        assert_eq!(wide[5], None, "Size is past the 800 pt window, not squeezed into it: {wide:?}");
+        // Scrolling sideways over the list brings it into view.
+        let over = egui::pos2(400.0, 100.0);
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(-400.0, 0.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        draw_list(&ctx, &view, &wide_widths, vec![egui::Event::PointerMoved(over)]);
+        draw_list(&ctx, &view, &wide_widths, vec![wheel]);
+        let mut scrolled = Vec::new();
+        for _ in 0..3 {
+            scrolled = draw_list(&ctx, &view, &wide_widths, vec![]).lefts;
+        }
+        assert!(scrolled[5].is_some_and(|x| x < 800.0), "Size scrolled into view: {scrolled:?}");
+    }
+
+    #[test]
+    fn the_last_column_stretches_to_the_lists_edge_when_the_columns_leave_room() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt"]);
+        let narrow = [150.0, 60.0, 60.0, 40.0, 40.0, 50.0];
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        show(ui, &view, &[], Sizes { widths: narrow, ..Sizes::default() }, None, None, &FileIcons::default());
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let size_right = shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == "1 B" => Some(t.pos.x + t.galley.size().x),
+                _ => None,
+            })
+            .expect("size painted");
+        // The 800 pt screen less the panel's margin and the scroll bar's room.
+        assert!(size_right > 750.0, "Size is right-aligned at the list's edge, not after 50 pt: {size_right}");
+    }
+
+    #[test]
+    fn dragging_a_header_border_resizes_its_column_and_reports_the_widths_once_let_go() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt", "b.txt"]);
+        let widths = DEFAULT_WIDTHS;
+        let lefts = settled(&ctx, &view, &widths);
+        // The border between Name and Type: just left of the Type header's text.
+        let border = egui::pos2(lefts[1] - 8.0, 10.0);
+        let hover = draw_list(&ctx, &view, &widths, vec![egui::Event::PointerMoved(border)]);
+        assert_eq!(hover.cursor, egui::CursorIcon::ResizeColumn, "the pointer shows the border can be dragged");
+        draw_list(&ctx, &view, &widths, vec![button(border, true)]);
+        let mut during = Vec::new();
+        for step in 1..=5 {
+            let moved = egui::Event::PointerMoved(border + egui::vec2(10.0 * step as f32, 0.0));
+            let drawn = draw_list(&ctx, &view, &widths, vec![moved]);
+            assert!(drawn.event.is_none(), "nothing reported while dragging");
+            during = drawn.lefts;
+        }
+        let (name, ty) = (during[0].unwrap(), during[1].unwrap());
+        assert!((ty - lefts[1] - 50.0).abs() < 1.5, "Type moved right with the border: {lefts:?} {during:?}");
+        assert!((name - lefts[0]).abs() < 0.5, "Name's left side stays");
+        let released = draw_list(&ctx, &view, &widths, vec![button(border + egui::vec2(50.0, 0.0), false)]);
+        let Some(ListEvent::Resized(new)) = released.event else { panic!("the widths are reported when let go") };
+        assert!((new[0] - 370.0).abs() < 1.5, "Name is 50 wider: {new:?}");
+        assert_eq!(new[1..], DEFAULT_WIDTHS[1..], "only the dragged column changes");
+    }
+
+    #[test]
+    fn a_column_is_never_dragged_narrower_than_the_minimum() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt"]);
+        let lefts = settled(&ctx, &view, &DEFAULT_WIDTHS);
+        // The border between Type and Date Modified, dragged far to the left.
+        let border = egui::pos2(lefts[2] - 8.0, 10.0);
+        let far = egui::pos2(0.0, 10.0);
+        for events in [vec![egui::Event::PointerMoved(border)], vec![button(border, true)], vec![egui::Event::PointerMoved(far)]] {
+            draw_list(&ctx, &view, &DEFAULT_WIDTHS, events);
+        }
+        let released = draw_list(&ctx, &view, &DEFAULT_WIDTHS, vec![button(far, false)]);
+        let Some(ListEvent::Resized(new)) = released.event else { panic!("reported when let go") };
+        assert_eq!(new[1], MIN_WIDTH, "{new:?}");
+        assert_eq!(new[0], DEFAULT_WIDTHS[0]);
+    }
+
+    #[test]
+    fn a_right_click_on_a_header_opens_its_menu_and_a_left_click_still_sorts() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt"]);
+        let lefts = settled(&ctx, &view, &DEFAULT_WIDTHS);
+        let click = |pos: egui::Pos2, button: egui::PointerButton| {
+            let press = |pressed| egui::Event::PointerButton { pos, button, pressed, modifiers: egui::Modifiers::NONE };
+            draw_list(&ctx, &view, &DEFAULT_WIDTHS, vec![egui::Event::PointerMoved(pos)]);
+            draw_list(&ctx, &view, &DEFAULT_WIDTHS, vec![press(true)]);
+            draw_list(&ctx, &view, &DEFAULT_WIDTHS, vec![press(false)]).event
+        };
+        let on_label = egui::pos2(lefts[1] + 5.0, 10.0);
+        let past_label = egui::pos2(lefts[1] + 80.0, 10.0);
+        let right = egui::PointerButton::Secondary;
+        assert!(matches!(click(on_label, right), Some(ListEvent::HeaderMenu(1))), "on Type's label");
+        assert!(matches!(click(past_label, right), Some(ListEvent::HeaderMenu(1))), "on Type's free part");
+        let left = click(on_label, egui::PointerButton::Primary);
+        assert!(matches!(left, Some(ListEvent::Sort(SortColumn::Type))), "a left click sorts");
+    }
+
+    #[test]
+    fn hidden_columns_are_not_drawn_and_the_next_one_takes_their_place() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt"]);
+        let all = settled(&ctx, &view, &DEFAULT_WIDTHS);
+        let shown = [true, false, true, true, true, true];
+        let mut shapes = Vec::new();
+        let mut lefts = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        show(ui, &view, &[], Sizes { shown, ..Sizes::default() }, None, None, &FileIcons::default());
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            shapes = output.shapes;
+            lefts = COLUMNS
+                .iter()
+                .map(|(label, _)| {
+                    shapes.iter().find_map(|s| match &s.shape {
+                        egui::Shape::Text(t) if t.galley.text().trim_end_matches([' ', '⏶', '⏷']) == *label => Some(t.pos.x),
+                        _ => None,
+                    })
+                })
+                .collect::<Vec<_>>();
+        }
+        let painted = |text: &str| shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == text));
+        assert_eq!(lefts[1], None, "no Type header");
+        assert!(!painted("TXT file"), "no Type cell");
+        assert!(painted("a.txt") && painted("1 B"), "the other cells are drawn");
+        assert_eq!(lefts[2], Some(all[1]), "Date Modified moves into Type's place");
+    }
+
+    #[test]
+    fn a_middle_click_on_a_header_closes_its_column_but_never_name() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt"]);
+        let lefts = settled(&ctx, &view, &DEFAULT_WIDTHS);
+        let middle = |pos: egui::Pos2| {
+            let press = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Middle, pressed, modifiers: egui::Modifiers::NONE };
+            draw_list(&ctx, &view, &DEFAULT_WIDTHS, vec![egui::Event::PointerMoved(pos)]);
+            draw_list(&ctx, &view, &DEFAULT_WIDTHS, vec![press(true)]);
+            draw_list(&ctx, &view, &DEFAULT_WIDTHS, vec![press(false)]).event
+        };
+        assert!(matches!(middle(egui::pos2(lefts[2] + 80.0, 10.0)), Some(ListEvent::CloseColumn(2))));
+        assert!(middle(egui::pos2(lefts[0] + 5.0, 10.0)).is_none(), "Name stays");
+    }
+
+    #[test]
+    fn shifting_a_column_skips_hidden_ones_and_stops_at_the_ends() {
+        let all = ALL_SHOWN;
+        assert_eq!(shift(&DEFAULT_ORDER, &all, 2, true), [0, 2, 1, 3, 4, 5]);
+        assert_eq!(shift(&DEFAULT_ORDER, &all, 2, false), [0, 1, 3, 2, 4, 5]);
+        assert_eq!(shift(&DEFAULT_ORDER, &all, 0, true), DEFAULT_ORDER, "Name is already first");
+        assert_eq!(shift(&DEFAULT_ORDER, &all, 5, false), DEFAULT_ORDER, "Size is already last");
+        assert_eq!(shift(&DEFAULT_ORDER, &all, 0, false), [1, 0, 2, 3, 4, 5], "Name moves too");
+        let no_type = [true, false, true, true, true, true];
+        assert_eq!(shift(&DEFAULT_ORDER, &no_type, 2, true), [2, 1, 0, 3, 4, 5], "past the hidden Type, onto Name");
+        let no_size = [true, true, true, true, true, false];
+        assert_eq!(shift(&DEFAULT_ORDER, &no_size, 4, false), DEFAULT_ORDER, "only hidden ones on the right");
+        let moved = [3, 0, 1, 2, 4, 5];
+        assert_eq!(shift(&moved, &all, 3, false), [0, 3, 1, 2, 4, 5], "follows the current order");
+    }
+
+    #[test]
+    fn columns_are_drawn_in_their_order() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt"]);
+        let order = [2, 0, 1, 3, 4, 5];
+        let mut lefts = Vec::new();
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        show(ui, &view, &[], Sizes { order, ..Sizes::default() }, None, None, &FileIcons::default());
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            shapes = output.shapes;
+            lefts = COLUMNS
+                .iter()
+                .map(|(label, _)| {
+                    shapes
+                        .iter()
+                        .find_map(|s| match &s.shape {
+                            egui::Shape::Text(t) if t.galley.text().trim_end_matches([' ', '⏶', '⏷']) == *label => Some(t.pos.x),
+                            _ => None,
+                        })
+                        .expect("header painted")
+                })
+                .collect::<Vec<_>>();
+        }
+        assert!(lefts[2] < lefts[0] && lefts[0] < lefts[1] && lefts[1] < lefts[3], "Date Modified, Name, Type, ...: {lefts:?}");
+        let name = shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == "a.txt" => Some(t.pos.x),
+                _ => None,
+            })
+            .expect("name painted");
+        assert!(name > lefts[0] && name < lefts[1], "the name sits under its header: {name} in {lefts:?}");
+    }
+
+    /// What is painted of the row whose name starts like `name`, with Name `width` wide.
+    fn painted_name(view: &View, width: f32, name: &str) -> String {
+        let ctx = egui::Context::default();
+        let widths = [width, 110.0, 130.0, 60.0, 60.0, 80.0];
+        let wide = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(2000.0, 600.0));
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(wide), ..Default::default() }, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    show(ui, view, &[], Sizes { widths, ..Sizes::default() }, None, None, &FileIcons::default());
+                });
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let first = name.split(' ').next().unwrap();
+        shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                // The characters laid out: an elided name ends in "…" there, not in its text.
+                egui::Shape::Text(t) if t.galley.text().starts_with(first) => {
+                    Some(t.galley.rows.iter().flat_map(|r| r.glyphs.iter().map(|g| g.chr)).collect())
+                }
+                _ => None,
+            })
+            .expect("name painted")
+    }
+
+    #[test]
+    fn a_column_sized_to_fit_shows_its_longest_cell_and_its_header_whole() {
+        let long = "Presentacion final del proyecto de arquitectura 2026.pptx";
+        let view = listed(&["a.txt", long]);
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        let name = fit_width(&ctx, &view, 0, 0);
+        assert_eq!(painted_name(&view, name, long), long, "whole at its fit width ({name})");
+        assert_ne!(painted_name(&view, name - 20.0, long), long, "a little narrower cuts it");
+        // Folders holds only "--": the header sets its width.
+        let font = egui::TextStyle::Body.resolve(&ctx.global_style());
+        let header = ctx.fonts_mut(|f| f.layout_no_wrap("Folders".into(), font, egui::Color32::WHITE).size().x);
+        let folders = fit_width(&ctx, &view, 0, 3);
+        assert!(folders >= header && folders < header + 40.0, "{folders} for a {header} header");
+        assert!(fit_width(&ctx, &view, MAX_ZOOM, 0) > name, "a bigger icon needs more room");
+    }
+
     #[test]
     fn rename_field_sits_inside_its_row() {
         let ctx = egui::Context::default();
@@ -383,7 +1100,7 @@ mod tests {
         for _ in 0..2 {
             ctx.run_ui(egui::RawInput::default(), |ui| {
                 row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
-                show(ui, &view, 0, None, Some(&mut edit));
+                show(ui, &view, &[], Sizes::default(), None, Some(&mut edit), &FileIcons::default());
             })
             .drop_without_applying_deltas();
         }

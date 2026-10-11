@@ -1,4 +1,6 @@
 pub mod confirm;
+pub mod context_menu;
+pub mod file_icons;
 pub mod file_list;
 pub mod icons;
 pub mod path_popup;
@@ -6,6 +8,7 @@ pub mod preview;
 pub mod sidebar;
 pub mod status_bar;
 pub mod tabs;
+pub mod theme;
 pub mod toolbar;
 
 /// Drives egui frame by frame, with real pointer events, for UI tests.
@@ -65,6 +68,9 @@ mod tests {
             super::tabs::CLOSE,
             super::file_list::SORT_ASCENDING,
             super::file_list::SORT_DESCENDING,
+            super::context_menu::CLOSED,
+            super::context_menu::OPEN,
+            crate::menu::SEARCH_SEPARATOR,
             // Punctuation in messages: “name”, Calculating…, Copying 3/10 — 45%, 1 · 2, 640 × 360.
             "“”…—·×",
         ];
@@ -89,7 +95,10 @@ mod tests {
             ("fs/preview.rs", include_str!("../fs/preview.rs")),
             ("fs/transfer.rs", include_str!("../fs/transfer.rs")),
             ("fs/lister.rs", include_str!("../fs/lister.rs")),
+            ("menu.rs", include_str!("../menu.rs")),
+            ("ui/context_menu.rs", include_str!("context_menu.rs")),
             ("ui/confirm.rs", include_str!("confirm.rs")),
+            ("ui/theme.rs", include_str!("theme.rs")),
             ("ui/file_list.rs", include_str!("file_list.rs")),
             ("ui/path_popup.rs", include_str!("path_popup.rs")),
             ("ui/preview.rs", include_str!("preview.rs")),

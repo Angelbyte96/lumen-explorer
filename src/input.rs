@@ -8,6 +8,13 @@ pub enum Action {
     Move(isize),
     First,
     Last,
+    /// Shift+arrows, PageUp/PageDown, Home/End: move this many rows selecting
+    /// the range (`isize::MIN` / `isize::MAX` reach the first / last row).
+    Extend(isize),
+    /// Ctrl+A: every row shown.
+    SelectAll,
+    /// Shift+F10: the right-click menu for the selection.
+    Menu,
     /// Enter the selected folder or open the selected file.
     Activate,
     /// Backspace: erases a filter character, or goes up when the filter is empty.
@@ -25,6 +32,8 @@ pub enum Action {
     TypeChar(char),
     /// Move the selected entry to the trash (asks first).
     Trash,
+    /// Shift+Delete: delete the selection for good, without the trash (asks first).
+    DeleteForever,
     /// Edit the selected entry's name in place.
     Rename,
     /// Create a folder here and start renaming it (Ctrl+Shift+N).
@@ -50,6 +59,8 @@ pub enum Action {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    /// Every list column's width to its content (Ctrl+Shift+F).
+    FitColumns,
     /// Escape: clears the filter, else stops a running count, else the copy or move.
     Cancel,
     /// Escape held down (key repeat).
@@ -136,6 +147,9 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
         if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::N) {
             actions.push(Action::NewFolder);
         }
+        if i.consume_key(Modifiers::COMMAND, Key::A) {
+            actions.push(Action::SelectAll);
+        }
         if i.consume_key(Modifiers::COMMAND, Key::H) {
             actions.push(Action::ToggleHidden);
         }
@@ -171,6 +185,9 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
         if i.consume_key(Modifiers::COMMAND, Key::Plus) || i.consume_key(Modifiers::COMMAND, Key::Equals) {
             actions.push(Action::ZoomIn);
         }
+        if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::F) {
+            actions.push(Action::FitColumns);
+        }
         if i.consume_key(Modifiers::COMMAND, Key::Minus) {
             actions.push(Action::ZoomOut);
         }
@@ -188,8 +205,28 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
             (Key::Delete, Action::Trash),
             (Key::F2, Action::Rename),
         ];
+        if i.modifiers == Modifiers::SHIFT && i.consume_key(Modifiers::SHIFT, Key::Delete) {
+            actions.push(Action::DeleteForever);
+        }
+        if i.consume_key(Modifiers::SHIFT, Key::F10) {
+            actions.push(Action::Menu);
+        }
+        if i.modifiers == Modifiers::SHIFT {
+            let extend = [
+                (Key::ArrowDown, 1),
+                (Key::ArrowUp, -1),
+                (Key::PageDown, PAGE),
+                (Key::PageUp, -PAGE),
+                (Key::Home, isize::MIN),
+                (Key::End, isize::MAX),
+            ];
+            for (key, rows) in extend {
+                let presses = i.count_and_consume_key(Modifiers::SHIFT, key);
+                actions.extend(std::iter::repeat_n(Action::Extend(rows), presses));
+            }
+        }
         // egui ignores extra Shift/Alt when matching, so Shift+Arrow would act
-        // like a plain arrow. Require no modifiers; those combos are reserved.
+        // like a plain arrow. Require no modifiers; other combos are reserved.
         if i.modifiers.is_none() {
             for (key, action) in plain {
                 // Counts key-repeat events too (holding an arrow).
@@ -234,6 +271,9 @@ fn clipboard_actions(ctx: &Context, events: &[Event]) -> Vec<Action> {
     for event in events {
         match event {
             Event::Copy => actions.push(Action::Copy),
+            // On Windows egui-winit turns Shift+Delete into a cut (its old
+            // shortcut) and sends no Delete press: here it deletes, as in Explorer.
+            Event::Cut if ctx.input(|i| i.modifiers.shift && !i.modifiers.command) => actions.push(Action::DeleteForever),
             Event::Cut => actions.push(Action::Cut),
             Event::Paste(_) => {
                 actions.push(Action::Paste);
@@ -316,10 +356,12 @@ mod tests {
     #[test]
     fn delete_asks_to_trash_but_not_with_modifiers() {
         assert_eq!(actions_for(vec![key(Key::Delete, Modifiers::NONE)]), [Action::Trash]);
-        // Real input reports held modifiers both ways; Shift+Delete is reserved.
+        // Real input reports held modifiers both ways.
         let shift_delete =
             vec![Event::ModifiersChanged(Modifiers::SHIFT), key(Key::Delete, Modifiers::SHIFT)];
-        assert_eq!(actions_for(shift_delete), []);
+        assert_eq!(actions_for(shift_delete), [Action::DeleteForever], "Shift+Delete skips the trash");
+        let ctrl_delete = vec![Event::ModifiersChanged(Modifiers::CTRL), key(Key::Delete, Modifiers::CTRL)];
+        assert_eq!(actions_for(ctrl_delete), [], "other combos stay reserved");
     }
 
     #[test]
@@ -332,6 +374,55 @@ mod tests {
         assert_eq!(actions, [Action::Count]);
         let actions = actions_for(vec![key(Key::R, Modifiers::NONE), Event::Text("r".into())]);
         assert_eq!(actions, [Action::TypeChar('r')], "a plain r is a filter letter");
+    }
+
+    #[test]
+    fn ctrl_a_selects_every_row_and_types_nothing() {
+        let events = vec![
+            Event::ModifiersChanged(Modifiers::COMMAND),
+            key(Key::A, Modifiers::COMMAND),
+        ];
+        assert_eq!(actions_for(events), [Action::SelectAll]);
+        let plain = vec![key(Key::A, Modifiers::NONE), Event::Text("a".into())];
+        assert_eq!(actions_for(plain), [Action::TypeChar('a')], "a plain a is a filter letter");
+    }
+
+    #[test]
+    fn shift_with_the_move_keys_extends_the_selection() {
+        let shift = |k| vec![Event::ModifiersChanged(Modifiers::SHIFT), key(k, Modifiers::SHIFT)];
+        for (k, action) in [
+            (Key::ArrowDown, Action::Extend(1)),
+            (Key::ArrowUp, Action::Extend(-1)),
+            (Key::PageDown, Action::Extend(PAGE)),
+            (Key::PageUp, Action::Extend(-PAGE)),
+            (Key::Home, Action::Extend(isize::MIN)),
+            (Key::End, Action::Extend(isize::MAX)),
+        ] {
+            assert_eq!(actions_for(shift(k)), [action], "Shift+{k:?}");
+        }
+        assert_eq!(actions_for(vec![key(Key::ArrowDown, Modifiers::NONE)]), [Action::Move(1)]);
+    }
+
+    // egui-winit sends Shift+Delete on Windows as Event::Cut, with no key press.
+    #[test]
+    fn shift_delete_sent_as_a_cut_event_still_asks_to_delete() {
+        let events = vec![
+            Event::ModifiersChanged(Modifiers::SHIFT),
+            Event::Cut,
+            Event::Key { key: Key::Delete, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::SHIFT },
+        ];
+        assert_eq!(actions_for(events), [Action::DeleteForever]);
+        let ctrl_x = vec![Event::ModifiersChanged(Modifiers::COMMAND), Event::Cut];
+        assert_eq!(actions_for(ctrl_x), [Action::Cut], "Ctrl+X still cuts");
+        let ctrl_shift_x = vec![Event::ModifiersChanged(Modifiers::COMMAND | Modifiers::SHIFT), Event::Cut];
+        assert_eq!(actions_for(ctrl_shift_x), [Action::Cut]);
+    }
+
+    #[test]
+    fn shift_f10_opens_the_menu_and_a_plain_f10_does_not() {
+        let events = vec![Event::ModifiersChanged(Modifiers::SHIFT), key(Key::F10, Modifiers::SHIFT)];
+        assert_eq!(actions_for(events), [Action::Menu]);
+        assert_eq!(actions_for(vec![key(Key::F10, Modifiers::NONE)]), []);
     }
 
     #[test]
@@ -374,6 +465,12 @@ mod tests {
 
     fn wheel(unit: MouseWheelUnit, y: f32, modifiers: Modifiers) -> Event {
         Event::MouseWheel { unit, delta: egui::vec2(0.0, y), modifiers, phase: egui::TouchPhase::Move }
+    }
+
+    #[test]
+    fn ctrl_shift_f_sizes_every_column_to_fit() {
+        assert_eq!(actions_for(vec![key(Key::F, Modifiers::COMMAND | Modifiers::SHIFT)]), [Action::FitColumns]);
+        assert_eq!(actions_for(vec![key(Key::F, Modifiers::COMMAND)]), [], "Ctrl+F alone does nothing");
     }
 
     #[test]
