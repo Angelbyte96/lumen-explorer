@@ -9,6 +9,9 @@ mod config;
 mod format;
 #[cfg(not(windows))]
 #[allow(dead_code)] // Used once the list asks for theme icons (linux-polish T5).
+mod icon_names;
+#[cfg(not(windows))]
+#[allow(dead_code)] // Used once the list asks for theme icons (linux-polish T5).
 mod icon_theme;
 mod fs;
 mod input;

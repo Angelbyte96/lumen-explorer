@@ -70,6 +70,8 @@ pub struct Place {
     pub label: String,
     pub path: PathBuf,
     pub trash: bool,
+    /// Its freedesktop icon name ("folder-download"), for the icon theme.
+    pub icon: &'static str,
 }
 
 /// The XDG user folders this side panel lists, in File Pilot's order.
@@ -108,18 +110,18 @@ fn named_user_dirs(text: &str, home: &Path) -> Vec<(String, Option<PathBuf>)> {
 pub fn places(home: &Path, user_dirs: Option<&str>, trash: Option<&Path>) -> Vec<Place> {
     let named = user_dirs.map(|text| named_user_dirs(text, home)).unwrap_or_default();
     let label_of = |p: &Path| p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned());
-    let mut places = vec![Place { label: label_of(home), path: home.to_path_buf(), trash: false }];
-    for (key, english) in USER_DIRS.iter().zip(ENGLISH_DIRS) {
+    let mut places = vec![Place { label: label_of(home), path: home.to_path_buf(), trash: false, icon: "user-home" }];
+    for ((key, english), icon) in USER_DIRS.iter().zip(ENGLISH_DIRS).zip(USER_DIR_ICONS) {
         let path = match named.iter().find(|(k, _)| k == key) {
             Some((_, path)) => path.clone(),
             None => Some(home.join(english)),
         };
         if let Some(path) = path.filter(|p| p.is_dir()) {
-            places.push(Place { label: label_of(&path), path, trash: false });
+            places.push(Place { label: label_of(&path), path, trash: false, icon });
         }
     }
     if let Some(trash) = trash {
-        places.push(Place { label: "Trash".into(), path: trash.to_path_buf(), trash: true });
+        places.push(Place { label: "Trash".into(), path: trash.to_path_buf(), trash: true, icon: "user-trash" });
     }
     places
 }
@@ -172,6 +174,9 @@ mod template_tests {
         assert_eq!(templates(&dir.join("missing")), Vec::<PathBuf>::new());
     }
 }
+
+/// The freedesktop icon of each of USER_DIRS.
+const USER_DIR_ICONS: [&str; 6] = ["user-desktop", "folder-download", "folder-documents", "folder-music", "folder-pictures", "folder-videos"];
 
 /// Folder names used when user-dirs.dirs does not name them.
 const ENGLISH_DIRS: [&str; 6] = ["Desktop", "Downloads", "Documents", "Music", "Pictures", "Videos"];
@@ -433,6 +438,8 @@ XDG_VIDEOS_DIR="$HOME/Vídeos"
         assert_eq!(places[2].path, home.join("Descargas"));
         assert!(places[5].trash && !places[0].trash);
         assert_eq!(places[5].path, trash);
+        let icons: Vec<&str> = places.iter().map(|p| p.icon).collect();
+        assert_eq!(icons, ["user-home", "user-desktop", "folder-download", "folder-documents", "folder-videos", "user-trash"]);
     }
 
     #[test]
