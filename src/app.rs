@@ -1987,6 +1987,7 @@ impl eframe::App for LumenApp {
                         places: &self.places,
                         disks: &self.disks.1,
                         recents: self.recents.paths(),
+                        icons: &self.file_icons,
                     };
                     if let Some(event) = ui::sidebar::show(ui, &sidebar) {
                         self.handle_sidebar(&ctx, event);
