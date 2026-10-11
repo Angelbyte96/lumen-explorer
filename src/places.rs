@@ -64,6 +64,70 @@ impl Recents {
     }
 }
 
+/// A visit's weight halves every two weeks.
+pub const VISIT_HALF_LIFE: u64 = 14 * 24 * 60 * 60;
+/// How many visited folders the quick jump remembers.
+pub const VISIT_LIMIT: usize = 200;
+
+/// A visited folder: its score when last visited, and when (Unix seconds).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Visit {
+    pub path: PathBuf,
+    pub score: f64,
+    pub at: u64,
+}
+
+/// Folders visited, scored like File Pilot's: each visit adds one, and the
+/// score fades with time, so the quick jump puts the folders used often and
+/// lately first.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Visits {
+    list: Vec<Visit>,
+}
+
+impl Visits {
+    /// From the saved list; a repeated path keeps its latest visit.
+    pub fn from_list(list: Vec<Visit>) -> Self {
+        let mut visits = Self::default();
+        for visit in list {
+            match visits.list.iter_mut().find(|v| v.path == visit.path) {
+                Some(kept) if kept.at < visit.at => *kept = visit,
+                Some(_) => {}
+                None => visits.list.push(visit),
+            }
+        }
+        visits
+    }
+
+    pub fn list(&self) -> &[Visit] {
+        &self.list
+    }
+
+    /// Counts a visit to `path` at `now`, dropping the weakest beyond the limit.
+    pub fn visit(&mut self, path: &Path, now: u64) {
+        let before = match self.list.iter().position(|v| v.path == path) {
+            Some(at) => faded(&self.list.remove(at), now),
+            None => 0.0,
+        };
+        self.list.insert(0, Visit { path: path.to_path_buf(), score: before + 1.0, at: now });
+        if self.list.len() > VISIT_LIMIT {
+            let weakest = (0..self.list.len()).min_by(|&a, &b| faded(&self.list[a], now).total_cmp(&faded(&self.list[b], now)));
+            self.list.remove(weakest.expect("not empty"));
+        }
+    }
+
+    /// Every folder's score at `now`.
+    #[cfg_attr(not(test), allow(dead_code))] // the quick jump uses it from fase-9 T4 on
+    pub fn scores(&self, now: u64) -> Vec<(PathBuf, f64)> {
+        self.list.iter().map(|v| (v.path.clone(), faded(v, now))).collect()
+    }
+}
+
+/// `visit`'s score at `now`, halved for each half-life gone by.
+fn faded(visit: &Visit, now: u64) -> f64 {
+    visit.score * 0.5_f64.powf(now.saturating_sub(visit.at) as f64 / VISIT_HALF_LIFE as f64)
+}
+
 /// A folder in the Places section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
@@ -371,6 +435,55 @@ pub fn usage(_path: &Path) -> Option<Usage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DAY: u64 = 24 * 60 * 60;
+
+    fn score(visits: &Visits, path: &str, now: u64) -> f64 {
+        visits.scores(now).into_iter().find(|(p, _)| p == Path::new(path)).map_or(0.0, |(_, s)| s)
+    }
+
+    #[test]
+    fn visits_add_up_and_halve_every_two_weeks() {
+        let mut visits = Visits::default();
+        visits.visit(Path::new("/d"), 1000);
+        visits.visit(Path::new("/d"), 1000);
+        visits.visit(Path::new("/e"), 1000);
+        assert_eq!(score(&visits, "/d", 1000), 2.0);
+        assert_eq!(score(&visits, "/e", 1000), 1.0);
+        assert!((score(&visits, "/d", 1000 + 14 * DAY) - 1.0).abs() < 1e-9);
+        assert!((score(&visits, "/d", 1000 + 28 * DAY) - 0.5).abs() < 1e-9);
+        assert_eq!(score(&visits, "/nope", 1000), 0.0);
+    }
+
+    #[test]
+    fn a_new_visit_adds_to_the_faded_score_and_is_remembered_once() {
+        let mut visits = Visits::default();
+        visits.visit(Path::new("/d"), 0);
+        visits.visit(Path::new("/d"), 0);
+        visits.visit(Path::new("/d"), 14 * DAY);
+        assert!((score(&visits, "/d", 14 * DAY) - 2.0).abs() < 1e-9, "2 halved, plus 1");
+        assert_eq!(visits.list().len(), 1);
+        assert_eq!(visits.list()[0].at, 14 * DAY);
+    }
+
+    #[test]
+    fn beyond_the_limit_the_weakest_folder_is_forgotten() {
+        let mut visits = Visits::default();
+        visits.visit(Path::new("/old"), 0);
+        for i in 0..VISIT_LIMIT {
+            visits.visit(&PathBuf::from(format!("/f{i}")), 30 * DAY);
+        }
+        assert_eq!(visits.list().len(), VISIT_LIMIT);
+        assert_eq!(score(&visits, "/old", 30 * DAY), 0.0, "faded the most");
+        assert_eq!(score(&visits, "/f0", 30 * DAY), 1.0);
+    }
+
+    #[test]
+    fn a_saved_list_keeps_the_latest_visit_of_a_repeated_folder() {
+        let visit = |path: &str, score, at| Visit { path: PathBuf::from(path), score, at };
+        let visits = Visits::from_list(vec![visit("/d", 5.0, 10), visit("/e", 1.0, 10), visit("/d", 2.0, 20)]);
+        assert_eq!(visits.list(), [visit("/d", 2.0, 20), visit("/e", 1.0, 10)]);
+    }
 
     #[test]
     fn toggling_adds_at_the_end_then_removes() {

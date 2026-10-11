@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::app::{Sort, SortColumn};
+use crate::places::{VISIT_LIMIT, Visit};
 use crate::ui::file_list::{ALL_SHOWN, DEFAULT_ORDER, DEFAULT_WIDTHS, MAX_ZOOM, MIN_WIDTH, Order, Shown, Widths};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +30,8 @@ pub struct Config {
     pub shown_columns: Shown,
     /// The list's columns from left to right.
     pub column_order: Order,
+    /// Folders visited, for the quick jump. Written when Lumen closes.
+    pub visited: Vec<Visit>,
 }
 
 impl Default for Config {
@@ -46,6 +49,7 @@ impl Default for Config {
             columns: DEFAULT_WIDTHS,
             shown_columns: ALL_SHOWN,
             column_order: DEFAULT_ORDER,
+            visited: Vec::new(),
         }
     }
 }
@@ -77,6 +81,7 @@ impl Config {
                 "columns" => config.columns = parse_widths(value).unwrap_or(config.columns),
                 "hidden_columns" => config.shown_columns = parse_hidden(value),
                 "column_order" => config.column_order = parse_order(value).unwrap_or(config.column_order),
+                "visited" => config.visited.extend(parse_visit(value)),
                 _ => {}
             }
         }
@@ -114,6 +119,11 @@ impl Config {
                 text += &format!("tab = {path}\n");
             }
             text += &format!("active_tab = {}\n", self.active_tab);
+        }
+        for visit in &self.visited {
+            if let Some(path) = one_line(&visit.path) {
+                text += &format!("visited = {} {} {path}\n", visit.score, visit.at);
+            }
         }
         text
     }
@@ -163,6 +173,9 @@ impl Config {
         if (&before.tabs, before.active_tab) != (&after.tabs, after.active_tab) {
             (merged.tabs, merged.active_tab) = (after.tabs.clone(), after.active_tab);
         }
+        if before.visited != after.visited {
+            merged.visited = merge_visits(&disk.visited, &after.visited);
+        }
         merged.bookmarks.retain(|p| !before.bookmarks.contains(p) || after.bookmarks.contains(p));
         for path in &after.bookmarks {
             if !before.bookmarks.contains(path) && !merged.bookmarks.contains(path) {
@@ -184,6 +197,31 @@ impl Config {
         std::fs::write(&tmp, self.to_text())?;
         std::fs::rename(&tmp, path)
     }
+}
+
+/// Both windows' visits, each folder's latest, most recent first.
+fn merge_visits(disk: &[Visit], here: &[Visit]) -> Vec<Visit> {
+    let mut merged = disk.to_vec();
+    for visit in here {
+        match merged.iter_mut().find(|v| v.path == visit.path) {
+            Some(kept) if kept.at < visit.at => *kept = visit.clone(),
+            Some(_) => {}
+            None => merged.push(visit.clone()),
+        }
+    }
+    merged.sort_by_key(|v| std::cmp::Reverse(v.at));
+    merged.truncate(VISIT_LIMIT);
+    merged
+}
+
+/// `visited = <score> <when, Unix seconds> <path>`.
+fn parse_visit(value: &str) -> Option<Visit> {
+    let (score, rest) = value.split_once(char::is_whitespace)?;
+    let (at, path) = rest.trim_start().split_once(char::is_whitespace)?;
+    let score = score.parse::<f64>().ok().filter(|s| s.is_finite() && *s >= 0.0)?;
+    let at = at.parse().ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| Visit { path: PathBuf::from(path), score, at })
 }
 
 /// A path as a value: the rest of its line, trimmed, so it must not hold a
@@ -365,6 +403,10 @@ mod tests {
             columns: [250.0, 90.0, 140.0, 55.0, 60.0, 95.0],
             shown_columns: [true, false, true, true, false, true],
             column_order: [1, 0, 2, 3, 5, 4],
+            visited: vec![
+                Visit { path: PathBuf::from("/home/u/Descargas"), score: 2.5, at: 1_760_000_000 },
+                Visit { path: PathBuf::from("/srv/my files"), score: 0.1, at: 1 },
+            ],
         }
     }
 
@@ -380,8 +422,15 @@ mod tests {
         assert!(text.contains("column_order = type name modified folders size files\n"), "{text}");
         assert!(text.contains("bookmark = /srv/my files\n"), "{text}");
         assert!(text.contains("tab = /home/u\ntab = /srv/my files\nactive_tab = 1\n"), "{text}");
+        assert!(text.contains("visited = 2.5 1760000000 /home/u/Descargas\nvisited = 0.1 1 /srv/my files\n"), "{text}");
         assert_eq!(Config::parse(&text), sample());
         assert_eq!(Config::parse(&Config::default().to_text()), Config::default());
+    }
+
+    #[test]
+    fn a_broken_visited_line_is_skipped() {
+        let text = "visited = x 1 /a\nvisited = 1 /a\nvisited = 1 2\nvisited = -1 2 /a\nvisited = NaN 2 /a\nvisited = 1.5 2 /a b\n";
+        assert_eq!(Config::parse(text).visited, [Visit { path: PathBuf::from("/a b"), score: 1.5, at: 2 }]);
     }
 
     #[test]
@@ -561,6 +610,18 @@ bookmark =
         assert_eq!(Config::merge(&disk, &before, &columns).columns, columns.columns, "resized here");
         let other = Config { columns: [500.0, 90.0, 140.0, 55.0, 60.0, 95.0], ..disk.clone() };
         assert_eq!(Config::merge(&other, &before, &after).columns, other.columns, "resized in another window");
+    }
+
+    #[test]
+    fn merging_visits_keeps_each_folders_latest_visit_from_either_window() {
+        let visit = |path: &str, at| Visit { path: PathBuf::from(path), score: at as f64, at };
+        let disk = Config { visited: vec![visit("/a", 10), visit("/b", 10)], ..Config::default() };
+        let after = Config { visited: vec![visit("/a", 20), visit("/c", 20)], ..Config::default() };
+        let merged = Config::merge(&disk, &Config::default(), &after);
+        assert_eq!(merged.visited, [visit("/a", 20), visit("/c", 20), visit("/b", 10)]);
+        let older = Config { visited: vec![visit("/b", 5)], ..Config::default() };
+        assert_eq!(Config::merge(&disk, &Config::default(), &older).visited, disk.visited, "the other window's later visit stays");
+        assert_eq!(Config::merge(&disk, &after, &after).visited, disk.visited, "nothing visited here");
     }
 
     #[test]
