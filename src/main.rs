@@ -7,6 +7,10 @@ mod app;
 mod apps;
 mod config;
 mod format;
+#[cfg(not(windows))]
+mod icon_names;
+#[cfg(not(windows))]
+mod icon_theme;
 mod fs;
 mod input;
 mod menu;

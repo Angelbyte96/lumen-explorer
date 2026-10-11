@@ -30,6 +30,9 @@ libc = "0.2"
 # Opens files with their default app. Not on Windows: see fs::ops::open_with_default_app.
 [target.'cfg(not(windows))'.dependencies]
 open = "5"
+# Draws the icon theme's SVG icons (list rows, side panel). No text or system
+# fonts: icons need neither. Not on Windows: the shell draws icons there.
+resvg = { version = "0.48", default-features = false }
 
 # Drive letters, volume names and free space for the side panel; file
 # identities for renames; opening files as File Explorer does. The same
