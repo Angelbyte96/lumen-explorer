@@ -88,6 +88,16 @@ pub fn image(ui: &mut egui::Ui, texture: egui::TextureId) -> egui::Response {
     response
 }
 
+/// A one-colour icon drawn in white (the theme's symbolic ones), tinted
+/// with the text colour, as big as the text beside it.
+pub fn symbol(ui: &mut egui::Ui, texture: egui::TextureId) -> egui::Response {
+    let side = ui.text_style_height(&egui::TextStyle::Body);
+    let (rect, response) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
+    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    ui.painter().image(texture, rect, uv, ui.visuals().text_color());
+    response
+}
+
 /// A plain file icon, for the status bar count.
 pub fn file(ui: &mut egui::Ui) -> egui::Response {
     let side = ui.text_style_height(&egui::TextStyle::Body);

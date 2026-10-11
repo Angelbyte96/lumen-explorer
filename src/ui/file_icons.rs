@@ -28,6 +28,10 @@ pub enum Key {
     /// Programs, shortcuts and .ico files (asked again once modified), and
     /// folders (special ones have their own).
     Path(PathBuf, Option<SystemTime>),
+    /// A side panel row's one-colour icon, by its freedesktop name
+    /// ("folder-download" asks for folder-download-symbolic).
+    #[cfg(not(windows))]
+    Symbolic(&'static str),
 }
 
 /// The icon the entry shows.
@@ -66,8 +70,35 @@ impl FileIcons {
     }
 
     /// The shell's icon for the folder or disk at `path` (a side panel row).
+    #[cfg(windows)]
     pub fn folder_texture(&self, path: &std::path::Path) -> Option<egui::TextureId> {
         self.lookup(Key::Path(path.to_path_buf(), None), path)
+    }
+
+    /// The theme's one-colour icon called `name` (+ "-symbolic"), drawn in
+    /// white: tint it with the text colour.
+    #[cfg(not(windows))]
+    pub fn symbolic_texture(&self, name: &'static str) -> Option<egui::TextureId> {
+        self.lookup(Key::Symbolic(name), std::path::Path::new(""))
+    }
+
+    /// As if the theme had answered with `texture` for the symbolic icon `name`.
+    #[cfg(all(test, not(windows)))]
+    pub fn insert_symbolic(&mut self, name: &'static str, texture: egui::TextureHandle) {
+        self.loaded.insert(Key::Symbolic(name), Some(texture));
+    }
+
+    /// The symbolic icons asked for and not sent yet.
+    #[cfg(all(test, not(windows)))]
+    pub fn wanted_symbolic(&self) -> Vec<&'static str> {
+        self.wanted
+            .borrow()
+            .keys()
+            .filter_map(|key| match key {
+                Key::Symbolic(name) => Some(*name),
+                _ => None,
+            })
+            .collect()
     }
 
     fn lookup(&self, key: Key, path: &std::path::Path) -> Option<egui::TextureId> {
@@ -81,7 +112,7 @@ impl FileIcons {
     }
 
     /// As if the shell had answered with `texture` for the folder or disk at `path`.
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub fn insert_folder(&mut self, path: &std::path::Path, texture: egui::TextureHandle) {
         self.loaded.insert(Key::Path(path.to_path_buf(), None), Some(texture));
     }
@@ -218,6 +249,9 @@ pub mod native {
 
     pub type Icon = Option<([usize; 2], Vec<u8>)>;
 
+    /// Reads an icon file into pixels: as it is, or as a symbolic shape.
+    type Draw = fn(&Path, u32) -> Icon;
+
     /// Where the icons come from.
     pub struct Setup {
         /// $XDG_DATA_HOME, then $XDG_DATA_DIRS: mime/ tables.
@@ -238,6 +272,10 @@ pub mod native {
             Self { bases: icon_theme::base_dirs(&home, &dirs.data), data: dirs.data, theme: None, folders }
         }
     }
+
+    /// Side panel icons are drawn at text height: 32 px is sharp up to twice
+    /// a 16 point line.
+    const SYMBOLIC_SIDE: u32 = 32;
 
     /// The theme used when the desktop names none.
     const FALLBACK_THEME: &str = "Adwaita";
@@ -260,6 +298,18 @@ pub mod native {
             }
             Some((size, rgba))
         }
+    }
+
+    /// A symbolic icon in white, keeping its shape (alpha): drawn tinted, it
+    /// takes the text colour, as GTK recolours them.
+    pub fn symbolic(file: &Path, side: u32) -> Icon {
+        let (size, mut rgba) = load(file, side)?;
+        for px in rgba.as_chunks_mut::<4>().0 {
+            // Premultiplied white: every channel is the alpha.
+            let alpha = px[3];
+            px[..3].fill(alpha);
+        }
+        Some((size, rgba))
     }
 
     /// The SVG scaled to fit a `side` square, centred; tiny-skia's pixels
@@ -295,14 +345,15 @@ pub mod native {
                 // Many types share one file (text-x-generic): drawn once.
                 let mut drawn: HashMap<PathBuf, Icon> = HashMap::new();
                 for (key, _) in requests {
-                    let wanted = match &key {
-                        Key::Type(ext) => names.for_type(ext),
-                        Key::Path(path, _) => names.for_folder(path),
+                    let (wanted, side, draw): (Vec<String>, u32, Draw) = match &key {
+                        Key::Type(ext) => (names.for_type(ext), super::SIDE as u32, load),
+                        Key::Path(path, _) => (names.for_folder(path), super::SIDE as u32, load),
+                        Key::Symbolic(name) => (vec![format!("{name}-symbolic"), "folder-symbolic".into()], SYMBOLIC_SIDE, symbolic),
                     };
                     let wanted: Vec<&str> = wanted.iter().map(String::as_str).collect();
                     let icon = theme
-                        .find(&wanted, super::SIDE as u32)
-                        .and_then(|file| drawn.entry(file.clone()).or_insert_with(|| load(&file, super::SIDE as u32)).clone());
+                        .find(&wanted, side)
+                        .and_then(|file| drawn.entry(file.clone()).or_insert_with(|| draw(&file, side)).clone());
                     if send.send((key, icon)).is_err() {
                         break;
                     }
@@ -431,6 +482,31 @@ mod tests {
         assert!(icons.texture(&folder).is_some(), "the folder's SVG");
         assert_eq!(icons.loaded.get(&key_of(&text)).map(Option::is_none), Some(true), "the theme has no text icon: the painted one");
         assert!(icons.wanted.borrow().is_empty() && icons.pending.is_empty(), "nothing asked again");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn symbolic_icons_load_as_a_white_shape_to_tint_and_fall_back_to_the_folder() {
+        let ctx = egui::Context::default();
+        let (dir, setup) = theme_fixture("file-icons-symbolic");
+        let svg = |colour: &str| format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="{colour}"/></svg>"#);
+        std::fs::write(dir.join("icons/T/scalable/places/folder-download-symbolic.svg"), svg("#2e3436")).unwrap();
+        std::fs::write(dir.join("icons/T/scalable/places/folder-symbolic.svg"), svg("#bebebe")).unwrap();
+        let (size, rgba) = native::symbolic(&dir.join("icons/T/scalable/places/folder-download-symbolic.svg"), 32).expect("drawn");
+        assert_eq!(size, [32, 32]);
+        assert!(rgba.chunks(4).all(|px| px == [255, 255, 255, 255]), "white where drawn, whatever its colour");
+        let mut icons = FileIcons::default();
+        icons.set_setup(setup);
+        icons.symbolic_texture("folder-download");
+        icons.symbolic_texture("folder-music");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let keys = [Key::Symbolic("folder-download"), Key::Symbolic("folder-music")];
+        while keys.iter().any(|k| !icons.loaded.contains_key(k)) && std::time::Instant::now() < deadline {
+            icons.poll(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(icons.symbolic_texture("folder-download").is_some());
+        assert!(icons.symbolic_texture("folder-music").is_some(), "no music icon: the plain folder's");
     }
 
     #[cfg(windows)]
