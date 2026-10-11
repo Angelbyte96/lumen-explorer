@@ -47,6 +47,11 @@ pub enum Command {
     Shell(u32),
     Sort(SortColumn),
     Refresh,
+    /// The list's header menu: this column's width to its content.
+    FitColumn(usize),
+    /// Every column's width to its content (Ctrl+Shift+F).
+    FitAllColumns,
+    RestoreColumns,
 }
 
 /// The line icon drawn left of an item (see `ui::icons::menu_icon`).
@@ -115,6 +120,7 @@ impl MenuIcon {
             Command::OpenTerminal => Self::Terminal,
             Command::Refresh => Self::Refresh,
             Command::Sort(_) | Command::Shell(_) => return None,
+            Command::FitColumn(_) | Command::FitAllColumns | Command::RestoreColumns => return None,
         })
     }
 }
@@ -438,6 +444,16 @@ pub fn sort_menu(sort: Sort) -> Item {
     Item::sub("Sort by", MenuIcon::Sort, columns)
 }
 
+/// Right click on the list's header `column`, like File Pilot's.
+pub fn column_menu(column: usize) -> Vec<Item> {
+    vec![
+        Item::run("Size Column To Fit", None, true, Command::FitColumn(column)),
+        Item::run("Size All Columns To Fit", Some("Ctrl+Shift+F"), true, Command::FitAllColumns),
+        Item::separator(),
+        Item::run("Restore Default Columns", None, true, Command::RestoreColumns),
+    ]
+}
+
 /// The menu for the folder's empty space. `can_paste`: the clipboard holds
 /// something; `templates`: the files New ▸ offers copies of.
 pub fn background_menu(can_paste: bool, sort: Sort, templates: &[std::path::PathBuf]) -> Vec<Item> {
@@ -726,5 +742,30 @@ pub(crate) mod tests {
         let shown = here(&["New", "  Folder [Ctrl+Shift+N]", "  Empty File", "Open Terminal Here", "-", "Sort by"]);
         assert_eq!(bare[1..=shown.len()], shown, "no templates, no separator");
         assert_eq!(bare[shown.len() + 1], format!("  Name {SORT_ASCENDING}"));
+    }
+
+    #[test]
+    fn the_header_menu_fits_one_column_all_of_them_or_restores_the_defaults() {
+        let items = column_menu(2);
+        let lines: Vec<(&str, Option<&str>, Option<&Command>)> = items
+            .iter()
+            .map(|item| {
+                let command = match &item.kind {
+                    Kind::Run(command) => Some(command),
+                    _ => None,
+                };
+                (item.label.as_str(), item.shortcut, command)
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("Size Column To Fit", None, Some(&Command::FitColumn(2))),
+                ("Size All Columns To Fit", Some("Ctrl+Shift+F"), Some(&Command::FitAllColumns)),
+                ("", None, None),
+                ("Restore Default Columns", None, Some(&Command::RestoreColumns)),
+            ]
+        );
+        assert!(items.iter().filter(|i| matches!(i.kind, Kind::Run(_))).all(|i| i.enabled));
     }
 }

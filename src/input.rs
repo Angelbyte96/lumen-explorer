@@ -59,6 +59,8 @@ pub enum Action {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    /// Every list column's width to its content (Ctrl+Shift+F).
+    FitColumns,
     /// Escape: clears the filter, else stops a running count, else the copy or move.
     Cancel,
     /// Escape held down (key repeat).
@@ -182,6 +184,9 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
         // Ctrl++ needs Shift on some layouts (Ctrl+Shift+=); matching ignores it.
         if i.consume_key(Modifiers::COMMAND, Key::Plus) || i.consume_key(Modifiers::COMMAND, Key::Equals) {
             actions.push(Action::ZoomIn);
+        }
+        if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::F) {
+            actions.push(Action::FitColumns);
         }
         if i.consume_key(Modifiers::COMMAND, Key::Minus) {
             actions.push(Action::ZoomOut);
@@ -460,6 +465,12 @@ mod tests {
 
     fn wheel(unit: MouseWheelUnit, y: f32, modifiers: Modifiers) -> Event {
         Event::MouseWheel { unit, delta: egui::vec2(0.0, y), modifiers, phase: egui::TouchPhase::Move }
+    }
+
+    #[test]
+    fn ctrl_shift_f_sizes_every_column_to_fit() {
+        assert_eq!(actions_for(vec![key(Key::F, Modifiers::COMMAND | Modifiers::SHIFT)]), [Action::FitColumns]);
+        assert_eq!(actions_for(vec![key(Key::F, Modifiers::COMMAND)]), [], "Ctrl+F alone does nothing");
     }
 
     #[test]

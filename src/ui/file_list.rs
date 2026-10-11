@@ -29,6 +29,8 @@ pub enum ListEvent {
     RenameEnded(bool),
     /// A column border was dragged and let go: the new widths.
     Resized(Widths),
+    /// Right click on a column's header: its menu.
+    HeaderMenu(usize),
 }
 
 /// Each column's width in points, in `COLUMNS` order.
@@ -148,8 +150,13 @@ pub fn show(
                 for (i, (label, column)) in COLUMNS.into_iter().enumerate() {
                     header.col(|ui| {
                         cells[i] = ui.max_rect();
-                        if sort_header(ui, label, column, sort) {
+                        // The whole header, not only its label: a click sorts, a right click opens its menu.
+                        let cell = ui.interact(ui.max_rect(), egui::Id::new(("lumen_header", i)), egui::Sense::click());
+                        let label = sort_header(ui, label, column, sort);
+                        if label.clicked() || cell.clicked() {
                             event = Some(ListEvent::Sort(column));
+                        } else if label.secondary_clicked() || cell.secondary_clicked() {
+                            event = Some(ListEvent::HeaderMenu(i));
                         }
                     });
                 }
@@ -223,6 +230,38 @@ pub fn show(
     });
     event
 }
+
+/// The width that shows every cell of `column` and its header whole, for
+/// `view`'s rows at `zoom`.
+pub fn fit_width(ctx: &egui::Context, view: &View, zoom: u8, column: usize) -> f32 {
+    let style = ctx.global_style();
+    let font = egui::TextStyle::Body.resolve(&style);
+    let measure = |text: String| ctx.fonts_mut(|f| f.layout_no_wrap(text, font.clone(), egui::Color32::WHITE).size().x);
+    // The header with room for the sort arrow, which may show up later.
+    let header = measure(format!("{} {SORT_DESCENDING}", COLUMNS[column].0)) + 2.0 * style.spacing.button_padding.x;
+    let icon = icon_side(zoom, ctx.fonts_mut(|f| f.row_height(&font))) + style.spacing.item_spacing.x;
+    let widest = view
+        .rows
+        .iter()
+        .map(|&row| {
+            let entry = &view.entries[row];
+            match column {
+                0 => icon + measure(entry.name.clone()),
+                1 => measure(entry.kind().to_string()),
+                2 => measure(entry.modified.map(format_time).unwrap_or_default()),
+                _ => {
+                    let cells = count_cells(entry, view.totals.get(&entry.name));
+                    measure(cells[column - 3].clone())
+                }
+            }
+        })
+        .fold(header, f32::max);
+    // Whole points: the config keeps them so.
+    (widest + FIT_MARGIN).max(MIN_WIDTH).ceil()
+}
+
+/// Air left after the widest cell of a column sized to fit.
+const FIT_MARGIN: f32 = 6.0;
 
 /// A column border being dragged: which column, where the pointer and the
 /// column's width were when it was grabbed, and the widths before it.
@@ -390,14 +429,14 @@ fn rename_field(ui: &mut egui::Ui, edit: &mut RenameEdit) -> Option<bool> {
 }
 
 /// A header label that sorts on click; the active column shows its direction.
-fn sort_header(ui: &mut egui::Ui, label: &str, column: SortColumn, sort: Sort) -> bool {
+fn sort_header(ui: &mut egui::Ui, label: &str, column: SortColumn, sort: Sort) -> egui::Response {
     let arrow = match (sort.column == column, sort.descending) {
         (false, _) => "",
         (true, false) => SORT_ASCENDING,
         (true, true) => SORT_DESCENDING,
     };
     let text = egui::RichText::new(format!("{label} {arrow}")).strong();
-    ui.add(egui::Button::new(text).frame(false)).clicked()
+    ui.add(egui::Button::new(text).frame(false))
 }
 
 /// Characters of `name` selected when renaming starts: the part before the
@@ -833,6 +872,71 @@ mod tests {
         let Some(ListEvent::Resized(new)) = released.event else { panic!("reported when let go") };
         assert_eq!(new[1], MIN_WIDTH, "{new:?}");
         assert_eq!(new[0], DEFAULT_WIDTHS[0]);
+    }
+
+    #[test]
+    fn a_right_click_on_a_header_opens_its_menu_and_a_left_click_still_sorts() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt"]);
+        let lefts = settled(&ctx, &view, &DEFAULT_WIDTHS);
+        let click = |pos: egui::Pos2, button: egui::PointerButton| {
+            let press = |pressed| egui::Event::PointerButton { pos, button, pressed, modifiers: egui::Modifiers::NONE };
+            draw_list(&ctx, &view, &DEFAULT_WIDTHS, vec![egui::Event::PointerMoved(pos)]);
+            draw_list(&ctx, &view, &DEFAULT_WIDTHS, vec![press(true)]);
+            draw_list(&ctx, &view, &DEFAULT_WIDTHS, vec![press(false)]).event
+        };
+        let on_label = egui::pos2(lefts[1] + 5.0, 10.0);
+        let past_label = egui::pos2(lefts[1] + 80.0, 10.0);
+        let right = egui::PointerButton::Secondary;
+        assert!(matches!(click(on_label, right), Some(ListEvent::HeaderMenu(1))), "on Type's label");
+        assert!(matches!(click(past_label, right), Some(ListEvent::HeaderMenu(1))), "on Type's free part");
+        let left = click(on_label, egui::PointerButton::Primary);
+        assert!(matches!(left, Some(ListEvent::Sort(SortColumn::Type))), "a left click sorts");
+    }
+
+    /// What is painted of the row whose name starts like `name`, with Name `width` wide.
+    fn painted_name(view: &View, width: f32, name: &str) -> String {
+        let ctx = egui::Context::default();
+        let widths = [width, 110.0, 130.0, 60.0, 60.0, 80.0];
+        let wide = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(2000.0, 600.0));
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(wide), ..Default::default() }, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    show(ui, view, &[], Sizes { widths, ..Sizes::default() }, None, None, &FileIcons::default());
+                });
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let first = name.split(' ').next().unwrap();
+        shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                // The characters laid out: an elided name ends in "…" there, not in its text.
+                egui::Shape::Text(t) if t.galley.text().starts_with(first) => {
+                    Some(t.galley.rows.iter().flat_map(|r| r.glyphs.iter().map(|g| g.chr)).collect())
+                }
+                _ => None,
+            })
+            .expect("name painted")
+    }
+
+    #[test]
+    fn a_column_sized_to_fit_shows_its_longest_cell_and_its_header_whole() {
+        let long = "Presentacion final del proyecto de arquitectura 2026.pptx";
+        let view = listed(&["a.txt", long]);
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        let name = fit_width(&ctx, &view, 0, 0);
+        assert_eq!(painted_name(&view, name, long), long, "whole at its fit width ({name})");
+        assert_ne!(painted_name(&view, name - 20.0, long), long, "a little narrower cuts it");
+        // Folders holds only "--": the header sets its width.
+        let font = egui::TextStyle::Body.resolve(&ctx.global_style());
+        let header = ctx.fonts_mut(|f| f.layout_no_wrap("Folders".into(), font, egui::Color32::WHITE).size().x);
+        let folders = fit_width(&ctx, &view, 0, 3);
+        assert!(folders >= header && folders < header + 40.0, "{folders} for a {header} header");
+        assert!(fit_width(&ctx, &view, MAX_ZOOM, 0) > name, "a bigger icon needs more room");
     }
 
     #[test]
