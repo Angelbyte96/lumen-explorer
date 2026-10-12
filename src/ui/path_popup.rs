@@ -1291,7 +1291,8 @@ mod tests {
         let roots = vec![dir.clone()];
         let restart: Restart = Box::new(move |ctx| {
             let ctx = ctx.clone();
-            Crawler::start(Scope { roots: roots.clone(), ..Scope::default() }, move || ctx.request_repaint())
+            let scope = Scope { roots: roots.clone(), ..Scope::default() };
+            Crawler::start(move || scope, move || ctx.request_repaint())
         });
         let ctx = egui::Context::default();
         let first = restart(&ctx);

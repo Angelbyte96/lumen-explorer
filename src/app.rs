@@ -2207,9 +2207,13 @@ impl eframe::App for LumenApp {
 }
 
 /// Starts the background crawl of every disk behind the path box's quick jump.
+/// The disks and shares are read on the crawl's thread: a hung mount must
+/// not freeze the window.
 fn start_index(ctx: &egui::Context) -> Crawler {
-    let disks = places::disks().into_iter().map(|mount| mount.path).collect();
-    let scope = fs::index::scope(cfg!(windows), fs::home_dir().as_deref(), disks, places::network_mounts());
+    let scope = || {
+        let disks = places::disks().into_iter().map(|mount| mount.path).collect();
+        fs::index::scope(cfg!(windows), fs::home_dir().as_deref(), disks, places::network_mounts())
+    };
     let ctx = ctx.clone();
     Crawler::start(scope, move || ctx.request_repaint())
 }
