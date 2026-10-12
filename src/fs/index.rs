@@ -262,24 +262,26 @@ pub struct Crawler {
 }
 
 impl Crawler {
-    /// Starts crawling; `on_done` runs on the crawl's thread when it ends.
-    pub fn start(scope: Scope, on_done: impl FnOnce() + Send + 'static) -> Self {
-        let Scope { roots, network, rules } = scope;
+    /// Starts crawling what `scope` returns; both run on the crawl's thread,
+    /// so reading the mounts never blocks the caller. `on_done` runs there
+    /// too when the crawl ends.
+    pub fn start(scope: impl FnOnce() -> Scope + Send + 'static, on_done: impl FnOnce() + Send + 'static) -> Self {
         let index = Arc::new(RwLock::new(Index::default()));
         let done = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
-        // Each share on its own thread, outside `done`: one that hangs only
-        // loses its own entries and never holds back the rest or a re-crawl.
-        for share in network {
-            let (shared, stop, rules) = (index.clone(), cancel.clone(), rules.clone());
-            thread::spawn(move || {
-                lower_priority();
-                crawl(&[share], &rules, &shared, &stop);
-            });
-        }
         let (shared, finished, stop) = (index.clone(), done.clone(), cancel.clone());
         thread::spawn(move || {
             lower_priority();
+            let Scope { roots, network, rules } = scope();
+            // Each share on its own thread, outside `done`: one that hangs only
+            // loses its own entries and never holds back the rest or a re-crawl.
+            for share in network {
+                let (shared, stop, rules) = (shared.clone(), stop.clone(), rules.clone());
+                thread::spawn(move || {
+                    lower_priority();
+                    crawl(&[share], &rules, &shared, &stop);
+                });
+            }
             crawl(&roots, &rules, &shared, &stop);
             finished.store(true, Ordering::Release);
             on_done();
@@ -487,7 +489,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let scope = Scope { roots: vec![root.join("docs")], network: vec![root.join("Downloads")], rules: rules() };
         std::fs::write(root.join("Downloads/shared.txt"), "x").unwrap();
-        let crawler = Crawler::start(scope, move || tx.send(()).unwrap());
+        let crawler = Crawler::start(move || scope, move || tx.send(()).unwrap());
         rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the local crawl ends");
         let found = |name: &str| {
             let index = crawler.index().read().unwrap();
@@ -506,9 +508,25 @@ mod tests {
         let root = tree("index-background");
         let (tx, rx) = std::sync::mpsc::channel();
         let scope = Scope { roots: vec![root.clone()], rules: rules(), ..Scope::default() };
-        let crawler = Crawler::start(scope, move || tx.send(()).unwrap());
+        let crawler = Crawler::start(move || scope, move || tx.send(()).unwrap());
         rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the crawl ends");
         assert!(crawler.is_done());
         assert!(listed(&crawler.index().read().unwrap(), &root).contains(&"docs/a/deep.txt".to_string()));
+    }
+
+    #[test]
+    fn the_scope_is_read_on_the_crawl_thread_not_the_caller() {
+        let root = tree("index-scope-thread");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (read_on, read_rx) = std::sync::mpsc::channel();
+        let scope = move || {
+            read_on.send(thread::current().id()).unwrap();
+            Scope { roots: vec![root.clone()], rules: rules(), ..Scope::default() }
+        };
+        let crawler = Crawler::start(scope, move || tx.send(()).unwrap());
+        let reader = read_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the scope is read");
+        assert_ne!(reader, thread::current().id(), "mounts are never scanned on the caller's (UI) thread");
+        rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the crawl ends");
+        assert!(crawler.index().read().unwrap().len() > 0, "the scope it read is crawled");
     }
 }
