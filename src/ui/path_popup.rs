@@ -826,7 +826,7 @@ mod tests {
         assert_eq!(used, go(dir.join("sub"), None, true));
     }
 
-    use crate::fs::index::{Index, Rules, crawl};
+    use crate::fs::index::{Index, Rules, Scope, crawl};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use eframe::egui::{Color32, epaint::ClippedShape};
@@ -1252,7 +1252,7 @@ mod tests {
         let roots = vec![dir.clone()];
         let restart: Restart = Box::new(move |ctx| {
             let ctx = ctx.clone();
-            Crawler::start(roots.clone(), Rules::default(), move || ctx.request_repaint())
+            Crawler::start(Scope { roots: roots.clone(), ..Scope::default() }, move || ctx.request_repaint())
         });
         let ctx = egui::Context::default();
         let first = restart(&ctx);
