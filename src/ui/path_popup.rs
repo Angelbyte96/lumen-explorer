@@ -217,6 +217,9 @@ pub struct PathPopup {
     jump: Option<Jump>,
     /// Keys that use a row, pressed while its answer was still being searched.
     held: Keys,
+    /// Up/Down pressed while the answer was still being searched, in order
+    /// (true: down), to move over the answer once it lands.
+    held_moves: Vec<bool>,
     /// The box just opened: the index may need a re-crawl.
     check_index: bool,
 }
@@ -272,6 +275,7 @@ impl PathPopup {
         self.open = false;
         self.listing = None;
         self.held = Keys::default();
+        self.held_moves.clear();
         if let Some(jump) = &mut self.jump {
             jump.reset();
         }
@@ -322,6 +326,7 @@ impl PathPopup {
         let global = is_bare_word(&self.text);
         let mut error = None;
         let mut indexing = None;
+        let mut moves = Vec::new();
         let rows: Vec<Row> = match &mut self.jump {
             Some(jump) if global => {
                 let pending = jump.refresh(ctx, self.text.trim(), show_hidden, frecent);
@@ -332,7 +337,14 @@ impl PathPopup {
                     self.held.tab |= std::mem::take(&mut keys.tab);
                     self.held.enter |= std::mem::take(&mut keys.enter);
                     self.held.ctrl_enter |= std::mem::take(&mut keys.ctrl_enter);
+                    if std::mem::take(&mut keys.down) {
+                        self.held_moves.push(true);
+                    }
+                    if std::mem::take(&mut keys.up) {
+                        self.held_moves.push(false);
+                    }
                 } else {
+                    moves = std::mem::take(&mut self.held_moves);
                     let held = std::mem::take(&mut self.held);
                     keys.tab |= held.tab;
                     keys.enter |= held.enter;
@@ -342,6 +354,7 @@ impl PathPopup {
             }
             _ => {
                 self.held = Keys::default();
+                self.held_moves.clear();
                 let entries = match self.entries(&folder) {
                     Ok(entries) => entries.clone(),
                     Err(_) => Vec::new(),
@@ -356,11 +369,16 @@ impl PathPopup {
         // A typed name picks its first match, so typing it and Enter opens it.
         let first = (!typed.is_empty() && !rows.is_empty()).then_some(0);
 
-        if keys.down && !rows.is_empty() {
-            self.picked = Some(self.picked.or(first).map_or(0, |p| (p + 1).min(rows.len() - 1)));
-        }
-        if keys.up {
-            self.picked = self.picked.or(first).and_then(|p| p.checked_sub(1));
+        // Held moves first, in the order they were pressed.
+        moves.extend(keys.down.then_some(true));
+        moves.extend(keys.up.then_some(false));
+        for down in moves {
+            if down && !rows.is_empty() {
+                self.picked = Some(self.picked.or(first).map_or(0, |p| (p + 1).min(rows.len() - 1)));
+            }
+            if !down {
+                self.picked = self.picked.or(first).and_then(|p| p.checked_sub(1));
+            }
         }
         let picked = self.picked.or(first);
         if keys.tab
@@ -1072,6 +1090,27 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(used, go(dir.join("Downloads"), None, false));
+    }
+
+    #[test]
+    fn up_and_down_pressed_before_the_answer_lands_move_over_the_answer() {
+        let (ctx, mut popup, dir, _) = indexed("popup-global-held-arrows", true);
+        shown(&ctx, &mut popup, &dir, vec![text("down")], &[]);
+        shown(&ctx, &mut popup, &dir, vec![key(Key::ArrowDown, Modifiers::NONE)], &[]);
+        assert!(popup.is_searching(), "the arrow came before the answer");
+        // One key a frame: each frame consumes one press of a key.
+        for arrow in [Key::ArrowDown, Key::ArrowUp] {
+            shown(&ctx, &mut popup, &dir, vec![key(arrow, Modifiers::NONE)], &[]);
+        }
+        for _ in 0..400 {
+            if !popup.is_searching() {
+                break;
+            }
+            shown(&ctx, &mut popup, &dir, vec![], &[]);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let (used, _) = shown(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::NONE)], &[]);
+        assert_eq!(used, Some(PopupEvent::Open(dir.join("docs/down-notes.txt"))), "down, down, up: the second row");
     }
 
     #[test]
