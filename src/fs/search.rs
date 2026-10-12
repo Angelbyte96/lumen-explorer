@@ -62,15 +62,44 @@ pub fn letters(name: &str, query: &str) -> Option<Vec<Range<usize>>> {
     (next == query.len()).then_some(ranges)
 }
 
-fn fold(c: char) -> char {
-    c.to_lowercase().next().unwrap_or(c)
+/// A letter as it is compared: lower case, without its accent, so "videos"
+/// finds "Vídeos" and "musica" finds "Música". One letter for one, so a
+/// range in the folded name is a range in the name.
+pub fn fold(c: char) -> char {
+    let c = c.to_lowercase().next().unwrap_or(c);
+    if c.is_ascii() {
+        return c;
+    }
+    match c {
+        'à'..='å' | 'ā' | 'ă' | 'ą' => 'a',
+        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => 'c',
+        'ď' | 'đ' => 'd',
+        'è'..='ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => 'e',
+        'ĝ' | 'ğ' | 'ġ' | 'ģ' => 'g',
+        'ĥ' | 'ħ' => 'h',
+        'ì'..='ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => 'i',
+        'ĵ' => 'j',
+        'ķ' => 'k',
+        'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => 'l',
+        'ñ' | 'ń' | 'ņ' | 'ň' => 'n',
+        'ò'..='ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => 'o',
+        'ŕ' | 'ŗ' | 'ř' => 'r',
+        'ś' | 'ŝ' | 'ş' | 'š' => 's',
+        'ţ' | 'ť' | 'ŧ' => 't',
+        'ù'..='ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => 'u',
+        'ŵ' => 'w',
+        'ý' | 'ÿ' | 'ŷ' => 'y',
+        'ź' | 'ż' | 'ž' => 'z',
+        c => c,
+    }
 }
 
 /// Whether `name` holds the letters in order: the quick test every entry
 /// goes through. An ASCII query compares bytes.
 fn has_letters(name: &str, query: &[char], ascii: Option<&[u8]>) -> bool {
     let mut next = 0;
-    if let Some(query) = ascii {
+    // A name with accents goes letter by letter: "í" has to fold to "i".
+    if let Some(query) = ascii.filter(|_| name.is_ascii()) {
         for byte in name.bytes() {
             if byte.to_ascii_lowercase() == query[next] {
                 next += 1;
@@ -100,7 +129,7 @@ fn quality(name: &str, typed: &str, compact: &str, lower: &mut String) -> u8 {
         lower.push_str(name);
         lower.make_ascii_lowercase();
     } else {
-        lower.extend(name.chars().flat_map(char::to_lowercase));
+        lower.extend(name.chars().map(fold));
     }
     if lower == typed {
         3
@@ -157,12 +186,12 @@ impl Eq for Ranked {}
 /// folders) only when shown or when the query starts with a dot. `frecent`
 /// holds visited folders and their scores.
 pub fn search(index: &Index, query: &str, show_hidden: bool, frecent: &[(PathBuf, f64)], limit: usize) -> Vec<Hit> {
-    let typed = query.trim().to_lowercase();
+    let typed: String = query.trim().chars().map(fold).collect();
     let compact: String = typed.chars().filter(|c| !c.is_whitespace()).collect();
     if compact.is_empty() || limit == 0 {
         return Vec::new();
     }
-    let letters_typed: Vec<char> = compact.chars().map(fold).collect();
+    let letters_typed: Vec<char> = compact.chars().collect();
     let ascii = compact.is_ascii().then_some(compact.as_bytes());
     let hidden_ok = show_hidden || typed.starts_with('.');
     // Only an entry named like a visited folder needs its path looked up.
@@ -310,6 +339,16 @@ mod tests {
         assert_eq!(letters("Árbol.txt", "árb"), Some(vec![0..4]), "not only ASCII");
         assert_eq!(letters("Windows", "nwd"), None, "out of order");
         assert_eq!(letters("Windows", ""), None, "nothing typed finds nothing");
+    }
+
+    #[test]
+    fn accents_are_ignored_either_way() {
+        assert_eq!(letters("Vídeos", "videos"), Some(vec![0..7]));
+        assert_eq!(letters("Videos", "vídeos"), Some(vec![0..6]));
+        assert_eq!(letters("Música", "MUSICA"), Some(vec![0..7]));
+        let index = index(&["Vídeos/", "Imágenes/", "videos.txt"]);
+        assert_eq!(names(&index, &search(&index, "videos", false, &[], 10)), ["Vídeos", "videos.txt"], "the whole name first");
+        assert_eq!(names(&index, &search(&index, "imagenes", false, &[], 10)), ["Imágenes"]);
     }
 
     #[test]

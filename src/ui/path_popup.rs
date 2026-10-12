@@ -612,11 +612,11 @@ pub fn is_exact(name: &str, typed: &str) -> bool {
 
 /// Where each typed word is in `name`, as byte ranges sorted by position,
 /// or `None` when a word is missing. Words are split on spaces and found in
-/// any order, case-insensitive; each word takes its own characters, so "a a"
+/// any order, ignoring case and accents; each word takes its own characters, so "a a"
 /// needs two a's.
 pub fn word_ranges(name: &str, typed: &str) -> Option<Vec<std::ops::Range<usize>>> {
     // Letter by letter, so a byte range in the folded name is one in `name`.
-    let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let fold = crate::fs::search::fold;
     let letters: Vec<(usize, char)> = name.char_indices().map(|(at, c)| (at, fold(c))).collect();
     let mut taken = vec![false; letters.len()];
     let mut ranges = Vec::new();
@@ -1149,6 +1149,8 @@ mod tests {
         assert_eq!(word_ranges("ban", "an an"), None);
         assert_eq!(word_ranges("Vídeos", "VÍD"), Some(vec![std::ops::Range { start: 0, end: 4 }]), "byte ranges around a multibyte letter");
         assert_eq!(word_ranges("Descargas", ""), Some(vec![]), "nothing typed: everything matches");
+        assert_eq!(word_ranges("Vídeos", "vid"), Some(vec![std::ops::Range { start: 0, end: 4 }]), "accents ignored");
+        assert_eq!(word_ranges("Videos", "vÍd"), Some(vec![std::ops::Range { start: 0, end: 3 }]), "either way");
     }
 
     #[test]
