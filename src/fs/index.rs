@@ -5,8 +5,9 @@
 //! Names live in one string and each entry is a few numbers, so a disk with
 //! millions of files stays small. The crawl goes breadth first, so shallow
 //! folders (Downloads, Documents) are there within moments of starting.
-//! Measured on a Linux laptop: 1.3 million entries, about 66 MB, crawled in
-//! 23 s from a cold disk cache and 2 s from a warm one.
+//! Measured on a Linux laptop: the whole of `/` was 1.3 million entries,
+//! about 66 MB, 23 s from a cold disk cache and 2 s from a warm one; home
+//! and the disks alone (the scope since fase-9 T8) are 0.7 million, 1 s warm.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -102,22 +103,63 @@ impl Index {
     }
 }
 
-/// What the crawl covers by default, given the disks of the side panel's
-/// Storage section. Linux: everything from `/` and those disks, without the
-/// kernel's and snap's pseudo folders. Windows: every drive.
-pub fn scope(disks: Vec<PathBuf>) -> (Vec<PathBuf>, Rules) {
-    let skip_names = SKIPPED_NAMES.map(String::from).to_vec();
-    if cfg!(windows) {
-        return (disks, Rules { skip_names, ..Rules::default() });
-    }
-    let skip_paths = ["/proc", "/sys", "/dev", "/run", "/snap"].map(PathBuf::from).to_vec();
-    (vec![PathBuf::from("/")], Rules { skip_names, skip_paths, mounts: disks })
+/// What the crawl covers: local roots crawled together, network roots each
+/// on its own thread (a share that hangs never stops the rest), and what
+/// is left out.
+#[derive(Debug, Clone, Default)]
+pub struct Scope {
+    pub roots: Vec<PathBuf>,
+    pub network: Vec<PathBuf>,
+    pub rules: Rules,
 }
+
+/// Where the quick jump looks, like File Pilot: Linux, the home folder, the
+/// side panel's other disks and the network shares; Windows, every drive and
+/// network drive, without the system's and the installed programs' folders.
+pub fn scope(windows: bool, home: Option<&Path>, disks: Vec<PathBuf>, network: Vec<PathBuf>) -> Scope {
+    let mut skip_names: Vec<String> = SKIPPED_NAMES.map(String::from).to_vec();
+    if windows {
+        // Each user's program settings and caches.
+        skip_names.push("AppData".into());
+        let skip_paths = disks.iter().chain(&network).flat_map(|drive| WINDOWS_SYSTEM.map(|name| drive.join(name))).collect();
+        return Scope { roots: disks, network, rules: Rules { skip_names, skip_paths, mounts: Vec::new() } };
+    }
+    // `/` and a disk holding home (a /home partition) would bring in the
+    // system or other users; a disk inside home is crossed into from it.
+    let others = disks.iter().filter(|d| home.is_none_or(|h| !h.starts_with(d) && !d.starts_with(h)) && d.parent().is_some());
+    let roots = home.map(Path::to_path_buf).into_iter().chain(others.cloned()).collect();
+    let rules = Rules { skip_names, skip_paths: network.clone(), mounts: disks };
+    Scope { roots, network, rules }
+}
+
+/// Folders at the top of a Windows drive that hold the system or installed
+/// programs, not the user's files.
+const WINDOWS_SYSTEM: [&str; 8] =
+    ["Windows", "Program Files", "Program Files (x86)", "ProgramData", "$Recycle.Bin", "System Volume Information", "Recovery", "PerfLogs"];
 
 /// Whether the crawl may go into a folder on `dev` from a parent on
 /// `parent_dev`: always on the same device, else only a listed mount.
-pub fn may_enter(path: &Path, dev: Option<u64>, parent_dev: Option<u64>, rules: &Rules) -> bool {
-    dev == parent_dev || rules.mounts.iter().any(|m| m == path)
+pub fn may_enter(path: &Path, dev: Option<u64>, parent_dev: Option<u64>, same_filesystem: impl FnOnce() -> bool, rules: &Rules) -> bool {
+    dev == parent_dev || rules.mounts.iter().any(|m| m == path) || same_filesystem()
+}
+
+/// Whether two folders are on the same kind of filesystem: a btrfs
+/// subvolume has its own device number but is part of the same disk.
+#[cfg(target_os = "linux")]
+fn same_filesystem(a: &Path, b: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let kind = |path: &Path| {
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `path` is NUL-terminated and `stat` is a writable statfs.
+        (unsafe { libc::statfs(path.as_ptr(), &mut stat) } == 0).then_some(stat.f_type)
+    };
+    kind(a).is_some_and(|k| Some(k) == kind(b))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn same_filesystem(_a: &Path, _b: &Path) -> bool {
+    false
 }
 
 #[cfg(unix)]
@@ -154,7 +196,7 @@ fn read_folder(path: &Path, parent_dev: Option<u64>, rules: &Rules) -> Found {
             // Another device's folder (tmpfs, a network share) is found but
             // not crawled, unless it is one of the disks.
             let dev = item.metadata().ok().and_then(|m| device(&m));
-            if may_enter(&child, dev, parent_dev, rules) {
+            if may_enter(&child, dev, parent_dev, || same_filesystem(path, &child), rules) {
                 next = Some((child, dev));
             }
         } else if kind.is_symlink() && std::fs::metadata(&child).is_ok_and(|m| m.is_dir()) {
@@ -172,7 +214,7 @@ pub fn crawl(roots: &[PathBuf], rules: &Rules, index: &RwLock<Index>, cancel: &A
     let mut queue = VecDeque::new();
     for root in roots {
         let Ok(meta) = std::fs::metadata(root) else { continue };
-        if !meta.is_dir() || rules.skip_paths.contains(root) {
+        if !meta.is_dir() {
             continue;
         }
         let id = index.write().expect("index lock").add(None, &root.to_string_lossy(), true);
@@ -221,10 +263,20 @@ pub struct Crawler {
 
 impl Crawler {
     /// Starts crawling; `on_done` runs on the crawl's thread when it ends.
-    pub fn start(roots: Vec<PathBuf>, rules: Rules, on_done: impl FnOnce() + Send + 'static) -> Self {
+    pub fn start(scope: Scope, on_done: impl FnOnce() + Send + 'static) -> Self {
+        let Scope { roots, network, rules } = scope;
         let index = Arc::new(RwLock::new(Index::default()));
         let done = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
+        // Each share on its own thread, outside `done`: one that hangs only
+        // loses its own entries and never holds back the rest or a re-crawl.
+        for share in network {
+            let (shared, stop, rules) = (index.clone(), cancel.clone(), rules.clone());
+            thread::spawn(move || {
+                lower_priority();
+                crawl(&[share], &rules, &shared, &stop);
+            });
+        }
         let (shared, finished, stop) = (index.clone(), done.clone(), cancel.clone());
         thread::spawn(move || {
             lower_priority();
@@ -380,30 +432,42 @@ mod tests {
     }
 
     #[test]
-    fn the_scope_is_every_drive_on_windows_and_the_root_with_the_disks_elsewhere() {
-        let disks = vec![PathBuf::from("/media/usb")];
-        let (roots, rules) = scope(disks.clone());
-        assert_eq!(rules.skip_names, SKIPPED_NAMES);
-        if cfg!(windows) {
-            assert_eq!(roots, disks);
-            assert!(rules.skip_paths.is_empty());
-        } else {
-            assert_eq!(roots, [PathBuf::from("/")]);
-            assert_eq!(rules.mounts, disks);
-            for pseudo in ["/proc", "/sys", "/dev", "/run", "/snap"] {
-                assert!(rules.skip_paths.contains(&PathBuf::from(pseudo)), "{pseudo}");
-            }
-        }
+    fn on_linux_the_scope_is_home_the_other_disks_and_the_network_shares() {
+        let home = PathBuf::from("/home/u");
+        let disks = ["/", "/home", "/media/usb", "/run/media/u/stick", "/home/u/data"].map(PathBuf::from).to_vec();
+        let network = vec![PathBuf::from("/mnt/nas")];
+        let scope = scope(false, Some(&home), disks, network.clone());
+        assert_eq!(scope.roots, [home, PathBuf::from("/media/usb"), PathBuf::from("/run/media/u/stick")], "no system folders");
+        assert_eq!(scope.network, network);
+        assert_eq!(scope.rules.skip_names, SKIPPED_NAMES);
+        assert_eq!(scope.rules.skip_paths, network, "the local crawl never touches a share");
+        assert!(scope.rules.mounts.contains(&PathBuf::from("/home/u/data")), "a disk inside home is crossed into");
     }
 
+    #[test]
+    fn on_windows_every_drive_is_searched_without_system_and_installation_folders() {
+        let (c, d, z) = (PathBuf::from("C:\\"), PathBuf::from("D:\\"), PathBuf::from("Z:\\"));
+        let scope = scope(true, Some(Path::new("C:\\Users\\u")), vec![c.clone(), d.clone()], vec![z.clone()]);
+        assert_eq!(scope.roots, [c.clone(), d.clone()]);
+        assert_eq!(scope.network, std::slice::from_ref(&z));
+        let system = ["Windows", "Program Files", "Program Files (x86)", "ProgramData", "$Recycle.Bin", "System Volume Information", "Recovery", "PerfLogs"];
+        for drive in [&c, &d, &z] {
+            for name in system {
+                assert!(scope.rules.skip_paths.contains(&drive.join(name)), "{name}");
+            }
+        }
+        assert!(scope.rules.skip_names.iter().any(|n| n == "AppData"));
+        assert!(scope.rules.skip_names.iter().any(|n| n == "node_modules"));
+    }
 
     #[test]
-    fn another_device_is_entered_only_at_a_listed_mount() {
+    fn another_device_is_entered_only_at_a_listed_mount_or_on_the_same_filesystem() {
         let rules = Rules { mounts: vec![PathBuf::from("/media/usb")], ..Rules::default() };
-        assert!(may_enter(Path::new("/home/x"), Some(1), Some(1), &rules));
-        assert!(may_enter(Path::new("/media/usb"), Some(2), Some(1), &rules));
-        assert!(!may_enter(Path::new("/tmp"), Some(3), Some(1), &rules), "tmpfs, network shares, fuse");
-        assert!(may_enter(Path::new("C:\\Users"), None, None, &rules), "no device ids: no check");
+        assert!(may_enter(Path::new("/home/x"), Some(1), Some(1), || false, &rules));
+        assert!(may_enter(Path::new("/media/usb"), Some(2), Some(1), || false, &rules));
+        assert!(!may_enter(Path::new("/tmp"), Some(3), Some(1), || false, &rules), "tmpfs, network shares, fuse");
+        assert!(may_enter(Path::new("/home/x/sub"), Some(4), Some(1), || true, &rules), "the same filesystem: a btrfs subvolume");
+        assert!(may_enter(Path::new("C:\\Users"), None, None, || false, &rules), "no device ids: no check");
     }
 
     /// The real scope of this machine, timed: `cargo test --release crawl_this_machine -- --ignored --nocapture`.
@@ -411,17 +475,38 @@ mod tests {
     #[ignore = "crawls the whole machine"]
     fn crawl_this_machine() {
         let disks = crate::places::disks().into_iter().map(|m| m.path).collect();
-        let (roots, rules) = scope(disks);
+        let scope = scope(cfg!(windows), crate::fs::home_dir().as_deref(), disks, crate::places::network_mounts());
         let start = std::time::Instant::now();
-        let index = crawled(&roots, &rules);
+        let index = crawled(&scope.roots, &scope.rules);
         eprintln!("{} entries, {} bytes of names, {:?}", index.len(), index.names.len(), start.elapsed());
+    }
+
+    #[test]
+    fn network_roots_are_crawled_on_their_own_into_the_same_index() {
+        let root = tree("index-network");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let scope = Scope { roots: vec![root.join("docs")], network: vec![root.join("Downloads")], rules: rules() };
+        std::fs::write(root.join("Downloads/shared.txt"), "x").unwrap();
+        let crawler = Crawler::start(scope, move || tx.send(()).unwrap());
+        rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the local crawl ends");
+        let found = |name: &str| {
+            let index = crawler.index().read().unwrap();
+            (0..index.len() as u32).any(|id| index.name(id) == name)
+        };
+        assert!(found("deep.txt"));
+        let start = std::time::Instant::now();
+        while !found("shared.txt") {
+            assert!(start.elapsed() < std::time::Duration::from_secs(10), "the share is crawled too");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]
     fn the_background_crawl_fills_the_index_and_calls_back_when_done() {
         let root = tree("index-background");
         let (tx, rx) = std::sync::mpsc::channel();
-        let crawler = Crawler::start(vec![root.clone()], rules(), move || tx.send(()).unwrap());
+        let scope = Scope { roots: vec![root.clone()], rules: rules(), ..Scope::default() };
+        let crawler = Crawler::start(scope, move || tx.send(()).unwrap());
         rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the crawl ends");
         assert!(crawler.is_done());
         assert!(listed(&crawler.index().read().unwrap(), &root).contains(&"docs/a/deep.txt".to_string()));

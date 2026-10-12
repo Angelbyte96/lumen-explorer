@@ -2209,9 +2209,9 @@ impl eframe::App for LumenApp {
 /// Starts the background crawl of every disk behind the path box's quick jump.
 fn start_index(ctx: &egui::Context) -> Crawler {
     let disks = places::disks().into_iter().map(|mount| mount.path).collect();
-    let (roots, rules) = fs::index::scope(disks);
+    let scope = fs::index::scope(cfg!(windows), fs::home_dir().as_deref(), disks, places::network_mounts());
     let ctx = ctx.clone();
-    Crawler::start(roots, rules, move || ctx.request_repaint())
+    Crawler::start(scope, move || ctx.request_repaint())
 }
 
 /// What Lumen opens at startup.

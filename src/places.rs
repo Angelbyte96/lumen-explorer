@@ -289,6 +289,63 @@ pub fn parse_mounts(text: &str) -> Vec<Mount> {
     mounts
 }
 
+/// Network file systems in the mount table.
+const NETWORK_TYPES: [&str; 11] =
+    ["nfs", "nfs4", "cifs", "smb3", "smbfs", "fuse.sshfs", "fuse.rclone", "davfs", "fuse.s3fs", "ceph", "glusterfs"];
+
+/// Network shares mounted by the kernel (NFS, SMB, SSHFS...), and where GNOME
+/// mounts its own (gvfs), if it does.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn parse_network_mounts(text: &str) -> (Vec<PathBuf>, Option<PathBuf>) {
+    let mut shares = Vec::new();
+    let mut gvfs = None;
+    for line in text.lines() {
+        let mut fields = line.split_whitespace().skip(1);
+        let (Some(point), Some(kind)) = (fields.next(), fields.next()) else { continue };
+        let path = PathBuf::from(unescape_mount(point));
+        if NETWORK_TYPES.contains(&kind) {
+            shares.push(path);
+        } else if kind == "fuse.gvfsd-fuse" {
+            gvfs = Some(path);
+        }
+    }
+    (shares, gvfs)
+}
+
+/// A gvfs mount that is a network share (Files > Other Locations), not a
+/// phone, camera or cloud account: those are slow to read and not shares.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn is_gvfs_share(name: &str) -> bool {
+    ["smb-share:", "sftp:", "ftp:", "dav:", "davs:", "nfs:", "afp-volume:"].iter().any(|kind| name.starts_with(kind))
+}
+
+/// Network shares to search: the kernel's and gvfs's on Linux.
+#[cfg(not(windows))]
+pub fn network_mounts() -> Vec<PathBuf> {
+    let (mut shares, gvfs) = parse_network_mounts(&std::fs::read_to_string("/proc/self/mounts").unwrap_or_default());
+    if let Some(Ok(items)) = gvfs.map(std::fs::read_dir) {
+        shares.extend(items.flatten().filter(|i| is_gvfs_share(&i.file_name().to_string_lossy())).map(|i| i.path()));
+    }
+    shares
+}
+
+/// Network drives (mapped letters) on Windows. Their volume is not read:
+/// a share that is down would stall.
+#[cfg(windows)]
+pub fn network_mounts() -> Vec<PathBuf> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    const DRIVE_REMOTE: u32 = 4;
+    // SAFETY: no arguments; returns a bitmask.
+    let mask = unsafe { GetLogicalDrives() };
+    drive_letters(mask)
+        .into_iter()
+        .map(|letter| format!("{letter}:\\"))
+        // SAFETY: the wide string is NUL-terminated and outlives the call.
+        .filter(|root| unsafe { GetDriveTypeW(wide(root).as_ptr()) } == DRIVE_REMOTE)
+        .map(PathBuf::from)
+        .collect()
+}
+
 /// Disks for the side panel: mounted devices on Linux, drive letters on Windows.
 #[cfg(not(windows))]
 pub fn disks() -> Vec<Mount> {
@@ -569,6 +626,26 @@ XDG_VIDEOS_DIR="$HOME/Vídeos"
         assert_eq!(trash_dir(home, Some(Path::new("/data"))), PathBuf::from("/data/Trash/files"));
         assert!(in_trash(Path::new("/home/u/.local/share/Trash/files/x.txt"), &trash_dir(home, None)));
         assert!(!in_trash(Path::new("/home/u/Descargas"), &trash_dir(home, None)));
+    }
+
+    #[test]
+    fn network_shares_are_found_in_the_mount_table() {
+        let text = "/dev/sda2 / ext4 rw 0 0\nserver:/export /mnt/nas nfs4 rw 0 0\n//pc/share /mnt/win\\040share cifs rw 0 0\n\
+                    u@h:/ /home/u/remote fuse.sshfs rw 0 0\ntmpfs /tmp tmpfs rw 0 0\ngvfsd-fuse /run/user/1000/gvfs fuse.gvfsd-fuse rw 0 0\n";
+        let (shares, gvfs) = parse_network_mounts(text);
+        assert_eq!(shares, ["/mnt/nas", "/mnt/win share", "/home/u/remote"].map(PathBuf::from));
+        assert_eq!(gvfs, Some(PathBuf::from("/run/user/1000/gvfs")));
+        assert_eq!(parse_network_mounts("/dev/sda2 / ext4 rw 0 0\n"), (Vec::new(), None));
+    }
+
+    #[test]
+    fn only_gvfs_network_shares_are_searched() {
+        for name in ["smb-share:server=pc,share=docs", "sftp:host=h", "ftp:host=h", "dav:host=h", "davs:host=h", "nfs:host=h", "afp-volume:host=h"] {
+            assert!(is_gvfs_share(name), "{name}");
+        }
+        for name in ["mtp:host=phone", "google-drive:host=gmail.com", "gphoto2:host=cam", "onedrive:host=x"] {
+            assert!(!is_gvfs_share(name), "{name}");
+        }
     }
 
     #[test]
