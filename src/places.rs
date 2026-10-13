@@ -123,7 +123,7 @@ impl Visits {
 }
 
 /// `visit`'s score at `now`, halved for each half-life gone by.
-fn faded(visit: &Visit, now: u64) -> f64 {
+pub fn faded(visit: &Visit, now: u64) -> f64 {
     visit.score * 0.5_f64.powf(now.saturating_sub(visit.at) as f64 / VISIT_HALF_LIFE as f64)
 }
 

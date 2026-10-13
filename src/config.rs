@@ -199,7 +199,8 @@ impl Config {
     }
 }
 
-/// Both windows' visits, each folder's latest, most recent first.
+/// Both windows' visits, each folder's latest, most recent first; past the
+/// limit the weakest go, as when visiting.
 fn merge_visits(disk: &[Visit], here: &[Visit]) -> Vec<Visit> {
     let mut merged = disk.to_vec();
     for visit in here {
@@ -209,8 +210,12 @@ fn merge_visits(disk: &[Visit], here: &[Visit]) -> Vec<Visit> {
             None => merged.push(visit.clone()),
         }
     }
-    merged.sort_by_key(|v| std::cmp::Reverse(v.at));
+    // Every score fades at the same rate, so which is stronger does not
+    // depend on when they are compared: the latest visit will do.
+    let now = merged.iter().map(|v| v.at).max().unwrap_or(0);
+    merged.sort_by(|a, b| crate::places::faded(b, now).total_cmp(&crate::places::faded(a, now)));
     merged.truncate(VISIT_LIMIT);
+    merged.sort_by_key(|v| std::cmp::Reverse(v.at));
     merged
 }
 
@@ -622,6 +627,22 @@ bookmark =
         let older = Config { visited: vec![visit("/b", 5)], ..Config::default() };
         assert_eq!(Config::merge(&disk, &Config::default(), &older).visited, disk.visited, "the other window's later visit stays");
         assert_eq!(Config::merge(&disk, &after, &after).visited, disk.visited, "nothing visited here");
+    }
+
+    #[test]
+    fn merging_visits_past_the_limit_drops_the_weakest_not_the_oldest() {
+        use crate::places::{VISIT_HALF_LIFE, VISIT_LIMIT};
+        let now = 10 * VISIT_HALF_LIFE;
+        let weak = |i| Visit { path: PathBuf::from(format!("/weak{i}")), score: 1.0, at: now };
+        let disk = Config { visited: (0..VISIT_LIMIT).map(weak).collect(), ..Config::default() };
+        // Used a lot a half-life ago: still far stronger than one visit now.
+        let strong = Visit { path: PathBuf::from("/strong"), score: 50.0, at: now - VISIT_HALF_LIFE };
+        let after = Config { visited: vec![strong.clone()], ..Config::default() };
+        let merged = Config::merge(&disk, &Config::default(), &after).visited;
+        assert_eq!(merged.len(), VISIT_LIMIT);
+        assert!(merged.contains(&strong), "the strongest folder stays");
+        assert!(merged.iter().filter(|v| v.score == 1.0).count() == VISIT_LIMIT - 1, "one weak visit goes");
+        assert!(merged.windows(2).all(|w| w[0].at >= w[1].at), "still most recent first");
     }
 
     #[test]
