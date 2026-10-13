@@ -128,6 +128,8 @@ pub struct Scope {
 /// side panel's other disks and the network shares; Windows, every drive and
 /// network drive, without the system's and the installed programs' folders.
 pub fn scope(windows: bool, home: Option<&Path>, disks: Vec<PathBuf>, network: Vec<PathBuf>) -> Scope {
+    // A share is crawled only on its own thread, never with the local roots.
+    let disks: Vec<PathBuf> = disks.into_iter().filter(|d| !network.contains(d)).collect();
     let mut skip_names: Vec<String> = SKIPPED_NAMES.map(String::from).to_vec();
     if windows {
         // Each user's program settings and caches.
@@ -480,6 +482,20 @@ mod tests {
         }
         assert!(scope.rules.skip_names.iter().any(|n| n == "AppData"));
         assert!(scope.rules.skip_names.iter().any(|n| n == "node_modules"));
+    }
+
+    #[test]
+    fn a_share_listed_among_the_disks_too_is_crawled_only_as_a_share() {
+        let (c, z) = (PathBuf::from("C:\\"), PathBuf::from("Z:\\"));
+        let windows = scope(true, None, vec![c.clone(), z.clone()], vec![z.clone()]);
+        assert_eq!(windows.roots, std::slice::from_ref(&c), "a network drive is no local root");
+        assert_eq!(windows.network, std::slice::from_ref(&z));
+        let home = PathBuf::from("/home/u");
+        let nas = PathBuf::from("/mnt/nas");
+        let linux = scope(false, Some(&home), vec![PathBuf::from("/media/usb"), nas.clone()], vec![nas.clone()]);
+        assert_eq!(linux.roots, [home, PathBuf::from("/media/usb")]);
+        assert_eq!(linux.network, std::slice::from_ref(&nas));
+        assert!(!linux.rules.mounts.contains(&nas), "the local crawl never crosses into a share");
     }
 
     #[test]
