@@ -74,7 +74,9 @@ pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
     let mut event = None;
     ui.horizontal(|ui| {
         let toggle = egui::Button::new(egui::RichText::new(crate::ui::sidebar::TOGGLE).size(16.0)).frame(false);
-        if ui.add(toggle).on_hover_text("Show or hide the side panel").clicked() {
+        let toggle = ui.add(toggle);
+        crate::ui::focus_ring(ui, &toggle);
+        if toggle.on_hover_text("Show or hide the side panel").clicked() {
             event = Some(ToolbarEvent::ToggleSidebar);
         }
         ui.separator();
@@ -85,7 +87,9 @@ pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
         ];
         for (glyph, enabled, hint, on_click) in buttons {
             let button = egui::Button::new(egui::RichText::new(glyph).size(16.0)).frame(false);
-            if ui.add_enabled(enabled, button).on_hover_text(hint).clicked() {
+            let button = ui.add_enabled(enabled, button);
+            crate::ui::focus_ring(ui, &button);
+            if button.on_hover_text(hint).clicked() {
                 event = Some(on_click);
             }
         }
@@ -96,7 +100,9 @@ pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
             (NOT_BOOKMARKED, "Add to bookmarks (Ctrl+D)")
         };
         let star = egui::Button::new(egui::RichText::new(star).size(16.0)).frame(false);
-        if ui.add(star).on_hover_text(hint).clicked() {
+        let star = ui.add(star);
+        crate::ui::focus_ring(ui, &star);
+        if star.on_hover_text(hint).clicked() {
             event = Some(ToolbarEvent::ToggleBookmark);
         }
         ui.separator();
@@ -125,13 +131,16 @@ fn crumb_bar(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
                     let text = egui::RichText::new(&crumb.label);
                     let text = if i == last { text.strong() } else { text };
                     let hint = crumb.path.display().to_string();
-                    if ui.add(egui::Button::new(text).frame(false)).on_hover_text(hint).clicked() {
+                    // Not Tab stops: the bar is one, and Enter edits the path.
+                    let button = egui::Button::new(text).frame(false).sense(egui::Sense::CLICK);
+                    if ui.add(button).on_hover_text(hint).clicked() {
                         event = Some(ToolbarEvent::Go(crumb.path.clone()));
                     }
                 }
                 // The empty rest of the bar edits the path, like Ctrl+L.
                 let rest = egui::vec2(ui.available_width().max(40.0), height);
                 let response = ui.allocate_response(rest, egui::Sense::click());
+                crate::ui::focus_ring(ui, &response);
                 if response.on_hover_text("Edit the path (Ctrl+L)").clicked() {
                     event = Some(ToolbarEvent::EditPath);
                 }
@@ -186,5 +195,88 @@ mod tests {
         assert_eq!(labels("/home/user2", Some("/home/u")), [c("/", "/"), c("home", "/home"), c("user2", "/home/user2")]);
         assert_eq!(labels("/", Some("/home/u")), [c("/", "/")]);
         assert_eq!(labels("/srv", None), [c("/", "/"), c("srv", "/srv")]);
+    }
+
+    /// Events and shapes of one frame of the tab bar and the toolbar, drawn
+    /// in the window's order.
+    #[derive(Debug, PartialEq)]
+    enum Pressed {
+        Tab(crate::ui::tabs::TabEvent),
+        Bar(ToolbarEvent),
+    }
+
+    fn window(ctx: &egui::Context, nav: &Nav<'_>, events: Vec<egui::Event>) -> (Option<Pressed>, Vec<egui::epaint::ClippedShape>) {
+        let labels = ["a".to_string(), "b".to_string()];
+        let mut pressed = None;
+        let input = egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        let mut output = ctx.run_ui(input, |root| {
+            egui::Panel::top("tabs").show(root, |ui| {
+                if let Some(e) = crate::ui::tabs::show(ui, &labels, 0) {
+                    pressed = Some(Pressed::Tab(e));
+                }
+            });
+            egui::Panel::top("toolbar").show(root, |ui| {
+                if let Some(e) = show(ui, nav) {
+                    pressed = Some(Pressed::Bar(e));
+                }
+            });
+        });
+        output.textures_delta.clear();
+        (pressed, output.shapes)
+    }
+
+    fn key(key: egui::Key, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers }
+    }
+
+    /// Presses and releases `k`; returns what was pressed and the shapes drawn meanwhile.
+    fn tap(ctx: &egui::Context, nav: &Nav<'_>, k: egui::Key, modifiers: egui::Modifiers) -> (Option<Pressed>, Vec<egui::epaint::ClippedShape>) {
+        let down = window(ctx, nav, vec![key(k, true, modifiers)]);
+        let up = window(ctx, nav, vec![key(k, false, modifiers)]);
+        (down.0.or(up.0), up.1)
+    }
+
+    fn rings(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape]) -> usize {
+        let ring = ctx.global_style().visuals.selection.stroke.color;
+        shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke.color == ring)).count()
+    }
+
+    #[test]
+    fn tab_walks_the_tabs_then_the_toolbar_and_enter_or_space_presses_each() {
+        use crate::ui::tabs::TabEvent;
+        let ctx = egui::Context::default();
+        let nav = Nav {
+            current: Path::new("/home/u/Descargas"),
+            home: Some(Path::new("/home/u")),
+            can_back: true,
+            can_forward: true,
+            bookmarked: false,
+        };
+        let (_, shapes) = window(&ctx, &nav, vec![]);
+        assert_eq!(rings(&ctx, &shapes), 0, "no ring before Tab");
+        let stops = [
+            Pressed::Tab(TabEvent::Select(0)),
+            Pressed::Tab(TabEvent::Select(1)),
+            Pressed::Tab(TabEvent::New),
+            Pressed::Bar(ToolbarEvent::ToggleSidebar),
+            Pressed::Bar(ToolbarEvent::Back),
+            Pressed::Bar(ToolbarEvent::Forward),
+            Pressed::Bar(ToolbarEvent::Up),
+            Pressed::Bar(ToolbarEvent::ToggleBookmark),
+            Pressed::Bar(ToolbarEvent::EditPath),
+        ];
+        for (n, stop) in stops.into_iter().enumerate() {
+            let (pressed, shapes) = tap(&ctx, &nav, egui::Key::Tab, egui::Modifiers::NONE);
+            assert_eq!(pressed, None, "Tab only moves the focus");
+            assert_eq!(rings(&ctx, &shapes), 1, "one ring on stop {n}");
+            let key = if n % 2 == 0 { egui::Key::Enter } else { egui::Key::Space };
+            assert_eq!(tap(&ctx, &nav, key, egui::Modifiers::NONE).0, Some(stop), "{key:?} on stop {n}");
+        }
+        // Past the address bar it starts again; Shift+Tab goes back.
+        tap(&ctx, &nav, egui::Key::Tab, egui::Modifiers::NONE);
+        assert_eq!(tap(&ctx, &nav, egui::Key::Enter, egui::Modifiers::NONE).0, Some(Pressed::Tab(TabEvent::Select(0))));
+        tap(&ctx, &nav, egui::Key::Tab, egui::Modifiers::SHIFT);
+        window(&ctx, &nav, vec![]);
+        assert_eq!(tap(&ctx, &nav, egui::Key::Enter, egui::Modifiers::NONE).0, Some(Pressed::Bar(ToolbarEvent::EditPath)));
     }
 }

@@ -11,6 +11,17 @@ pub mod tabs;
 pub mod theme;
 pub mod toolbar;
 
+use eframe::egui;
+
+/// A ring round `response` while it has the keyboard focus, so it shows
+/// where Tab landed and what Enter or Space will press.
+pub fn focus_ring(ui: &egui::Ui, response: &egui::Response) {
+    if response.has_focus() {
+        let stroke = ui.visuals().selection.stroke;
+        ui.painter().rect_stroke(response.rect, 3, stroke, egui::StrokeKind::Inside);
+    }
+}
+
 /// Drives egui frame by frame, with real pointer events, for UI tests.
 #[cfg(test)]
 pub mod testing {
