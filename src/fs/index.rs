@@ -30,7 +30,18 @@ pub struct Rules {
     /// Mount points the crawl may cross into; any other folder on another
     /// device than its parent (tmpfs, network shares, fuse) is skipped.
     pub mounts: Vec<PathBuf>,
+    /// A network share's crawl: gvfs shows a link to a folder as a folder,
+    /// so links are followed there and could loop. It stops at
+    /// [`SHARE_DEPTH`], and a folder holding a whole Linux system gives only
+    /// its home, like this machine's.
+    pub share: bool,
 }
+
+/// How deep a share is crawled: past any real folder, short of a loop.
+pub const SHARE_DEPTH: usize = 16;
+
+/// Folders that together mark the top of a Linux system.
+const LINUX_ROOT: [&str; 3] = ["proc", "etc", "usr"];
 
 /// No parent: a root, whose name is its whole path.
 const ROOT: u32 = u32::MAX;
@@ -122,13 +133,13 @@ pub fn scope(windows: bool, home: Option<&Path>, disks: Vec<PathBuf>, network: V
         // Each user's program settings and caches.
         skip_names.push("AppData".into());
         let skip_paths = disks.iter().chain(&network).flat_map(|drive| WINDOWS_SYSTEM.map(|name| drive.join(name))).collect();
-        return Scope { roots: disks, network, rules: Rules { skip_names, skip_paths, mounts: Vec::new() } };
+        return Scope { roots: disks, network, rules: Rules { skip_names, skip_paths, mounts: Vec::new(), share: false } };
     }
     // `/` and a disk holding home (a /home partition) would bring in the
     // system or other users; a disk inside home is crossed into from it.
     let others = disks.iter().filter(|d| home.is_none_or(|h| !h.starts_with(d) && !d.starts_with(h)) && d.parent().is_some());
     let roots = home.map(Path::to_path_buf).into_iter().chain(others.cloned()).collect();
-    let rules = Rules { skip_names, skip_paths: network.clone(), mounts: disks };
+    let rules = Rules { skip_names, skip_paths: network.clone(), mounts: disks, share: false };
     Scope { roots, network, rules }
 }
 
@@ -205,6 +216,10 @@ fn read_folder(path: &Path, parent_dev: Option<u64>, rules: &Rules) -> Found {
         }
         found.push((name, is_dir, next));
     }
+    let is_linux_root = LINUX_ROOT.iter().all(|top| found.iter().any(|(name, is_dir, _)| *is_dir && name == top));
+    if rules.share && is_linux_root {
+        found.retain(|(name, ..)| name == "home");
+    }
     found
 }
 
@@ -228,6 +243,9 @@ pub fn crawl(roots: &[PathBuf], rules: &Rules, index: &RwLock<Index>, cancel: &A
         let mut index = index.write().expect("index lock");
         for (name, is_dir, next) in found {
             let id = index.add(Some(parent), &name, is_dir);
+            if rules.share && index.depth(id) >= SHARE_DEPTH {
+                continue;
+            }
             if let Some((path, dev)) = next {
                 queue.push_back((id, path, dev));
             }
@@ -276,7 +294,8 @@ impl Crawler {
             // Each share on its own thread, outside `done`: one that hangs only
             // loses its own entries and never holds back the rest or a re-crawl.
             for share in network {
-                let (shared, stop, rules) = (shared.clone(), stop.clone(), rules.clone());
+                let (shared, stop) = (shared.clone(), stop.clone());
+                let rules = Rules { share: true, ..rules.clone() };
                 thread::spawn(move || {
                     lower_priority();
                     crawl(&[share], &rules, &shared, &stop);
@@ -513,6 +532,34 @@ mod tests {
         rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the crawl ends");
         assert!(crawler.is_done());
         assert!(listed(&crawler.index().read().unwrap(), &root).contains(&"docs/a/deep.txt".to_string()));
+    }
+
+    fn share_rules() -> Rules {
+        Rules { share: true, ..rules() }
+    }
+
+    #[test]
+    fn on_a_share_holding_a_whole_linux_system_only_its_home_is_crawled() {
+        let root = fixture("index-share-system");
+        for folder in ["proc/1/root", "etc/ssl", "usr/lib", "home/u/docs"] {
+            std::fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        std::fs::write(root.join("etc/ssl/cert.pem"), "x").unwrap();
+        std::fs::write(root.join("home/u/docs/notes.txt"), "x").unwrap();
+        let local = listed(&crawled(std::slice::from_ref(&root), &rules()), &root);
+        assert!(local.contains(&"etc/ssl/cert.pem".to_string()), "a local root is crawled whole: {local:?}");
+        let shared = listed(&crawled(std::slice::from_ref(&root), &share_rules()), &root);
+        assert_eq!(shared, ["", "home/", "home/u/", "home/u/docs/", "home/u/docs/notes.txt"]);
+    }
+
+    #[test]
+    fn a_share_is_crawled_only_so_deep_so_a_loop_of_links_ends() {
+        let root = fixture("index-share-deep");
+        let deepest = (0..SHARE_DEPTH + 3).fold(root.clone(), |path, n| path.join(format!("d{n}")));
+        std::fs::create_dir_all(&deepest).unwrap();
+        let depth = |index: &Index| (0..index.len() as u32).map(|id| index.depth(id)).max().unwrap_or(0);
+        assert_eq!(depth(&crawled(std::slice::from_ref(&root), &rules())), SHARE_DEPTH + 3, "a local crawl has no limit");
+        assert_eq!(depth(&crawled(std::slice::from_ref(&root), &share_rules())), SHARE_DEPTH);
     }
 
     #[test]
