@@ -654,18 +654,21 @@ mod tests {
         first_done.recv_timeout(std::time::Duration::from_secs(10)).expect("the first crawl's own part ends");
         let (second, second_done) = start(share.clone(), None);
         second_done.recv_timeout(std::time::Duration::from_secs(10)).expect("the re-crawl's own part ends");
+        let (third, third_done) = start(share.clone(), None);
+        third_done.recv_timeout(std::time::Duration::from_secs(10)).expect("the next re-crawl's own part ends");
         std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(!has_shared(second.index()), "no second thread went into the busy share");
+        assert!(!has_shared(second.index()) && !has_shared(third.index()), "no second thread went into the busy share");
         // The first crawl is replaced (dropped) and the share answers again:
-        // the same thread then crawls the share into the new index.
+        // the same thread then crawls the share into the newest index.
         drop(first);
         drop(hung);
         let waited = std::time::Instant::now();
-        while !has_shared(second.index()) {
-            assert!(waited.elapsed() < std::time::Duration::from_secs(10), "the share's thread crawls the re-crawl's index next");
+        while !has_shared(third.index()) {
+            assert!(waited.elapsed() < std::time::Duration::from_secs(10), "the share's thread crawls the newest re-crawl's index next");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(!has_shared(&first_index), "the replaced crawl stopped");
+        assert!(!has_shared(second.index()), "an older waiting re-crawl is passed over");
     }
 
     #[test]
