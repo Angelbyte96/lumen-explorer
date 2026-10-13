@@ -57,16 +57,37 @@ fn label_of(path: &Path) -> String {
         .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
+/// Id of the side panel's one Tab stop.
+pub fn focus_id() -> egui::Id {
+    egui::Id::new("lumen_sidebar_focus")
+}
+
+/// The item the arrows reached while the panel has the focus.
+fn cursor_id() -> egui::Id {
+    egui::Id::new("lumen_sidebar_cursor")
+}
+
 pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
     let mut event = None;
+    // One Tab stop for the whole panel; the arrows walk its items. Escape is
+    // left to egui, which drops the focus and so gives the list its keys back.
+    let stop = ui.interact(ui.max_rect(), focus_id(), egui::Sense::FOCUSABLE);
+    if stop.has_focus() {
+        let keep = egui::EventFilter { tab: false, horizontal_arrows: true, vertical_arrows: true, escape: false };
+        ui.memory_mut(|m| m.set_focus_lock_filter(focus_id(), keep));
+    }
+    // Every title and every item of an open section, in order: where the arrows go.
+    let mut rows: Vec<Row> = Vec::new();
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         ui.add_space(4.0);
-        section(ui, "Bookmarks", true, |ui| {
+        let at = rows.len();
+        let title = section(ui, "Bookmarks", true, |ui| {
             if sidebar.bookmarks.is_empty() {
                 ui.weak("Ctrl+D or ☆ adds the folder you are in");
             }
             for path in sidebar.bookmarks {
                 let response = item(ui, ItemIcon::Folder, "folder", &label_of(path), &path.display().to_string(), path, sidebar.current, sidebar.icons);
+                rows.push(Row { rect: response.rect, kind: RowKind::Item(path.clone()) });
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(path.clone()));
                 }
@@ -78,19 +99,26 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
                 });
             }
         });
-        section(ui, "Places", true, |ui| {
+        rows.insert(at, title);
+        let at = rows.len();
+        let title = section(ui, "Places", true, |ui| {
             for place in sidebar.places {
                 let icon = if place.trash { ItemIcon::Glyph(TRASH) } else { ItemIcon::Folder };
-                if item(ui, icon, place.icon, &place.label, &place.path.display().to_string(), &place.path, sidebar.current, sidebar.icons).clicked() {
+                let response = item(ui, icon, place.icon, &place.label, &place.path.display().to_string(), &place.path, sidebar.current, sidebar.icons);
+                rows.push(Row { rect: response.rect, kind: RowKind::Item(place.path.clone()) });
+                if response.clicked() {
                     event = Some(SidebarEvent::Open(place.path.clone()));
                 }
             }
         });
-        section(ui, "Storage", true, |ui| {
+        rows.insert(at, title);
+        let at = rows.len();
+        let title = section(ui, "Storage", true, |ui| {
             for (mount, usage) in sidebar.disks {
                 // The bar is only 4 px tall: the whole row tells the free space too.
                 let hint = disk_hint(&mount.path, usage.as_ref());
                 let response = item(ui, ItemIcon::Glyph(DISK), "drive-harddisk", &mount.label, &hint, &mount.path, sidebar.current, sidebar.icons);
+                rows.push(Row { rect: response.rect, kind: RowKind::Item(mount.path.clone()) });
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(mount.path.clone()));
                 }
@@ -100,21 +128,118 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
                 }
             }
         });
-        section(ui, "Recents", false, |ui| {
+        rows.insert(at, title);
+        let at = rows.len();
+        let title = section(ui, "Recents", false, |ui| {
             for path in sidebar.recents {
-                if item(ui, ItemIcon::Folder, "folder", &label_of(path), &path.display().to_string(), path, sidebar.current, sidebar.icons).clicked() {
+                let response = item(ui, ItemIcon::Folder, "folder", &label_of(path), &path.display().to_string(), path, sidebar.current, sidebar.icons);
+                rows.push(Row { rect: response.rect, kind: RowKind::Item(path.clone()) });
+                if response.clicked() {
                     event = Some(SidebarEvent::Open(path.clone()));
                 }
             }
         });
+        rows.insert(at, title);
+        if stop.has_focus()
+            && let Some(open) = walk(ui, &stop, &rows, sidebar.current)
+        {
+            event = Some(SidebarEvent::Open(open));
+        }
     });
     event
 }
 
-fn section(ui: &mut egui::Ui, title: &str, open: bool, body: impl FnOnce(&mut egui::Ui)) {
-    egui::CollapsingHeader::new(egui::RichText::new(title).strong())
-        .default_open(open)
-        .show(ui, body);
+/// A row the arrows can reach: a section's title or one of its items.
+struct Row {
+    rect: egui::Rect,
+    kind: RowKind,
+}
+
+enum RowKind {
+    /// The title's open state lives under this id.
+    Title { id: egui::Id, open: bool },
+    Item(PathBuf),
+}
+
+/// The panel walked like a tree. Up/Down, Home/End move a ring through
+/// `rows`; Right opens a closed section or goes from its title to its first
+/// item, Left goes from an item to its title or closes the section; Enter
+/// opens the folder under the ring, or opens or closes its section. The ring
+/// starts on the folder on screen each time the panel gets the focus.
+fn walk(ui: &mut egui::Ui, stop: &egui::Response, rows: &[Row], current: &Path) -> Option<PathBuf> {
+    let last = rows.len().checked_sub(1)?;
+    let saved = ui.ctx().data(|d| d.get_temp::<usize>(cursor_id()));
+    let start = match saved {
+        Some(at) if !stop.gained_focus() => at,
+        _ => rows.iter().position(|row| matches!(&row.kind, RowKind::Item(path) if path == current)).unwrap_or(0),
+    };
+    let keys = [egui::Key::ArrowDown, egui::Key::ArrowUp, egui::Key::Home, egui::Key::End, egui::Key::ArrowRight, egui::Key::ArrowLeft, egui::Key::Enter];
+    let pressed: Vec<egui::Key> = ui.input_mut(|i| {
+        let mut pressed = Vec::new();
+        for key in keys {
+            pressed.extend(std::iter::repeat_n(key, i.count_and_consume_key(egui::Modifiers::NONE, key)));
+        }
+        pressed
+    });
+    let mut at = start.min(last);
+    let mut open = None;
+    for key in &pressed {
+        match (key, &rows[at].kind) {
+            (egui::Key::ArrowDown, _) => at = (at + 1).min(last),
+            (egui::Key::ArrowUp, _) => at = at.saturating_sub(1),
+            (egui::Key::Home, _) => at = 0,
+            (egui::Key::End, _) => at = last,
+            (egui::Key::ArrowRight, RowKind::Title { open: true, .. }) => {
+                if matches!(rows.get(at + 1), Some(Row { kind: RowKind::Item(_), .. })) {
+                    at += 1;
+                }
+            }
+            (egui::Key::ArrowRight, RowKind::Title { id, open: false }) => set_open(ui, *id, true),
+            (egui::Key::ArrowLeft, RowKind::Title { id, open: true }) => set_open(ui, *id, false),
+            (egui::Key::ArrowLeft, RowKind::Item(_)) => {
+                at = rows[..at].iter().rposition(|row| matches!(row.kind, RowKind::Title { .. })).unwrap_or(at);
+            }
+            (egui::Key::Enter, RowKind::Title { id, open }) => set_open(ui, *id, !open),
+            (egui::Key::Enter, RowKind::Item(path)) => open = Some(path.clone()),
+            _ => {}
+        }
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(cursor_id(), at));
+    let rect = rows[at].rect;
+    if !pressed.is_empty() {
+        ui.scroll_to_rect(rect, None);
+    }
+    ui.painter().rect_stroke(rect, 3, ui.visuals().selection.stroke, egui::StrokeKind::Inside);
+    open
+}
+
+/// Opens or closes the section whose state lives under `id`.
+fn set_open(ui: &egui::Ui, id: egui::Id, open: bool) {
+    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open);
+    state.set_open(open);
+    state.store(ui.ctx());
+}
+
+/// A title that opens and closes its section on a click. Not a Tab stop, as
+/// egui's own collapsing header would be: the panel is one.
+fn section(ui: &mut egui::Ui, title: &str, open: bool, body: impl FnOnce(&mut egui::Ui)) -> Row {
+    let id = ui.make_persistent_id(("lumen_section", title));
+    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open);
+    let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    let (rect, header) = ui.allocate_exact_size(size, egui::Sense::CLICK);
+    if header.clicked() {
+        state.toggle(ui);
+    }
+    let indent = ui.spacing().indent;
+    let mut icon = header.clone();
+    icon.rect = egui::Rect::from_center_size(egui::pos2(rect.left() + indent / 2.0, rect.center().y), egui::Vec2::splat(ui.spacing().icon_width));
+    egui::collapsing_header::paint_default_icon(ui, state.openness(ui.ctx()), &icon);
+    let galley = egui::WidgetText::from(egui::RichText::new(title).strong()).into_galley(ui, Some(egui::TextWrapMode::Truncate), rect.width() - indent, egui::TextStyle::Button);
+    let text_pos = egui::pos2(rect.left() + indent, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(text_pos, galley, ui.visuals().text_color());
+    let open = state.is_open();
+    state.show_body_indented(&header, ui, body);
+    Row { rect, kind: RowKind::Title { id, open } }
 }
 
 enum ItemIcon {
@@ -143,7 +268,8 @@ fn item(ui: &mut egui::Ui, icon: ItemIcon, theme: &'static str, label: &str, hin
     let own = icons.symbolic_texture(theme);
     let selected = path == current;
     // Senses clicks below the name button, so the button keeps its own.
-    let row = egui::UiBuilder::new().sense(egui::Sense::click());
+    // Clicks only: the panel is one Tab stop and the arrows walk its rows.
+    let row = egui::UiBuilder::new().sense(egui::Sense::CLICK);
     // Behind the row, filled once its size is known: the hover highlight.
     let backdrop = ui.painter().add(egui::Shape::Noop);
     let inner = ui.scope_builder(row, |ui| {
@@ -172,7 +298,7 @@ fn item(ui: &mut egui::Ui, icon: ItemIcon, theme: &'static str, label: &str, hin
                     ui.add(egui::Label::new(glyph).selectable(false));
                 }
             }
-            ui.add(egui::Button::selectable(selected, label).frame_when_inactive(false))
+            ui.add(egui::Button::selectable(selected, label).frame_when_inactive(false).sense(egui::Sense::CLICK))
         })
         .inner
     });
@@ -346,5 +472,203 @@ mod tests {
         let usage = Usage { total: 465 * gb, free: 120 * gb };
         assert_eq!(disk_hint(Path::new("/"), Some(&usage)), "/\n120.0 GB free of 465.0 GB");
         assert_eq!(disk_hint(Path::new("/mnt/data"), None), "/mnt/data", "usage not read yet");
+    }
+
+    /// The side panel's data for the focus tests: Recents starts closed.
+    struct Panel {
+        bookmarks: [PathBuf; 1],
+        places: [Place; 2],
+        disks: [(Mount, Option<Usage>); 1],
+        recents: [PathBuf; 1],
+        icons: FileIcons,
+    }
+
+    fn panel() -> Panel {
+        let place = |label: &str, path: &str| Place { label: label.into(), path: path.into(), trash: false, icon: "folder" };
+        Panel {
+            bookmarks: [PathBuf::from("/b1")],
+            places: [place("Home", "/home/u"), place("Downloads", "/home/u/Downloads")],
+            disks: [(Mount { label: "File System".into(), path: "/".into() }, None)],
+            recents: [PathBuf::from("/r1")],
+            icons: FileIcons::default(),
+        }
+    }
+
+    struct Drawn {
+        before: egui::Id,
+        after: egui::Id,
+        event: Option<SidebarEvent>,
+        shapes: Vec<egui::epaint::ClippedShape>,
+    }
+
+    /// A button, the side panel and another button, in the window's order.
+    fn window(ctx: &egui::Context, panel: &Panel, events: Vec<egui::Event>) -> Drawn {
+        let sidebar = Sidebar {
+            current: Path::new("/home/u/Downloads"),
+            bookmarks: &panel.bookmarks,
+            places: &panel.places,
+            disks: &panel.disks,
+            recents: &panel.recents,
+            icons: &panel.icons,
+        };
+        let (mut before, mut after, mut event) = (egui::Id::NULL, egui::Id::NULL, None);
+        let input = egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        let mut output = ctx.run_ui(input, |root| {
+            crate::ui::skip_panel_borders(root.ctx());
+            egui::Panel::top("before").show(root, |ui| before = ui.button("before").id);
+            egui::Panel::left("sidebar").show(root, |ui| event = show(ui, &sidebar));
+            egui::CentralPanel::default().show(root, |ui| after = ui.button("after").id);
+        });
+        output.textures_delta.clear();
+        Drawn { before, after, event, shapes: output.shapes }
+    }
+
+    fn key(key: egui::Key, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers }
+    }
+
+    /// Presses and releases `k`; what the panel did and drew.
+    fn tap(ctx: &egui::Context, panel: &Panel, k: egui::Key) -> Drawn {
+        let down = window(ctx, panel, vec![key(k, true, egui::Modifiers::NONE)]);
+        let mut up = window(ctx, panel, vec![key(k, false, egui::Modifiers::NONE)]);
+        up.event = down.event.or(up.event);
+        up
+    }
+
+    fn focused_panel(ctx: &egui::Context, panel: &Panel) {
+        window(ctx, panel, vec![]);
+        ctx.memory_mut(|m| m.request_focus(focus_id()));
+        window(ctx, panel, vec![]);
+        window(ctx, panel, vec![]);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(focus_id()));
+    }
+
+    fn opens(path: &str) -> Option<SidebarEvent> {
+        Some(SidebarEvent::Open(PathBuf::from(path)))
+    }
+
+    #[test]
+    fn the_side_panel_is_one_tab_stop_not_one_per_item_or_section() {
+        let ctx = egui::Context::default();
+        let panel = panel();
+        let drawn = window(&ctx, &panel, vec![]);
+        ctx.memory_mut(|m| m.request_focus(drawn.before));
+        window(&ctx, &panel, vec![]);
+        tap(&ctx, &panel, egui::Key::Tab);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(focus_id()), "Tab from the button lands on the panel");
+        tap(&ctx, &panel, egui::Key::Tab);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(drawn.after), "the next Tab leaves it, past the border");
+        let back = vec![key(egui::Key::Tab, true, egui::Modifiers::SHIFT), key(egui::Key::Tab, false, egui::Modifiers::SHIFT)];
+        for event in back {
+            window(&ctx, &panel, vec![event]);
+        }
+        window(&ctx, &panel, vec![]);
+        window(&ctx, &panel, vec![]);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(focus_id()), "Shift+Tab comes back over the border");
+    }
+
+    /// Frames enough for a section to finish opening or closing.
+    fn settle(ctx: &egui::Context, panel: &Panel) {
+        for _ in 0..20 {
+            window(ctx, panel, vec![]);
+        }
+    }
+
+    #[test]
+    fn up_and_down_walk_the_titles_and_the_open_sections_items_from_the_current_folder() {
+        let ctx = egui::Context::default();
+        let panel = panel();
+        focused_panel(&ctx, &panel);
+        assert_eq!(tap(&ctx, &panel, egui::Key::Enter).event, opens("/home/u/Downloads"), "starts on the folder on screen");
+        tap(&ctx, &panel, egui::Key::ArrowUp);
+        assert_eq!(tap(&ctx, &panel, egui::Key::Enter).event, opens("/home/u"));
+        tap(&ctx, &panel, egui::Key::Home);
+        tap(&ctx, &panel, egui::Key::ArrowUp);
+        tap(&ctx, &panel, egui::Key::ArrowDown);
+        assert_eq!(tap(&ctx, &panel, egui::Key::Enter).event, opens("/b1"), "Home is the Bookmarks title, the next row its item");
+        tap(&ctx, &panel, egui::Key::End);
+        tap(&ctx, &panel, egui::Key::ArrowDown);
+        tap(&ctx, &panel, egui::Key::ArrowUp);
+        let drawn = tap(&ctx, &panel, egui::Key::Enter);
+        assert_eq!(drawn.event, opens("/"), "End is the closed Recents title, the row above it the disk");
+        let ring = ctx.global_style().visuals.selection.stroke.color;
+        let rings = drawn.shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke.color == ring)).count();
+        assert_eq!(rings, 1, "one ring, on the row the arrows reached");
+        assert_eq!(ctx.memory(|m| m.focused()), Some(focus_id()), "the arrows kept the focus on the panel");
+    }
+
+    #[test]
+    fn left_and_right_close_and_open_sections_like_a_tree() {
+        let ctx = egui::Context::default();
+        let panel = panel();
+        focused_panel(&ctx, &panel);
+        // On Downloads: Left goes to the Places title; Enter there closes and opens it.
+        tap(&ctx, &panel, egui::Key::ArrowLeft);
+        assert_eq!(tap(&ctx, &panel, egui::Key::Enter).event, None, "Enter on a title opens no folder");
+        settle(&ctx, &panel);
+        tap(&ctx, &panel, egui::Key::Enter);
+        settle(&ctx, &panel);
+        tap(&ctx, &panel, egui::Key::ArrowDown);
+        assert_eq!(tap(&ctx, &panel, egui::Key::Enter).event, opens("/home/u"), "Places open again, its first item follows");
+        // On an item Left goes to its title, Left again closes the section.
+        tap(&ctx, &panel, egui::Key::ArrowLeft);
+        tap(&ctx, &panel, egui::Key::ArrowLeft);
+        settle(&ctx, &panel);
+        tap(&ctx, &panel, egui::Key::ArrowDown);
+        tap(&ctx, &panel, egui::Key::ArrowDown);
+        assert_eq!(tap(&ctx, &panel, egui::Key::Enter).event, opens("/"), "Places closed: past its title come Storage's title and the disk");
+        // Recents, closed: Right opens it, Right again goes to its first item.
+        tap(&ctx, &panel, egui::Key::End);
+        tap(&ctx, &panel, egui::Key::ArrowRight);
+        settle(&ctx, &panel);
+        tap(&ctx, &panel, egui::Key::ArrowRight);
+        assert_eq!(tap(&ctx, &panel, egui::Key::Enter).event, opens("/r1"));
+        // Right on an item and Left on a closed title do nothing.
+        tap(&ctx, &panel, egui::Key::ArrowRight);
+        assert_eq!(tap(&ctx, &panel, egui::Key::Enter).event, opens("/r1"));
+        tap(&ctx, &panel, egui::Key::Home);
+        tap(&ctx, &panel, egui::Key::ArrowLeft);
+        settle(&ctx, &panel);
+        tap(&ctx, &panel, egui::Key::ArrowLeft);
+        settle(&ctx, &panel);
+        tap(&ctx, &panel, egui::Key::ArrowDown);
+        tap(&ctx, &panel, egui::Key::ArrowDown);
+        tap(&ctx, &panel, egui::Key::ArrowDown);
+        assert_eq!(tap(&ctx, &panel, egui::Key::Enter).event, opens("/"), "Bookmarks and Places closed, Storage's disk is third");
+    }
+
+    #[test]
+    fn a_section_opened_with_a_click_joins_the_walk() {
+        let ctx = egui::Context::default();
+        let panel = panel();
+        window(&ctx, &panel, vec![]);
+        let drawn = window(&ctx, &panel, vec![]);
+        let header = drawn
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == "Recents" => Some(t.pos + t.galley.size() / 2.0),
+                _ => None,
+            })
+            .expect("the Recents header is drawn");
+        let press = |pressed| egui::Event::PointerButton { pos: header, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        window(&ctx, &panel, vec![egui::Event::PointerMoved(header)]);
+        window(&ctx, &panel, vec![press(true)]);
+        window(&ctx, &panel, vec![press(false)]);
+        for _ in 0..10 {
+            window(&ctx, &panel, vec![]);
+        }
+        focused_panel(&ctx, &panel);
+        tap(&ctx, &panel, egui::Key::End);
+        assert_eq!(tap(&ctx, &panel, egui::Key::Enter).event, opens("/r1"));
+    }
+
+    #[test]
+    fn escape_leaves_the_side_panel() {
+        let ctx = egui::Context::default();
+        let panel = panel();
+        focused_panel(&ctx, &panel);
+        assert_eq!(tap(&ctx, &panel, egui::Key::Escape).event, None);
+        assert_eq!(ctx.memory(|m| m.focused()), None);
     }
 }

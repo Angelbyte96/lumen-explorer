@@ -1716,7 +1716,12 @@ impl LumenApp {
             ToolbarEvent::Up => self.go_parent(ctx),
             ToolbarEvent::ToggleBookmark => self.toggle_bookmark(self.tab.view.current.clone()),
             ToolbarEvent::Go(path) => self.navigate(ctx, path, None),
-            ToolbarEvent::EditPath => self.path_popup.open(),
+            ToolbarEvent::EditPath => {
+                // Pressed with Enter (the bar had the focus): the box drawn
+                // below must not read that Enter too and close at once.
+                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                self.path_popup.open();
+            }
         }
     }
 
@@ -1987,6 +1992,8 @@ impl eframe::App for LumenApp {
         self.poll_count();
         #[cfg(windows)]
         self.read_pending_menu(&ctx);
+
+        ui::skip_panel_borders(&ctx);
 
         // An open dialog takes the keyboard; the list must not react underneath.
         if self.dialog.is_some() {
@@ -3666,6 +3673,29 @@ mod tests {
         assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub")), "showing the folder");
         app.handle_popup(&ctx, PopupEvent::Go { path: dir.clone(), select: Some("a.txt".into()), new_tab: false });
         assert_eq!(app.tab.select_after_load.as_deref(), Some("a.txt"), "a file opens its folder, selected");
+    }
+
+    #[test]
+    fn enter_on_the_focused_path_bar_opens_the_path_box_and_leaves_it_open() {
+        let (ctx, mut app, dir) = app_in("app-path-bar-enter");
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let enter = |pressed| egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+        for (n, events) in [vec![enter(true)], vec![enter(false)], vec![]].into_iter().enumerate() {
+            let input = egui::RawInput { events, screen_rect: Some(screen), ..egui::RawInput::default() };
+            ctx.run_ui(input, |root| {
+                // The toolbar answers the Enter first, as the window draws it above the box.
+                if n == 0 {
+                    app.handle_toolbar(root.ctx(), ToolbarEvent::EditPath);
+                }
+                egui::CentralPanel::default().show(root, |ui| {
+                    if let Some(event) = app.path_popup.show(ui.ctx(), ui.max_rect(), &dir, None, false, Vec::new) {
+                        app.handle_popup(ui.ctx(), event);
+                    }
+                });
+            })
+            .drop_without_applying_deltas();
+            assert!(app.path_popup.is_open(), "still open after frame {n}");
+        }
     }
 
     /// Lets the running count finish, as the next frames would.

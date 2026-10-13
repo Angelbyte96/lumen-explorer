@@ -158,6 +158,8 @@ pub fn show(
     let mut first_drawn: Option<(usize, f32)> = None;
     let mut band_may_start = false;
     let pressed = ui.input(|i| i.pointer.primary_pressed());
+    let whole = ui.available_rect_before_wrap();
+    focus_stop(ui, whole);
 
     egui::ScrollArea::horizontal().id_salt("lumen_list_columns").auto_shrink(false).show(ui, |ui| {
         let mut table = TableBuilder::new(ui)
@@ -166,7 +168,7 @@ pub fn show(
             .auto_shrink([false, true])
             // Text sits in the middle of rows made taller by the zoom.
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .sense(egui::Sense::click());
+            .sense(egui::Sense::CLICK);
         // Every column has its own width, like File Pilot: the last one stretches
         // over whatever room the others leave, and columns wider than the list
         // scroll sideways.
@@ -192,7 +194,7 @@ pub fn show(
                     header.col(|ui| {
                         cells[i] = ui.max_rect();
                         // The whole header, not only its label: a click sorts, a right click opens its menu.
-                        let cell = ui.interact(ui.max_rect(), egui::Id::new(("lumen_header", i)), egui::Sense::click());
+                        let cell = ui.interact(ui.max_rect(), egui::Id::new(("lumen_header", i)), egui::Sense::CLICK);
                         let label = sort_header(ui, label, column, sort);
                         if label.clicked() || cell.clicked() {
                             event = Some(ListEvent::Sort(column));
@@ -277,7 +279,7 @@ pub fn show(
         // Whatever space the rows leave below them.
         let rest = ui.available_rect_before_wrap();
         if event.is_none() && rest.height() > 0.0 {
-            let response = ui.interact(rest, egui::Id::new("lumen_list_empty"), egui::Sense::click());
+            let response = ui.interact(rest, egui::Id::new("lumen_list_empty"), egui::Sense::CLICK);
             if pressed && response.is_pointer_button_down_on() {
                 band_may_start = true;
             }
@@ -293,6 +295,10 @@ pub fn show(
             event = Some(band);
         }
     });
+    // On top of the rows: a ring tells the keys go to the list.
+    if ui.memory(|m| m.has_focus(focus_id())) {
+        ui.painter().rect_stroke(whole.shrink(1.0), 2, ui.visuals().selection.stroke, egui::StrokeKind::Inside);
+    }
     event
 }
 
@@ -434,7 +440,7 @@ fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths
     for (column, cell) in cells.iter().enumerate().filter(|(_, cell)| cell.is_positive()) {
         let x = cell.right() + gap / 2.0;
         let rect = egui::Rect::from_x_y_ranges(x - BORDER_GRAB..=x + BORDER_GRAB, cell.y_range());
-        let response = ui.interact(rect, egui::Id::new(("lumen_column_border", column)), egui::Sense::drag());
+        let response = ui.interact(rect, egui::Id::new(("lumen_column_border", column)), egui::Sense::DRAG);
         if response.hovered() || response.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
             let stroke = if response.dragged() { ui.visuals().widgets.active.fg_stroke } else { ui.visuals().widgets.hovered.fg_stroke };
@@ -533,6 +539,44 @@ fn count_cell(ui: &mut egui::Ui, i: usize, text: &str) {
     }
 }
 
+/// Id of the list's one Tab stop.
+pub fn focus_id() -> egui::Id {
+    egui::Id::new("lumen_list_focus")
+}
+
+/// The list's one Tab stop, over the whole list: Tab lands here, not on each
+/// row or header. While it has the focus the arrows and Escape stay with the
+/// list instead of moving egui's focus to a nearby widget. Its ring only shows
+/// where Tab landed: the first key (not Tab or a modifier alone) or click on the list lets the focus
+/// go, which leaves the keys with the list all the same.
+pub fn focus_stop(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Response {
+    let response = ui.interact(rect, focus_id(), egui::Sense::FOCUSABLE);
+    if response.has_focus() {
+        let used = ui.input(|i| {
+            i.raw.events.iter().any(|e| match e {
+                egui::Event::Key { key, pressed: true, .. } => !is_tab_or_modifier(*key),
+                egui::Event::Text(_) => true,
+                egui::Event::PointerButton { pos, pressed: true, .. } => rect.contains(*pos),
+                _ => false,
+            })
+        });
+        if used {
+            ui.memory_mut(|m| m.surrender_focus(focus_id()));
+        } else {
+            let keep = egui::EventFilter { tab: false, horizontal_arrows: true, vertical_arrows: true, escape: true };
+            ui.memory_mut(|m| m.set_focus_lock_filter(focus_id(), keep));
+        }
+    }
+    response
+}
+
+/// Keys that do not count as using the list: Tab moves the focus, and a
+/// modifier pressed alone (Shift before Shift+Tab) does nothing yet.
+fn is_tab_or_modifier(key: egui::Key) -> bool {
+    use egui::Key::*;
+    matches!(key, Tab | ShiftLeft | ShiftRight | ControlLeft | ControlRight | AltLeft | AltRight | SuperLeft | SuperRight)
+}
+
 /// Id of the rename field, so the app can tell when it lost focus silently.
 pub fn rename_id() -> egui::Id {
     egui::Id::new("lumen_rename")
@@ -582,7 +626,7 @@ fn sort_header(ui: &mut egui::Ui, label: &str, column: SortColumn, sort: Sort) -
         (true, true) => SORT_DESCENDING,
     };
     let text = egui::RichText::new(format!("{label} {arrow}")).strong();
-    ui.add(egui::Button::new(text).frame(false))
+    ui.add(egui::Button::new(text).frame(false).sense(egui::Sense::CLICK))
 }
 
 /// Characters of `name` selected when renaming starts: the part before the
@@ -1402,5 +1446,142 @@ mod tests {
             "field centre {} should be above {first_row_bottom}",
             field.center().y
         );
+    }
+
+    fn tab() -> egui::Event {
+        egui::Event::Key { key: egui::Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }
+    }
+
+    /// A button, the list and another button, like the side panel and the
+    /// list in the window. Returns the buttons' ids and the list's rect.
+    fn between_buttons(ctx: &egui::Context, view: &View, events: Vec<egui::Event>) -> (egui::Id, egui::Id, egui::Rect, Vec<egui::epaint::ClippedShape>) {
+        let (mut before, mut after, mut rect) = (egui::Id::NULL, egui::Id::NULL, egui::Rect::NOTHING);
+        let mut output = ctx.run_ui(
+            egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
+            |root| {
+                egui::Panel::top("before").show(root, |ui| before = ui.button("before").id);
+                egui::CentralPanel::default().show(root, |ui| {
+                    rect = ui.max_rect();
+                    show(ui, view, &[], Sizes::default(), None, None, &FileIcons::default());
+                });
+                // Tab follows the drawing order: this one comes after the list.
+                egui::Area::new(egui::Id::new("after")).fixed_pos(egui::pos2(700.0, 560.0)).show(root.ctx(), |ui| after = ui.button("after").id);
+            },
+        );
+        output.textures_delta.clear();
+        (before, after, rect, output.shapes)
+    }
+
+    #[test]
+    fn the_list_is_one_tab_stop_not_one_per_row_or_header() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a", "b", "c", "d"]);
+        let (before, after, _, _) = between_buttons(&ctx, &view, vec![]);
+        ctx.memory_mut(|m| m.request_focus(before));
+        between_buttons(&ctx, &view, vec![]);
+        between_buttons(&ctx, &view, vec![tab()]);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(focus_id()), "Tab from the button lands on the list");
+        between_buttons(&ctx, &view, vec![tab()]);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(after), "the next Tab leaves the list");
+        let back = egui::Event::Key { key: egui::Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT };
+        between_buttons(&ctx, &view, vec![back]);
+        between_buttons(&ctx, &view, vec![]);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(focus_id()), "Shift+Tab comes back to the list");
+    }
+
+    #[test]
+    fn a_key_or_a_click_on_the_focused_list_drops_its_ring_but_not_its_keys() {
+        let view = listed(&["a", "b", "c", "d"]);
+        let ring = egui::Context::default().global_style().visuals.selection.stroke.color;
+        let rings = |shapes: &[egui::epaint::ClippedShape], list: egui::Rect| -> usize {
+            shapes
+                .iter()
+                .filter(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke.color == ring && r.rect.width() > list.width() - 20.0))
+                .count()
+        };
+        let row = |list: egui::Rect| list.center_top() + egui::vec2(0.0, 40.0);
+        let press = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let list = between_buttons(&egui::Context::default(), &view, vec![]).2;
+        let inputs: Vec<(&str, Vec<Vec<egui::Event>>)> = vec![
+            ("Down", vec![vec![key(egui::Key::ArrowDown)]]),
+            ("Escape", vec![vec![key(egui::Key::Escape)]]),
+            ("a letter", vec![vec![egui::Event::Text("a".into())]]),
+            ("a click", vec![vec![egui::Event::PointerMoved(row(list))], vec![press(row(list), true)], vec![press(row(list), false)]]),
+        ];
+        for (what, frames) in inputs {
+            let ctx = egui::Context::default();
+            between_buttons(&ctx, &view, vec![]);
+            ctx.memory_mut(|m| m.request_focus(focus_id()));
+            between_buttons(&ctx, &view, vec![]);
+            let (_, _, list, shapes) = between_buttons(&ctx, &view, vec![]);
+            assert_eq!(rings(&shapes, list), 1, "the ring before {what}");
+            for events in frames {
+                between_buttons(&ctx, &view, events);
+            }
+            let (_, _, list, shapes) = between_buttons(&ctx, &view, vec![]);
+            assert_eq!(rings(&shapes, list), 0, "{what} drops the ring");
+            let focused = ctx.memory(|m| m.focused());
+            assert!(focused.is_none_or(|id| id == focus_id()), "{what} leaves the keys with the list, not {focused:?}");
+        }
+    }
+
+    #[test]
+    fn a_ring_shows_round_the_list_only_while_it_has_the_focus() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a", "b"]);
+        let ring = ctx.global_style().visuals.selection.stroke.color;
+        let rings = |shapes: &[egui::epaint::ClippedShape], list: egui::Rect| -> usize {
+            shapes
+                .iter()
+                .filter(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke.color == ring && r.rect.width() > list.width() - 20.0 && r.rect.height() > list.height() - 20.0))
+                .count()
+        };
+        between_buttons(&ctx, &view, vec![]);
+        let (_, _, list, shapes) = between_buttons(&ctx, &view, vec![]);
+        assert_eq!(rings(&shapes, list), 0, "no ring without the focus");
+        ctx.memory_mut(|m| m.request_focus(focus_id()));
+        between_buttons(&ctx, &view, vec![]);
+        let (_, _, list, shapes) = between_buttons(&ctx, &view, vec![]);
+        assert_eq!(rings(&shapes, list), 1, "a ring round the focused list");
+    }
+
+    #[test]
+    fn a_click_on_the_list_takes_the_focus_from_another_part() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a", "b", "c", "d"]);
+        let (before, _, list, _) = between_buttons(&ctx, &view, vec![]);
+        ctx.memory_mut(|m| m.request_focus(before));
+        between_buttons(&ctx, &view, vec![]);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(before));
+        let on_row = list.center_top() + egui::vec2(0.0, 40.0);
+        let press = |pressed| egui::Event::PointerButton { pos: on_row, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        between_buttons(&ctx, &view, vec![egui::Event::PointerMoved(on_row)]);
+        between_buttons(&ctx, &view, vec![press(true)]);
+        between_buttons(&ctx, &view, vec![press(false)]);
+        let focused = ctx.memory(|m| m.focused());
+        assert!(focused.is_none_or(|id| id == focus_id()), "the list holds the keys again, not {focused:?}");
+    }
+
+    #[test]
+    fn shift_tab_from_the_focused_list_goes_back_in_one_press() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a", "b"]);
+        let (before, _, _, _) = between_buttons(&ctx, &view, vec![]);
+        ctx.memory_mut(|m| m.request_focus(focus_id()));
+        between_buttons(&ctx, &view, vec![]);
+        let key = |key, pressed, modifiers| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers };
+        // Shift goes down first, as a key of its own.
+        let shift = egui::Modifiers::SHIFT;
+        between_buttons(&ctx, &view, vec![egui::Event::ModifiersChanged(shift), key(egui::Key::ShiftLeft, true, shift)]);
+        between_buttons(&ctx, &view, vec![]);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(focus_id()), "Shift alone keeps the ring");
+        for modifier in [egui::Key::ControlLeft, egui::Key::AltRight, egui::Key::SuperLeft] {
+            between_buttons(&ctx, &view, vec![key(modifier, true, egui::Modifiers::NONE), key(modifier, false, egui::Modifiers::NONE)]);
+            assert_eq!(ctx.memory(|m| m.focused()), Some(focus_id()), "{modifier:?} alone keeps the ring");
+        }
+        between_buttons(&ctx, &view, vec![key(egui::Key::Tab, true, shift)]);
+        between_buttons(&ctx, &view, vec![]);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(before), "one Shift+Tab goes back");
     }
 }

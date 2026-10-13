@@ -35,7 +35,8 @@ pub fn close_id(index: usize) -> egui::Id {
 fn close_button(ui: &mut egui::Ui, index: usize) -> egui::Response {
     let galley = egui::WidgetText::from(CLOSE).into_galley(ui, None, f32::INFINITY, egui::TextStyle::Button);
     let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
-    let response = ui.interact(rect, close_id(index), egui::Sense::click());
+    // Not a Tab stop: Ctrl+W closes the tab with the keyboard.
+    let response = ui.interact(rect, close_id(index), egui::Sense::CLICK);
     let color = if response.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().text_color() };
     ui.painter().galley(rect.min, galley, color);
     response
@@ -68,6 +69,7 @@ pub fn show(ui: &mut egui::Ui, labels: &[String], active: usize) -> Option<TabEv
                             }
                         });
                     });
+                    crate::ui::focus_ring(ui, &tab.response);
                     if close_clicked {
                         event = Some(TabEvent::Close(i));
                     } else if tab.response.on_hover_text(label).clicked() {
@@ -75,7 +77,9 @@ pub fn show(ui: &mut egui::Ui, labels: &[String], active: usize) -> Option<TabEv
                     }
                 }
                 let new = egui::Button::new(egui::RichText::new(NEW).size(16.0)).frame(false);
-                if ui.add(new).on_hover_text("New tab (Ctrl+T)").clicked() {
+                let new = ui.add(new);
+                crate::ui::focus_ring(ui, &new);
+                if new.on_hover_text("New tab (Ctrl+T)").clicked() {
                     event = Some(TabEvent::New);
                 }
             });
