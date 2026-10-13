@@ -1988,6 +1988,8 @@ impl eframe::App for LumenApp {
         #[cfg(windows)]
         self.read_pending_menu(&ctx);
 
+        ui::skip_panel_borders(&ctx);
+
         // An open dialog takes the keyboard; the list must not react underneath.
         if self.dialog.is_some() {
             if let Some(answer) = input::read_confirm(&ctx) {
