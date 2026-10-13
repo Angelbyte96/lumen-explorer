@@ -278,6 +278,25 @@ impl View {
         self.scroll = Some(Scroll::Smooth);
     }
 
+    /// A band dragged with the mouse from `start` to `end`, in row units (row
+    /// `i` spans `[i, i + 1)`, so a scroll does not move the start): picks every
+    /// row it touches and moves the cursor to the row at `end`. Over no row it
+    /// drops the picks, like a click below the rows.
+    pub fn select_band(&mut self, start: f32, end: f32) {
+        let Some(last) = self.rows.len().checked_sub(1) else { return };
+        let (low, high) = (start.min(end), start.max(end));
+        if high < 0.0 || low >= self.rows.len() as f32 {
+            self.drop_picks();
+            return;
+        }
+        // Saturating casts: anything above the rows is row 0.
+        let row = |at: f32| (at.floor().max(0.0) as usize).min(last);
+        let (from, to) = (row(low), row(high));
+        self.picks = self.rows[from..=to].iter().map(|&i| self.entries[i].name.clone()).collect();
+        self.anchor = Some(self.entries[self.rows[row(start)]].name.clone());
+        self.selected = Some(row(end));
+    }
+
     /// Back to the cursor row alone. `false` when nothing was picked.
     pub fn drop_picks(&mut self) -> bool {
         self.anchor = None;
@@ -3909,6 +3928,44 @@ mod tests {
         assert_eq!(selection_names(&v), ["a.txt", "b.txt"]);
         v.extend_by(isize::MAX);
         assert_eq!(v.selected, Some(2), "clamped to the last row");
+    }
+
+    #[test]
+    fn a_band_picks_every_row_it_touches_both_ways() {
+        let mut v = loaded_view();
+        v.select_row(0);
+        // Row i spans [i, i + 1) in row units.
+        v.select_band(1.5, 2.2);
+        assert_eq!(selection_names(&v), ["a.txt", "b.txt"]);
+        assert_eq!(v.selected, Some(2), "the cursor follows the pointer's end");
+        v.select_band(2.9, 0.1);
+        assert_eq!(selection_names(&v), ["src", "a.txt", "b.txt"], "dragged upwards");
+        assert_eq!(v.selected, Some(0));
+        v.select_band(1.2, 1.4);
+        assert_eq!(selection_names(&v), ["a.txt"], "a short drag inside one row picks it");
+        assert_eq!(v.picked_count(), 1);
+        v.select_band(-3.0, 9.0);
+        assert_eq!(selection_names(&v), ["src", "a.txt", "b.txt"], "clamped to the rows shown");
+        assert_eq!(v.selected, Some(2));
+        v.extend_to(1);
+        assert_eq!(selection_names(&v), ["src", "a.txt"], "Shift+click ranges from where the band started");
+    }
+
+    #[test]
+    fn a_band_over_no_row_drops_the_picks_and_keeps_the_cursor() {
+        let mut v = loaded_view();
+        v.select_all();
+        v.select_row(1);
+        v.select_all();
+        v.select_band(3.5, 5.0);
+        assert_eq!(v.picked_count(), 0, "below the rows");
+        assert_eq!(selection_names(&v), ["a.txt"], "like a click below the rows");
+        v.select_all();
+        v.select_band(-2.0, -0.5);
+        assert_eq!(v.picked_count(), 0, "above the rows");
+        let mut empty = View::default();
+        empty.select_band(0.0, 2.0);
+        assert_eq!(empty.selected, None);
     }
 
     #[test]
