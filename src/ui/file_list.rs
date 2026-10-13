@@ -374,10 +374,16 @@ pub fn cursor_row_rect(ctx: &egui::Context) -> Option<egui::Rect> {
 /// letters matching the `typed` words are in the link colour.
 pub fn name_label(ui: &mut egui::Ui, entry: &Entry, typed: &str) {
     let ranges = word_ranges(&entry.name, typed).unwrap_or_default();
+    ranged_name_label(ui, entry, &ranges);
+}
+
+/// [`name_label`] with the letters to mark given, for names found by the
+/// quick jump, whose letters need not be whole words.
+pub fn ranged_name_label(ui: &mut egui::Ui, entry: &Entry, ranges: &[std::ops::Range<usize>]) {
     let visuals = ui.visuals();
     let normal = if entry.hidden { visuals.weak_text_color() } else { visuals.text_color() };
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let job = marked_name(&entry.name, &ranges, normal, visuals.hyperlink_color, font);
+    let job = marked_name(&entry.name, ranges, normal, visuals.hyperlink_color, font);
     ui.add(egui::Label::new(job).selectable(false).truncate());
 }
 
