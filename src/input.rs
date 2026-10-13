@@ -111,7 +111,7 @@ pub fn read_actions(ctx: &Context) -> Vec<Action> {
     actions
 }
 
-/// The list holds the keys while no other widget has the keyboard focus.
+/// The list holds the keys while it has the keyboard focus or nothing has.
 /// egui drops the focus on Escape before the app reads the keys: that Escape
 /// only gave the keys back, so it must not also clear the filter.
 fn list_has_keys(ctx: &Context) -> bool {
@@ -119,10 +119,11 @@ fn list_has_keys(ctx: &Context) -> bool {
     let now = ctx.memory(|m| m.focused());
     let before = ctx.data(|d| d.get_temp::<Option<Id>>(last_id)).flatten();
     ctx.data_mut(|d| d.insert_temp(last_id, now));
-    if now.is_none() && before.is_some() {
+    let list = crate::ui::file_list::focus_id();
+    if now.is_none() && before.is_some_and(|id| id != list) {
         ctx.input_mut(|i| i.events.retain(|e| !matches!(e, Event::Key { key: Key::Escape, .. })));
     }
-    now.is_none()
+    now.is_none_or(|id| id == list)
 }
 
 /// Touchpad scrolling, in points, needed for one zoom level.
@@ -675,5 +676,27 @@ mod tests {
         // The next Escape is the list's again.
         let escape = vec![key(Key::Escape, Modifiers::NONE)];
         assert_eq!(with_button(&ctx, escape, false), [Action::Cancel]);
+    }
+
+    #[test]
+    fn the_focused_list_keeps_its_keys_and_its_escape() {
+        let ctx = Context::default();
+        let stop = |ctx: &Context, events| {
+            let mut actions = Vec::new();
+            ctx.run_ui(RawInput { events, ..RawInput::default() }, |ui| {
+                actions = read_actions(ui.ctx());
+                crate::ui::file_list::focus_stop(ui, ui.max_rect());
+            })
+            .drop_without_applying_deltas();
+            actions
+        };
+        stop(&ctx, Vec::new());
+        ctx.memory_mut(|m| m.request_focus(crate::ui::file_list::focus_id()));
+        stop(&ctx, Vec::new());
+        assert_eq!(ctx.memory(|m| m.focused()), Some(crate::ui::file_list::focus_id()));
+        let keys = vec![key(Key::ArrowDown, Modifiers::NONE), key(Key::Enter, Modifiers::NONE), Event::Text("a".into())];
+        assert_eq!(stop(&ctx, keys), [Action::Move(1), Action::Activate, Action::TypeChar('a')]);
+        assert_eq!(stop(&ctx, vec![key(Key::Escape, Modifiers::NONE)]), [Action::Cancel]);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(crate::ui::file_list::focus_id()));
     }
 }
