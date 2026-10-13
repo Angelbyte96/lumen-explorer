@@ -296,7 +296,7 @@ pub fn show(
         }
     });
     // On top of the rows: a ring tells the keys go to the list.
-    if stop.has_focus() {
+    if ui.memory(|m| m.has_focus(focus_id())) {
         ui.painter().rect_stroke(whole.shrink(1.0), 2, ui.visuals().selection.stroke, egui::StrokeKind::Inside);
     }
     event
@@ -546,12 +546,26 @@ pub fn focus_id() -> egui::Id {
 
 /// The list's one Tab stop, over the whole list: Tab lands here, not on each
 /// row or header. While it has the focus the arrows and Escape stay with the
-/// list instead of moving egui's focus to a nearby widget.
+/// list instead of moving egui's focus to a nearby widget. Its ring only shows
+/// where Tab landed: the first other key or click on the list lets the focus
+/// go, which leaves the keys with the list all the same.
 pub fn focus_stop(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Response {
     let response = ui.interact(rect, focus_id(), egui::Sense::FOCUSABLE);
     if response.has_focus() {
-        let keep = egui::EventFilter { tab: false, horizontal_arrows: true, vertical_arrows: true, escape: true };
-        ui.memory_mut(|m| m.set_focus_lock_filter(focus_id(), keep));
+        let used = ui.input(|i| {
+            i.raw.events.iter().any(|e| match e {
+                egui::Event::Key { key, pressed: true, .. } => *key != egui::Key::Tab,
+                egui::Event::Text(_) => true,
+                egui::Event::PointerButton { pos, pressed: true, .. } => rect.contains(*pos),
+                _ => false,
+            })
+        });
+        if used {
+            ui.memory_mut(|m| m.surrender_focus(focus_id()));
+        } else {
+            let keep = egui::EventFilter { tab: false, horizontal_arrows: true, vertical_arrows: true, escape: true };
+            ui.memory_mut(|m| m.set_focus_lock_filter(focus_id(), keep));
+        }
     }
     response
 }
@@ -1469,17 +1483,39 @@ mod tests {
     }
 
     #[test]
-    fn the_arrows_keep_the_focus_on_the_list() {
-        let ctx = egui::Context::default();
+    fn a_key_or_a_click_on_the_focused_list_drops_its_ring_but_not_its_keys() {
         let view = listed(&["a", "b", "c", "d"]);
-        between_buttons(&ctx, &view, vec![]);
-        ctx.memory_mut(|m| m.request_focus(focus_id()));
-        between_buttons(&ctx, &view, vec![]);
-        for key in [egui::Key::ArrowDown, egui::Key::ArrowUp, egui::Key::ArrowLeft, egui::Key::Escape] {
-            let press = egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
-            between_buttons(&ctx, &view, vec![press]);
+        let ring = egui::Context::default().global_style().visuals.selection.stroke.color;
+        let rings = |shapes: &[egui::epaint::ClippedShape], list: egui::Rect| -> usize {
+            shapes
+                .iter()
+                .filter(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke.color == ring && r.rect.width() > list.width() - 20.0))
+                .count()
+        };
+        let row = |list: egui::Rect| list.center_top() + egui::vec2(0.0, 40.0);
+        let press = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let list = between_buttons(&egui::Context::default(), &view, vec![]).2;
+        let inputs: Vec<(&str, Vec<Vec<egui::Event>>)> = vec![
+            ("Down", vec![vec![key(egui::Key::ArrowDown)]]),
+            ("Escape", vec![vec![key(egui::Key::Escape)]]),
+            ("a letter", vec![vec![egui::Event::Text("a".into())]]),
+            ("a click", vec![vec![egui::Event::PointerMoved(row(list))], vec![press(row(list), true)], vec![press(row(list), false)]]),
+        ];
+        for (what, frames) in inputs {
+            let ctx = egui::Context::default();
             between_buttons(&ctx, &view, vec![]);
-            assert_eq!(ctx.memory(|m| m.focused()), Some(focus_id()), "{key:?} keeps the focus");
+            ctx.memory_mut(|m| m.request_focus(focus_id()));
+            between_buttons(&ctx, &view, vec![]);
+            let (_, _, list, shapes) = between_buttons(&ctx, &view, vec![]);
+            assert_eq!(rings(&shapes, list), 1, "the ring before {what}");
+            for events in frames {
+                between_buttons(&ctx, &view, events);
+            }
+            let (_, _, list, shapes) = between_buttons(&ctx, &view, vec![]);
+            assert_eq!(rings(&shapes, list), 0, "{what} drops the ring");
+            let focused = ctx.memory(|m| m.focused());
+            assert!(focused.is_none_or(|id| id == focus_id()), "{what} leaves the keys with the list, not {focused:?}");
         }
     }
 

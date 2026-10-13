@@ -696,7 +696,9 @@ mod tests {
         assert_eq!(ctx.memory(|m| m.focused()), Some(crate::ui::file_list::focus_id()));
         let keys = vec![key(Key::ArrowDown, Modifiers::NONE), key(Key::Enter, Modifiers::NONE), Event::Text("a".into())];
         assert_eq!(stop(&ctx, keys), [Action::Move(1), Action::Activate, Action::TypeChar('a')]);
-        assert_eq!(stop(&ctx, vec![key(Key::Escape, Modifiers::NONE)]), [Action::Cancel]);
-        assert_eq!(ctx.memory(|m| m.focused()), Some(crate::ui::file_list::focus_id()));
+        let escape = vec![release(Key::ArrowDown, Modifiers::NONE), release(Key::Enter, Modifiers::NONE), key(Key::Escape, Modifiers::NONE)];
+        assert_eq!(stop(&ctx, escape), [Action::Cancel]);
+        // The ring went away with the keys; the list still has them.
+        assert_eq!(stop(&ctx, vec![release(Key::Escape, Modifiers::NONE), key(Key::ArrowDown, Modifiers::NONE)]), [Action::Move(1)]);
     }
 }
