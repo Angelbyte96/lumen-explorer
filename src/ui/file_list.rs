@@ -204,7 +204,8 @@ pub fn show(
                     });
                 }
             })
-            .body(|body| {
+            .body(|mut body| {
+                band_scroll(body.ui_mut());
                 body.rows(row_height, rows.len(), |mut row| {
                     let i = row.index();
                     let entry = &entries[rows[i]];
@@ -212,7 +213,7 @@ pub fn show(
                     row.set_selected(if multi { view.is_picked(i) } else { selected == Some(i) });
                     let counts = count_cells(entry, totals.get(&entry.name));
                     for &column in &shown {
-                        row.col(|ui| match column {
+                        let (cell, _) = row.col(|ui| match column {
                             0 => {
                                 // Icon and name on one line as tall as the row, centred in it:
                                 // a plain `horizontal` is one text line tall, so a zoomed icon
@@ -244,9 +245,10 @@ pub fn show(
                             }
                             _ => count_cell(ui, column - 3, &counts[column - 3]),
                         });
+                        // Where the row is this frame: `row.response()` holds the last frame's place.
+                        first_drawn.get_or_insert((i, cell.top()));
                     }
                     let response = row.response();
-                    first_drawn.get_or_insert((i, response.rect.top()));
                     if pressed && response.is_pointer_button_down_on() && !on_name {
                         band_may_start = true;
                     }
@@ -304,6 +306,33 @@ struct BandStart {
 
 fn band_id() -> egui::Id {
     egui::Id::new("lumen_list_band")
+}
+
+/// How fast the list scrolls while a band is dragged past its top or bottom:
+/// points per second for each point the pointer is past it, up to `BAND_REACH`.
+const BAND_SCROLL: f32 = 10.0;
+const BAND_REACH: f32 = 200.0;
+
+/// While a band is dragged above or below the rows on view, scrolls the
+/// table's `body` towards the pointer, faster the farther it is.
+fn band_scroll(body: &mut egui::Ui) {
+    let (dragging, pointer, dt) = body.input(|i| (i.pointer.is_decidedly_dragging(), i.pointer.latest_pos(), i.stable_dt));
+    let banding = body.ctx().data(|d| d.get_temp::<BandStart>(band_id())).is_some();
+    let Some(pointer) = pointer.filter(|_| dragging && banding) else { return };
+    let view = body.clip_rect();
+    // Content moving down shows the rows above.
+    let past = if pointer.y < view.top() {
+        view.top() - pointer.y
+    } else if pointer.y > view.bottom() {
+        view.bottom() - pointer.y
+    } else {
+        return;
+    };
+    // At once: an animated scroll would carry on after the pointer is back.
+    let delta = egui::vec2(0.0, past.clamp(-BAND_REACH, BAND_REACH) * BAND_SCROLL * dt);
+    body.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
+    // Keep scrolling while the pointer is held still.
+    body.ctx().request_repaint();
 }
 
 /// The band dragged with the primary button: remembered from the press when
@@ -865,6 +894,41 @@ mod tests {
             let (events, _) = drag(&ctx, &view, egui::pos2(x, first.center().y), egui::pos2(x, third.center().y));
             assert!(events.iter().all(|e| band_rows(e).is_none()), "x = {x}");
         }
+    }
+
+    #[test]
+    fn a_band_dragged_past_the_bottom_or_the_top_scrolls_the_list() {
+        use crate::ui::testing::frame;
+        let ctx = egui::Context::default();
+        let names: Vec<String> = (0..300).map(|i| format!("f{i}")).collect();
+        let mut view = listed(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let first = row_rect(&ctx, &mut view, 0);
+        let from = egui::pos2(500.0, first.center().y);
+        let step = |events| match frame(&ctx, events, |ui| show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default())) {
+            Some(ListEvent::Band { end, .. }) => end,
+            _ => panic!("no band"),
+        };
+        frame(&ctx, vec![egui::Event::PointerMoved(from), button(from, true)], |ui| {
+            show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default())
+        });
+        let below = egui::pos2(500.0, 700.0);
+        let mut ends = vec![step(vec![egui::Event::PointerMoved(below)])];
+        for _ in 0..10 {
+            ends.push(step(vec![]));
+        }
+        // A scroll shows on the next frame: the end may stay put for one.
+        assert!(ends.iter().all(|e| e.is_finite()), "{ends:?}");
+        assert!(ends.windows(2).all(|w| w[1] >= w[0]), "held below, the rows keep coming up: {ends:?}");
+        assert!(ends[10] - ends[0] >= 1.0, "at least a row more: {ends:?}");
+        let above = egui::pos2(500.0, 0.0);
+        let mut ends = vec![step(vec![egui::Event::PointerMoved(above)])];
+        for _ in 0..10 {
+            ends.push(step(vec![]));
+        }
+        assert!(ends.iter().all(|e| e.is_finite()), "{ends:?}");
+        // The scroll asked for on the last frame below lands on the first one above.
+        assert!(ends[1..].windows(2).all(|w| w[1] <= w[0]), "held above, they go back down: {ends:?}");
+        assert!(ends[0] - ends[10] >= 1.0, "at least a row less: {ends:?}");
     }
 
     #[test]
