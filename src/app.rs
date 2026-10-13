@@ -225,6 +225,13 @@ impl View {
         self.scroll = Some(Scroll::Smooth);
     }
 
+    /// An arrow key in a view laid out in lines: the cursor to `row` alone.
+    pub fn move_to(&mut self, row: usize) {
+        self.drop_picks();
+        self.selected = Some(row.min(self.rows.len().saturating_sub(1)));
+        self.scroll = Some(Scroll::Smooth);
+    }
+
     /// A plain click: this row alone.
     pub fn select_row(&mut self, row: usize) {
         self.drop_picks();
@@ -801,6 +808,9 @@ pub struct LumenApp {
     sidebar_open: bool,
     /// The view slider's position, shared by every tab.
     view_size: ui::view_size::ViewSize,
+    /// The cells' lines as last drawn, in views laid out in lines (Icons);
+    /// the arrows move through them.
+    grid: Option<ui::grid::GridShape>,
     /// The list's column widths.
     columns: ui::file_list::Widths,
     /// Which list columns are shown.
@@ -878,6 +888,7 @@ impl LumenApp {
             disks: (None, Vec::new()),
             sidebar_open: true,
             view_size: ui::view_size::ViewSize::default(),
+            grid: None,
             columns: ui::file_list::DEFAULT_WIDTHS,
             shown_columns: ui::file_list::ALL_SHOWN,
             column_order: ui::file_list::DEFAULT_ORDER,
@@ -1878,6 +1889,21 @@ impl LumenApp {
         }
     }
 
+    /// Where an arrow key lands in a view laid out in lines: in Icons, Up and
+    /// Down cross the rows and Left and Right walk the cards. `None` in Details.
+    fn grid_target(&self, action: Action) -> Option<usize> {
+        let shape = self.grid?;
+        let last = self.tab.view.rows.len().checked_sub(1)?;
+        let cur = self.tab.view.selected.unwrap_or(0).min(last);
+        Some(match action {
+            Action::Extend(isize::MIN) => 0,
+            Action::Extend(isize::MAX) => last,
+            Action::Move(lines) | Action::Extend(lines) => shape.across(cur, lines),
+            Action::Side(cells) | Action::ExtendSide(cells) => shape.along(cur, cells),
+            _ => return None,
+        })
+    }
+
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::FocusPathBar => self.path_popup.open(),
@@ -1901,8 +1927,19 @@ impl LumenApp {
                     self.go_parent(ctx);
                 }
             }
+            Action::Move(_) | Action::Extend(_) | Action::Side(_) | Action::ExtendSide(_)
+                if let Some(target) = self.grid_target(action) =>
+            {
+                if matches!(action, Action::Extend(_) | Action::ExtendSide(_)) {
+                    self.tab.view.extend_to(target);
+                    self.tab.view.scroll = Some(Scroll::Smooth);
+                } else {
+                    self.tab.view.move_to(target);
+                }
+            }
             Action::Move(_) | Action::First | Action::Last => self.tab.view.move_selection(action),
             Action::Extend(rows) => self.tab.view.extend_by(rows),
+            Action::Side(_) | Action::ExtendSide(_) => {}
             Action::SelectAll => self.tab.view.select_all(),
             Action::Menu => {
                 // Under the cursor row, or mid-window when it is scrolled out of view.
@@ -2129,7 +2166,17 @@ impl eframe::App for LumenApp {
             let scroll = self.tab.view.scroll.take();
             let cut = self.cut_paths().to_vec();
             let sizes = ui::file_list::Sizes { widths: self.columns, shown: self.shown_columns, order: self.column_order };
-            let event = ui::file_list::show(ui, &self.tab.view, &cut, sizes, scroll, self.rename.as_mut(), &self.file_icons);
+            let event = match self.view_size.growth() {
+                Some(growth) => {
+                    let out = ui::icon_grid::show(ui, &self.tab.view, &cut, growth, scroll, self.rename.as_mut(), &self.file_icons);
+                    self.grid = Some(out.shape);
+                    out.event
+                }
+                None => {
+                    self.grid = None;
+                    ui::file_list::show(ui, &self.tab.view, &cut, sizes, scroll, self.rename.as_mut(), &self.file_icons)
+                }
+            };
             // After drawing: the icons the list just asked for go out this frame.
             self.file_icons.poll(&ctx);
             match event {
@@ -3423,6 +3470,40 @@ mod tests {
         app.handle_action(&ctx, Action::ZoomReset);
         assert_eq!(app.view_size, ViewSize::new(0), "Ctrl+0 goes back to Details");
         assert_eq!(ctx.zoom_factor(), 1.0, "the rest of the window never zooms");
+    }
+
+    #[test]
+    fn in_the_icons_view_up_and_down_cross_rows_and_left_right_walk_the_cards() {
+        use ui::grid::GridShape;
+        let (ctx, mut app, _dir) = app_in("app-grid-keys");
+        app.view_size = ui::view_size::ViewSize::new(30);
+        // sub / a.txt b.txt: the folder alone on the first row.
+        app.grid = Some(GridShape::new(2, 1, 3));
+        let mut at = |action| {
+            app.handle_action(&ctx, action);
+            app.tab.view.selected_entry().map(|e| e.name.clone()).unwrap()
+        };
+        assert_eq!(at(Action::First), "sub");
+        assert_eq!(at(Action::Move(1)), "a.txt", "down: same place on the next row");
+        assert_eq!(at(Action::Side(1)), "b.txt");
+        assert_eq!(at(Action::Move(-1)), "sub", "up onto a shorter row: its last card");
+        assert_eq!(at(Action::Side(-1)), "sub", "already the first");
+        assert_eq!(at(Action::Move(5)), "a.txt", "a page down stops on the last row");
+        app.handle_action(&ctx, Action::ExtendSide(1));
+        assert_eq!(app.tab.view.picked_count(), 2, "Shift+Right picks on the way");
+        app.handle_action(&ctx, Action::Extend(isize::MIN));
+        assert_eq!(app.tab.view.selected, Some(0), "Shift+Home: the first card");
+        assert!(app.tab.view.is_picked(0) && app.tab.view.is_picked(1) && !app.tab.view.is_picked(2), "from the anchor a.txt back to sub");
+    }
+
+    #[test]
+    fn in_details_left_and_right_do_not_move_the_selection() {
+        let (ctx, mut app, _dir) = app_in("app-details-side");
+        app.handle_action(&ctx, Action::First);
+        app.handle_action(&ctx, Action::Side(1));
+        assert_eq!(app.tab.view.selected, Some(0));
+        app.handle_action(&ctx, Action::Move(1));
+        assert_eq!(app.tab.view.selected, Some(1), "Down still moves one row");
     }
 
     #[test]

@@ -11,6 +11,11 @@ pub enum Action {
     /// Shift+arrows, PageUp/PageDown, Home/End: move this many rows selecting
     /// the range (`isize::MIN` / `isize::MAX` reach the first / last row).
     Extend(isize),
+    /// Left / Right: this many cells sideways, in views laid out in lines
+    /// (Icons, List); nothing in Details.
+    Side(isize),
+    /// Shift+Left / Shift+Right: the same, selecting the range.
+    ExtendSide(isize),
     /// Ctrl+A: every row shown.
     SelectAll,
     /// Shift+F10: the right-click menu for the selection.
@@ -54,8 +59,8 @@ pub enum Action {
     PrevTab,
     /// Ctrl+D: bookmark the current folder, or remove its bookmark.
     ToggleBookmark,
-    /// Bigger / smaller icons and rows in the list (Ctrl+Plus / Ctrl+Minus,
-    /// Ctrl+wheel); Ctrl+0 goes back to the normal size.
+    /// Move the view slider up / down (Ctrl+Plus / Ctrl+Minus, Ctrl+wheel);
+    /// Ctrl+0 goes back to Details.
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -220,6 +225,8 @@ fn read_keys(ctx: &Context, typing: bool, list: bool) -> Vec<Action> {
         let plain = [
             (Key::ArrowDown, Action::Move(1)),
             (Key::ArrowUp, Action::Move(-1)),
+            (Key::ArrowRight, Action::Side(1)),
+            (Key::ArrowLeft, Action::Side(-1)),
             (Key::PageDown, Action::Move(PAGE)),
             (Key::PageUp, Action::Move(-PAGE)),
             (Key::Home, Action::First),
@@ -246,6 +253,10 @@ fn read_keys(ctx: &Context, typing: bool, list: bool) -> Vec<Action> {
             for (key, rows) in extend {
                 let presses = i.count_and_consume_key(Modifiers::SHIFT, key);
                 actions.extend(std::iter::repeat_n(Action::Extend(rows), presses));
+            }
+            for (key, cells) in [(Key::ArrowRight, 1), (Key::ArrowLeft, -1)] {
+                let presses = i.count_and_consume_key(Modifiers::SHIFT, key);
+                actions.extend(std::iter::repeat_n(Action::ExtendSide(cells), presses));
             }
         }
         // egui ignores extra Shift/Alt when matching, so Shift+Arrow would act
@@ -356,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn alt_arrows_walk_history_and_plain_left_right_do_nothing() {
+    fn alt_arrows_walk_history_and_plain_left_right_step_sideways() {
         let actions = actions_for(vec![
             key(Key::ArrowLeft, Modifiers::ALT),
             key(Key::ArrowRight, Modifiers::ALT),
@@ -366,7 +377,7 @@ mod tests {
             key(Key::ArrowLeft, Modifiers::NONE),
             key(Key::ArrowRight, Modifiers::NONE),
         ]);
-        assert_eq!(actions, []);
+        assert_eq!(actions, [Action::Side(1), Action::Side(-1)], "in key-table order; the app ignores them in Details");
     }
 
     #[test]
@@ -488,6 +499,17 @@ mod tests {
 
     fn wheel(unit: MouseWheelUnit, y: f32, modifiers: Modifiers) -> Event {
         Event::MouseWheel { unit, delta: egui::vec2(0.0, y), modifiers, phase: egui::TouchPhase::Move }
+    }
+
+    #[test]
+    fn left_and_right_step_sideways_and_with_shift_select_on_the_way() {
+        assert_eq!(actions_for(vec![key(Key::ArrowRight, Modifiers::NONE)]), [Action::Side(1)]);
+        assert_eq!(actions_for(vec![key(Key::ArrowLeft, Modifiers::NONE)]), [Action::Side(-1)]);
+        let shift = |k| vec![Event::ModifiersChanged(Modifiers::SHIFT), key(k, Modifiers::SHIFT)];
+        assert_eq!(actions_for(shift(Key::ArrowRight)), [Action::ExtendSide(1)]);
+        assert_eq!(actions_for(shift(Key::ArrowLeft)), [Action::ExtendSide(-1)]);
+        assert_eq!(actions_for(vec![key(Key::ArrowLeft, Modifiers::ALT)]), [Action::Back], "Alt+Left is still Back");
+        assert_eq!(actions_for(vec![key(Key::ArrowDown, Modifiers::NONE)]), [Action::Move(1)], "Down unchanged");
     }
 
     #[test]
