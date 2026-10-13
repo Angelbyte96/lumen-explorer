@@ -323,12 +323,15 @@ mod tests {
     use super::*;
 
     /// Test fixtures live only under ~/pruebas-explorador (project safety rule).
+    /// Made again on every run, so nothing an older run left is crawled.
     fn fixture(name: &str) -> PathBuf {
         let root = crate::fs::home_dir()
             .expect("HOME must be set")
             .join("pruebas-explorador")
             .join("test-fixtures")
             .join(name);
+        // remove_dir_all never follows the fixture's link out of it.
+        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root
     }
@@ -347,9 +350,7 @@ mod tests {
             std::fs::write(root.join("docs").join(skipped).join("inside.txt"), "x").unwrap();
         }
         #[cfg(unix)]
-        if !root.join("link").exists() {
-            std::os::unix::fs::symlink(root.join("docs"), root.join("link")).unwrap();
-        }
+        std::os::unix::fs::symlink(root.join("docs"), root.join("link")).unwrap();
         root
     }
 
