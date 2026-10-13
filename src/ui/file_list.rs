@@ -21,6 +21,9 @@ pub enum ListEvent {
     Extend(usize),
     /// Right click on the row: its menu.
     Menu(usize),
+    /// A band dragged from a row's empty part or below the rows, in row units
+    /// (row `i` spans `[i, i + 1)`): sent on every frame the pointer drags it.
+    Band { start: f32, end: f32 },
     /// A click below the rows; `menu` for a right click.
     Empty { menu: bool },
     Activate(usize),
@@ -148,6 +151,13 @@ pub fn show(
         _ => sizes.widths,
     };
     let mut cells = [egui::Rect::NOTHING; COLUMNS.len()];
+    // From the rows: one drawn row's index and top, to turn a height on
+    // screen into row units; and whether the button went down here on a
+    // row's empty part (not its icon or name), where a band may start.
+    let pitch = row_height + ui.spacing().item_spacing.y;
+    let mut first_drawn: Option<(usize, f32)> = None;
+    let mut band_may_start = false;
+    let pressed = ui.input(|i| i.pointer.primary_pressed());
 
     egui::ScrollArea::horizontal().id_salt("lumen_list_columns").auto_shrink(false).show(ui, |ui| {
         let mut table = TableBuilder::new(ui)
@@ -198,6 +208,7 @@ pub fn show(
                 body.rows(row_height, rows.len(), |mut row| {
                     let i = row.index();
                     let entry = &entries[rows[i]];
+                    let mut on_name = false;
                     row.set_selected(if multi { view.is_picked(i) } else { selected == Some(i) });
                     let counts = count_cells(entry, totals.get(&entry.name));
                     for &column in &shown {
@@ -217,9 +228,11 @@ pub fn show(
                                         if let Some(submit) = rename_field(ui, edit) {
                                             event = Some(ListEvent::RenameEnded(submit));
                                         }
-                                        return;
+                                    } else {
+                                        name_label(ui, entry, view.filter());
                                     }
-                                    name_label(ui, entry, view.filter());
+                                    // The icon and the name: kept for dragging the entry itself.
+                                    on_name = ui.input(|i| i.pointer.press_origin()).is_some_and(|p| ui.min_rect().contains(p));
                                 });
                             }
                             1 => {
@@ -233,6 +246,10 @@ pub fn show(
                         });
                     }
                     let response = row.response();
+                    first_drawn.get_or_insert((i, response.rect.top()));
+                    if pressed && response.is_pointer_button_down_on() && !on_name {
+                        band_may_start = true;
+                    }
                     if selected == Some(i) {
                         response.ctx.data_mut(|d| d.insert_temp(cursor_row_id(), response.rect));
                     }
@@ -259,14 +276,62 @@ pub fn show(
         let rest = ui.available_rect_before_wrap();
         if event.is_none() && rest.height() > 0.0 {
             let response = ui.interact(rest, egui::Id::new("lumen_list_empty"), egui::Sense::click());
+            if pressed && response.is_pointer_button_down_on() {
+                band_may_start = true;
+            }
             if response.clicked() {
                 event = Some(ListEvent::Empty { menu: false });
             } else if response.secondary_clicked() {
                 event = Some(ListEvent::Empty { menu: true });
             }
         }
+        if let Some((row, top)) = first_drawn
+            && let Some(band) = band(ui, pressed, band_may_start, |y| row as f32 + (y - top) / pitch, |u| top + (u - row as f32) * pitch)
+        {
+            event = Some(band);
+        }
     });
     event
+}
+
+/// Where a band dragged over the rows started: in row units, so a scroll
+/// does not move it, and the x on screen.
+#[derive(Clone, Copy)]
+struct BandStart {
+    at: f32,
+    x: f32,
+}
+
+fn band_id() -> egui::Id {
+    egui::Id::new("lumen_list_band")
+}
+
+/// The band dragged with the primary button: remembered from the press when
+/// `may_start`, drawn and reported while the pointer drags it, forgotten once
+/// the button is up. `unit` turns a height on screen into row units, `y` back.
+fn band(ui: &egui::Ui, pressed: bool, may_start: bool, unit: impl Fn(f32) -> f32, y: impl Fn(f32) -> f32) -> Option<ListEvent> {
+    let (origin, down, dragging, pointer) =
+        ui.input(|i| (i.pointer.press_origin(), i.pointer.primary_down(), i.pointer.is_decidedly_dragging(), i.pointer.latest_pos()));
+    if pressed {
+        let start = origin.filter(|_| may_start).map(|p| BandStart { at: unit(p.y), x: p.x });
+        ui.ctx().data_mut(|d| {
+            if let Some(start) = start {
+                d.insert_temp(band_id(), start);
+            } else {
+                d.remove::<BandStart>(band_id());
+            }
+        });
+    }
+    let start = ui.ctx().data(|d| d.get_temp::<BandStart>(band_id()))?;
+    if !down {
+        ui.ctx().data_mut(|d| d.remove::<BandStart>(band_id()));
+        return None;
+    }
+    let pointer = pointer.filter(|_| dragging)?;
+    let rect = egui::Rect::from_two_pos(egui::pos2(start.x, y(start.at)), pointer);
+    let selection = ui.visuals().selection;
+    ui.painter().rect(rect, 0.0, selection.bg_fill.gamma_multiply(0.3), selection.stroke, egui::StrokeKind::Inside);
+    Some(ListEvent::Band { start: start.at, end: unit(pointer.y) })
 }
 
 /// The width that shows every cell of `column` and its header whole, for
@@ -707,6 +772,114 @@ mod tests {
         assert!(matches!(left, Some(ListEvent::Empty { menu: false })), "left click");
         let right = frame(&ctx, press(below, egui::PointerButton::Secondary), &mut draw);
         assert!(matches!(right, Some(ListEvent::Empty { menu: true })), "right click");
+    }
+
+    /// Where the row `row` of `view` is drawn once settled.
+    fn row_rect(ctx: &egui::Context, view: &mut View, row: usize) -> egui::Rect {
+        use crate::ui::testing::frame;
+        let was = view.selected.replace(row);
+        for _ in 0..2 {
+            frame(ctx, vec![], |ui| show(ui, view, &[], Sizes::default(), None, None, &FileIcons::default()));
+        }
+        view.selected = was;
+        cursor_row_rect(ctx).expect("row drawn")
+    }
+
+    /// A drag with the primary button from `from` through `to`: the list's
+    /// event on each frame from the press to the release, and what was
+    /// painted while the pointer was at `to`.
+    fn drag(ctx: &egui::Context, view: &View, from: egui::Pos2, to: egui::Pos2) -> (Vec<Option<ListEvent>>, Vec<egui::epaint::ClippedShape>) {
+        let steps = vec![
+            vec![egui::Event::PointerMoved(from), button(from, true)],
+            vec![egui::Event::PointerMoved(from + egui::vec2(0.0, 10.0 * (to.y - from.y).signum()))],
+            vec![egui::Event::PointerMoved(to)],
+            vec![button(to, false)],
+        ];
+        let (mut events, mut shapes) = (Vec::new(), Vec::new());
+        for (i, step) in steps.into_iter().enumerate() {
+            let mut event = None;
+            let mut output = ctx.run_ui(
+                egui::RawInput { events: step, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        event = show(ui, view, &[], Sizes::default(), None, None, &FileIcons::default());
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            if i == 2 {
+                shapes = output.shapes;
+            }
+            events.push(event);
+        }
+        (events, shapes)
+    }
+
+    /// The band's start and end rows, when `event` is a band.
+    fn band_rows(event: &Option<ListEvent>) -> Option<(f32, f32)> {
+        match event {
+            Some(ListEvent::Band { start, end }) => Some((start.floor(), end.floor())),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_drag_from_a_rows_empty_part_bands_the_rows_it_crosses_and_draws_the_band() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["a.txt", "b.txt", "c.txt", "d.txt"]);
+        let (first, third) = (row_rect(&ctx, &mut view, 0), row_rect(&ctx, &mut view, 2));
+        // In the Date Modified column: no icon or name there.
+        let (from, to) = (egui::pos2(500.0, first.center().y), egui::pos2(520.0, third.center().y));
+        let (events, shapes) = drag(&ctx, &view, from, to);
+        assert_eq!(band_rows(&events[2]), Some((0.0, 2.0)), "{:?}", events.iter().map(band_rows).collect::<Vec<_>>());
+        assert!(events[3].is_none(), "letting go is not a click on the row");
+        let band = shapes.iter().any(|s| match &s.shape {
+            egui::Shape::Rect(r) => {
+                (r.rect.top() - from.y).abs() < 1.0 && (r.rect.bottom() - to.y).abs() < 1.0 && (r.rect.left() - from.x).abs() < 1.0 && (r.rect.right() - to.x).abs() < 1.0
+            }
+            _ => false,
+        });
+        assert!(band, "the band is drawn from the press to the pointer");
+        // Dragged back upwards: the start stays on the first row.
+        let (events, _) = drag(&ctx, &view, to, from);
+        assert_eq!(band_rows(&events[2]), Some((2.0, 0.0)));
+    }
+
+    #[test]
+    fn a_drag_from_below_the_rows_bands_up_to_the_pointer() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["a.txt", "b.txt", "c.txt"]);
+        let second = row_rect(&ctx, &mut view, 1);
+        let (events, _) = drag(&ctx, &view, egui::pos2(300.0, 500.0), egui::pos2(300.0, second.center().y));
+        let (start, end) = band_rows(&events[2]).expect("a band");
+        assert!(start >= 3.0, "starts below the last row: {start}");
+        assert_eq!(end, 1.0);
+    }
+
+    #[test]
+    fn a_drag_on_the_icon_or_the_name_is_not_a_band() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["a.txt", "b.txt", "c.txt"]);
+        let (first, third) = (row_rect(&ctx, &mut view, 0), row_rect(&ctx, &mut view, 2));
+        for x in [first.left() + 4.0, first.left() + 30.0] {
+            let (events, _) = drag(&ctx, &view, egui::pos2(x, first.center().y), egui::pos2(x, third.center().y));
+            assert!(events.iter().all(|e| band_rows(e).is_none()), "x = {x}");
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_rows_empty_part_still_selects_it() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["a.txt", "b.txt"]);
+        let second = row_rect(&ctx, &mut view, 1);
+        let at = egui::pos2(500.0, second.center().y);
+        crate::ui::testing::frame(&ctx, vec![egui::Event::PointerMoved(at)], |ui| {
+            show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default())
+        });
+        let clicked = crate::ui::testing::frame(&ctx, press(at, egui::PointerButton::Primary), |ui| {
+            show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default())
+        });
+        assert!(matches!(clicked, Some(ListEvent::Select(1))));
     }
 
     /// How opaque the first letter of `name` was painted, with `cut` waiting to be pasted.

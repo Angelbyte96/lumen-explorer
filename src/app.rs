@@ -2130,6 +2130,7 @@ impl eframe::App for LumenApp {
                     }
                 }
                 Some(ListEvent::Extend(i)) => self.tab.view.extend_to(i),
+                Some(ListEvent::Band { start, end }) => self.tab.view.select_band(start, end),
                 Some(ListEvent::Activate(i)) => {
                     self.tab.view.select_row(i);
                     self.activate_selected(&ctx);
