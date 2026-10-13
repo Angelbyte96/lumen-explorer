@@ -34,67 +34,104 @@ pub struct Status<'a> {
     pub view: ViewSize,
 }
 
-/// Draws the bar; returns the view picked with its button this frame.
-pub fn show(ui: &mut egui::Ui, status: &Status<'_>) -> Option<ViewSize> {
-    let mut picked = None;
-    ui.horizontal(|ui| {
-        filter_bar(ui, status.filter, status.item_count, status.caret);
-        ui.separator();
-        ui.label(count_text(status.item_count, !status.filter.is_empty()));
-        if status.hidden_count > 0 && !status.show_hidden {
-            ui.weak(format!("({} hidden, Ctrl+H to show)", status.hidden_count));
-        }
-        if let Some(elapsed) = status.last_elapsed {
-            ui.separator();
-            ui.label(format!("listed in {:.2} ms", elapsed.as_secs_f64() * 1000.0));
-        }
-        if status.loading {
-            ui.separator();
-            ui.spinner();
-            ui.label("Loading…");
-        }
-        if let Some(job) = &status.job {
-            ui.separator();
-            ui.spinner();
-            ui.label(job);
-            ui.weak("Esc to cancel");
-        }
-        if let Some(counting) = &status.counting {
-            ui.separator();
-            ui.spinner();
-            ui.label(counting);
-            ui.weak("Esc to cancel");
-        }
-        if let Some(picked) = picked_text(status.picked, &status.picked_size) {
-            ui.separator();
-            ui.strong(picked);
-        }
-        if let Some(notice) = status.notice {
-            ui.separator();
-            ui.label(notice);
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            picked = crate::ui::view_picker::show(ui, status.view);
-            ui.separator();
-            ui.label(position_text(status.selected, status.item_count))
-                .on_hover_text("Selected row / rows shown");
-            crate::ui::icons::file(ui);
-            ui.add_space(8.0);
-            ui.label(status.folder_count.to_string()).on_hover_text("Folders shown");
-            crate::ui::icons::folder(ui);
-            // Laid out after the counters so it gets only the space left between
-            // them and the rest of the bar; a cut-short label shows its full text on hover.
-            if let Some(error) = status.error {
-                ui.add_space(8.0);
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.separator();
-                    let text = egui::RichText::new(error).color(ui.visuals().error_fg_color);
-                    ui.add(egui::Label::new(text).truncate());
-                });
-            }
+/// Room the islands take below the list: one island and its air.
+pub fn island_room(ctx: &egui::Context) -> f32 {
+    let text = ctx.global_style().text_styles[&egui::TextStyle::Body].size;
+    text.max(14.0) + 2.0 * (ISLAND_MARGIN as f32 + EDGE) + 6.0
+}
+
+/// Air between an island and the list's edges.
+const EDGE: f32 = 6.0;
+const ISLAND_MARGIN: i8 = 4;
+
+/// An island's frame: rounded, raised over the list like File Pilot's.
+fn island(ctx: &egui::Context) -> egui::Frame {
+    let style = ctx.global_style();
+    egui::Frame::new()
+        .fill(style.visuals.window_fill)
+        .stroke(style.visuals.widgets.noninteractive.bg_stroke)
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::symmetric(8, ISLAND_MARGIN))
+}
+
+/// Floating over the bottom of `area` (the list's panel), like File Pilot:
+/// the filter at the left; the counters, the view button and its percent at
+/// the right; progress, notices and errors above that, only while there is
+/// one. Returns the view picked with its button this frame.
+pub fn show(ctx: &egui::Context, area: egui::Rect, status: &Status<'_>) -> Option<ViewSize> {
+    let corner = |id: &str, pivot: egui::Align2, at: egui::Pos2| egui::Area::new(egui::Id::new(id)).order(egui::Order::Middle).fade_in(false).pivot(pivot).fixed_pos(at);
+    corner("lumen_island_filter", egui::Align2::LEFT_BOTTOM, area.left_bottom() + egui::vec2(EDGE, -EDGE)).show(ctx, |ui| {
+        island(ctx).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                filter_bar(ui, status.filter, status.item_count, status.caret);
+                if !status.filter.is_empty() {
+                    ui.weak(count_text(status.item_count, true));
+                }
+                if status.hidden_count > 0 && !status.show_hidden {
+                    ui.weak(format!("({} hidden, Ctrl+H to show)", status.hidden_count));
+                }
+            });
         });
     });
+    let mut picked = None;
+    let counters = corner("lumen_island_view", egui::Align2::RIGHT_BOTTOM, area.right_bottom() + egui::vec2(-EDGE, -EDGE)).show(ctx, |ui| {
+        island(ctx).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if let Some(picked) = picked_text(status.picked, &status.picked_size) {
+                    ui.strong(picked);
+                    ui.separator();
+                }
+                crate::ui::icons::folder(ui);
+                ui.label(status.folder_count.to_string()).on_hover_text("Folders shown");
+                ui.add_space(6.0);
+                crate::ui::icons::file(ui);
+                let listed = status.last_elapsed.map(|e| format!("\nListed in {:.2} ms", e.as_secs_f64() * 1000.0)).unwrap_or_default();
+                ui.label(position_text(status.selected, status.item_count))
+                    .on_hover_text(format!("Selected row / rows shown ({}){listed}", count_text(status.item_count, false)));
+                ui.separator();
+                picked = crate::ui::view_picker::show(ui, status.view);
+            });
+        });
+    });
+    note(ctx, area, counters.response.rect.top(), status);
     picked
+}
+
+/// Progress, notices and errors: floating above the right island while any is
+/// there. A long error is cut to fit and shows whole on hover.
+fn note(ctx: &egui::Context, area: egui::Rect, above: f32, status: &Status<'_>) {
+    let busy = status.loading || status.job.is_some() || status.counting.is_some();
+    if !busy && status.notice.is_none() && status.error.is_none() {
+        return;
+    }
+    let at = egui::pos2(area.right() - EDGE, above - EDGE);
+    egui::Area::new(egui::Id::new("lumen_island_note")).order(egui::Order::Middle).fade_in(false).pivot(egui::Align2::RIGHT_BOTTOM).fixed_pos(at).show(ctx, |ui| {
+        ui.set_max_width(area.width() - 2.0 * EDGE - 24.0);
+        island(ctx).show(ui, |ui| {
+            ui.vertical(|ui| {
+                if status.loading {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Loading…");
+                    });
+                }
+                for running in [&status.job, &status.counting].into_iter().flatten() {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(running);
+                        ui.weak("Esc to cancel");
+                    });
+                }
+                if let Some(notice) = status.notice {
+                    ui.label(notice);
+                }
+                if let Some(error) = status.error {
+                    let text = egui::RichText::new(error).color(ui.visuals().error_fg_color);
+                    ui.add(egui::Label::new(text).truncate());
+                }
+            });
+        });
+    });
 }
 
 /// Always-visible filter at the bottom left. It is drawn, not a text field:
@@ -212,8 +249,9 @@ mod tests {
             view: ViewSize::default(),
         };
         let mut shapes = Vec::new();
-        for _ in 0..2 {
-            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| { show(ui, &status); });
+        // An island sizes itself on its first frame, unseen.
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| { show(ui.ctx(), ui.max_rect(), &status); });
             output.textures_delta.clear();
             shapes = output.shapes;
         }
@@ -231,6 +269,55 @@ mod tests {
             _ => None,
         });
         (text, cursor)
+    }
+
+    #[test]
+    fn the_filter_and_the_counters_float_in_the_lists_bottom_corners_inside_the_room_left_for_them() {
+        let ctx = egui::Context::default();
+        let status = Status {
+            filter: "",
+            caret: false,
+            item_count: 9,
+            hidden_count: 0,
+            show_hidden: false,
+            loading: false,
+            last_elapsed: None,
+            error: None,
+            job: None,
+            notice: None,
+            counting: None,
+            folder_count: 2,
+            selected: None,
+            picked: 0,
+            picked_size: PickedSize::default(),
+            view: ViewSize::default(),
+        };
+        let area = egui::Rect::from_min_max(egui::pos2(200.0, 50.0), egui::pos2(900.0, 650.0));
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                show(ui.ctx(), area, &status);
+            });
+            output.textures_delta.clear();
+            texts = output
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Text(t) => Some((t.galley.text().to_owned(), t.galley.rect.translate(t.pos.to_vec2()))),
+                    _ => None,
+                })
+                .collect();
+        }
+        let find = |text: &str| texts.iter().find(|(t, _)| t == text).unwrap_or_else(|| panic!("{text:?} in {texts:?}")).1;
+        let room = island_room(&ctx);
+        let (filter, position, view) = (find(&filter_placeholder(9)), find("0/9"), find("Details"));
+        assert!(filter.left() < area.left() + 60.0, "filter at the left, after its magnifier: {filter:?}");
+        assert!(view.right() > area.right() - 80.0 && position.right() < view.left(), "counters, then the view, at the right");
+        for rect in [filter, position, view] {
+            assert!(rect.top() > area.bottom() - room && rect.bottom() < area.bottom(), "{rect:?} inside the bottom {room} points");
+        }
+        assert!(!texts.iter().any(|(t, _)| t == "Loading…"), "no note while nothing runs");
     }
 
     #[test]
@@ -298,7 +385,7 @@ mod tests {
             if let Some(pos) = pointer {
                 input.events.push(egui::Event::PointerMoved(pos));
             }
-            let mut output = ctx.run_ui(input, |ui| { show(ui, &status); });
+            let mut output = ctx.run_ui(input, |ui| { show(ui.ctx(), ui.max_rect(), &status); });
             output.textures_delta.clear();
             shapes = output.shapes;
         }
@@ -319,7 +406,8 @@ mod tests {
         let (_, error, elided) = texts.iter().find(|(t, ..)| t.starts_with("Cannot rename")).expect("error painted");
         let (_, position, _) = texts.iter().find(|(t, ..)| t == "0/9").expect("position painted");
         assert!(*elided, "shortened with an ellipsis");
-        assert!(error.right() <= position.left(), "leaves the counters visible: {error:?} vs {position:?}");
+        assert!(error.bottom() <= position.top(), "floats above the counters, leaving them visible: {error:?} vs {position:?}");
+        assert!(error.right() <= 640.0, "inside the window");
         assert!(!texts.iter().any(|(t, _, elided)| t == LONG_ERROR && !elided), "no tooltip without hover");
 
         let hovered = painted_narrow(Some(error.center()));

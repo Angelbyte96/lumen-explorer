@@ -18,25 +18,49 @@ fn popup_id() -> egui::Id {
     egui::Id::new("lumen_view_picker")
 }
 
-/// Draws the button; with the panel open, the slider too. Returns the
+fn panel_rect_id() -> egui::Id {
+    popup_id().with("rect")
+}
+
+/// Draws the button: icon, name and percent, left to right. The panel opens
+/// on hover or click and closes once the pointer leaves the button and the
+/// panel (not while the knob is held), or on a click outside. Returns the
 /// position picked this frame.
 pub fn show(ui: &mut egui::Ui, size: ViewSize) -> Option<ViewSize> {
     let mut picked = None;
-    // Right to left: the percent box at the edge, then icon and name.
-    let percent = percent_box(ui, size);
-    let name = ui.add(egui::Button::new(size.name()).frame(false)).on_hover_text("View (Ctrl+wheel)");
+    let ctx = ui.ctx().clone();
     let icon_side = ui.text_style_height(&egui::TextStyle::Body);
     let (icon_rect, icon) = ui.allocate_exact_size(vec2(icon_side, icon_side), egui::Sense::click());
     paint_icon(ui.painter(), icon_rect, size.layout(), ui.visuals().text_color());
+    let name = ui.add(egui::Button::new(size.name()).frame(false)).on_hover_text("View (Ctrl+wheel)");
+    let percent = percent_box(ui, size);
     let anchor = name.rect.union(icon.rect).union(percent.rect);
-    if name.clicked() || icon.clicked() || percent.clicked() {
-        egui::Popup::toggle_id(ui.ctx(), popup_id());
+    let open = egui::Popup::is_id_open(&ctx, popup_id());
+    let over_anchor = name.hovered() || icon.hovered() || percent.hovered();
+    if !open && (over_anchor || name.clicked() || icon.clicked() || percent.clicked()) {
+        egui::Popup::open_id(&ctx, popup_id());
+    } else if open && !over_anchor {
+        // The panel and the gap up to it, from the last frame.
+        let panel = ctx.data(|d| d.get_temp::<Rect>(panel_rect_id())).map_or(anchor, |p| p.union(anchor));
+        let pointer = ctx.input(|i| i.pointer.latest_pos());
+        let held = ctx.input(|i| i.pointer.any_down());
+        if !held && pointer.is_none_or(|p| !panel.expand(4.0).contains(p)) {
+            egui::Popup::close_id(&ctx, popup_id());
+        }
     }
-    egui::Popup::new(popup_id(), ui.ctx().clone(), anchor, ui.layer_id())
+    let shown = egui::Popup::new(popup_id(), ctx.clone(), anchor, ui.layer_id())
         .open_memory(None)
         .align(egui::RectAlign::TOP_END)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| picked = panel(ui, size));
+    match shown {
+        Some(inner) => {
+            ctx.data_mut(|d| d.insert_temp(panel_rect_id(), inner.response.rect));
+        }
+        None => {
+            ctx.data_mut(|d| d.remove::<Rect>(panel_rect_id()));
+        }
+    }
     picked
 }
 
@@ -188,7 +212,7 @@ mod tests {
         let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
         let mut output = ctx.run_ui(input, |ui| {
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Max), |ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| picked = show(ui, size));
+                ui.horizontal(|ui| picked = show(ui, size));
             });
         });
         output.textures_delta.clear();
@@ -219,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn the_button_shows_the_views_name_and_percent_and_a_click_opens_the_six_views() {
+    fn the_button_shows_the_views_icon_name_and_percent_and_a_click_opens_the_six_views() {
         let ctx = egui::Context::default();
         let size = ViewSize::new(65);
         let (_, texts) = run(&ctx, size, vec![]);
@@ -234,6 +258,27 @@ mod tests {
         assert!(heights.windows(2).all(|w| w[0] > w[1]), "Details at the bottom: {heights:?}");
         assert!(heights[4] - heights[5] > 2.0 * (heights[0] - heights[1]), "XL far above L: {heights:?}");
         assert!(heights.iter().all(|y| *y < name.top()), "above the button");
+    }
+
+    #[test]
+    fn hovering_the_button_opens_the_panel_and_leaving_both_closes_it() {
+        let ctx = egui::Context::default();
+        let size = ViewSize::new(0);
+        let (_, texts) = run(&ctx, size, vec![]);
+        let name = find(&texts, "Details");
+        let shown = |texts: &[(String, Rect)]| texts.iter().any(|(t, _)| t == "XL Icons");
+        run(&ctx, size, vec![egui::Event::PointerMoved(name.center())]);
+        let (_, texts) = run(&ctx, size, vec![]);
+        assert!(shown(&texts), "open on hover");
+        // Up through the gap into the panel: it stays open.
+        let xl = find(&texts, "XL Icons");
+        run(&ctx, size, vec![egui::Event::PointerMoved(pos2(xl.center().x, name.top() - 3.0))]);
+        run(&ctx, size, vec![egui::Event::PointerMoved(xl.center())]);
+        let (_, texts) = run(&ctx, size, vec![]);
+        assert!(shown(&texts), "still open over the panel");
+        run(&ctx, size, vec![egui::Event::PointerMoved(pos2(5.0, 5.0))]);
+        let (_, texts) = run(&ctx, size, vec![]);
+        assert!(!shown(&texts), "closed once the pointer left both");
     }
 
     #[test]

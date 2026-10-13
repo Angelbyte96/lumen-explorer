@@ -2084,42 +2084,6 @@ impl eframe::App for LumenApp {
             ui.add_space(2.0);
         });
 
-        egui::Panel::bottom("status_bar").show(ui, |ui| {
-            let picked = ui::status_bar::show(
-                ui,
-                &Status {
-                    filter: self.tab.view.filter(),
-                    caret: !self.path_popup.is_open() && self.rename.is_none(),
-                    item_count: self.tab.view.rows.len(),
-                    hidden_count: self.tab.view.hidden_count(),
-                    show_hidden: self.tab.view.show_hidden,
-                    loading: self.tab.lister.is_pending(self.tab.shown_id),
-                    last_elapsed: self.tab.view.last_elapsed,
-                    error: self.tab.view.error.as_deref(),
-                    job: self
-                        .job
-                        .as_ref()
-                        .map(|r| {
-                            let item = self.batch.as_ref().and_then(Batch::item);
-                            ui::status_bar::progress_text(r.job.mode, &r.job.progress, item)
-                        }),
-                    notice: self.notice.as_deref(),
-                    folder_count: self.tab.view.folder_count(),
-                    selected: self.tab.view.selected,
-                    picked: self.tab.view.picked_count(),
-                    picked_size: self.tab.view.picked_size(),
-                    counting: self.counting.as_ref().map(|c| {
-                        let name = file_name(&c.path).unwrap_or_default();
-                        ui::status_bar::counting_text(&name, &c.progress)
-                    }),
-                    view: self.view_size,
-                },
-            );
-            if let Some(view) = picked {
-                self.view_size = view;
-            }
-        });
-
         if self.sidebar_open {
             self.refresh_disks();
             ctx.request_repaint_after(DISKS_INTERVAL);
@@ -2167,6 +2131,8 @@ impl eframe::App for LumenApp {
         }
 
         let list = egui::CentralPanel::default_margins().show(ui, |ui| {
+            // Room at the bottom for the floating islands, so they never hide a row.
+            ui.set_max_height(ui.available_height() - ui::status_bar::island_room(&ctx));
             let scroll = self.tab.view.scroll.take();
             let cut = self.cut_paths().to_vec();
             let sizes = ui::file_list::Sizes { widths: self.columns, shown: self.shown_columns, order: self.column_order };
@@ -2225,6 +2191,42 @@ impl eframe::App for LumenApp {
                 None => {}
             }
         });
+
+        // Floating over the list's bottom, in the room left for them there.
+        let picked = ui::status_bar::show(
+            &ctx,
+            list.response.rect,
+            &Status {
+                filter: self.tab.view.filter(),
+                caret: !self.path_popup.is_open() && self.rename.is_none(),
+                item_count: self.tab.view.rows.len(),
+                hidden_count: self.tab.view.hidden_count(),
+                show_hidden: self.tab.view.show_hidden,
+                loading: self.tab.lister.is_pending(self.tab.shown_id),
+                last_elapsed: self.tab.view.last_elapsed,
+                error: self.tab.view.error.as_deref(),
+                job: self
+                    .job
+                    .as_ref()
+                    .map(|r| {
+                        let item = self.batch.as_ref().and_then(Batch::item);
+                        ui::status_bar::progress_text(r.job.mode, &r.job.progress, item)
+                    }),
+                notice: self.notice.as_deref(),
+                folder_count: self.tab.view.folder_count(),
+                selected: self.tab.view.selected,
+                picked: self.tab.view.picked_count(),
+                picked_size: self.tab.view.picked_size(),
+                counting: self.counting.as_ref().map(|c| {
+                    let name = file_name(&c.path).unwrap_or_default();
+                    ui::status_bar::counting_text(&name, &c.progress)
+                }),
+                view: self.view_size,
+            },
+        );
+        if let Some(view) = picked {
+            self.view_size = view;
+        }
 
         #[cfg(windows)]
         self.poll_shell_menu();
