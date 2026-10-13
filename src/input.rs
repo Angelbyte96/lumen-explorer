@@ -91,19 +91,39 @@ pub fn read_confirm(ctx: &Context) -> Option<Confirm> {
 /// Rows jumped by PageUp/PageDown.
 const PAGE: isize = 20;
 
-/// Reads this frame's shortcuts. List navigation keys are ignored while a text
-/// field (the path bar) has keyboard focus, so typing never moves the selection.
-/// Only text fields count: a row focused with Tab must not swallow the arrows.
+/// Reads this frame's shortcuts. The list's keys (arrows, Enter, Delete, typed
+/// letters, the clipboard...) reach it only while it holds the keys: with
+/// another part of the window focused they stay there, so moving through the
+/// side panel never moves the selection. Window shortcuts work anywhere but in
+/// a text field, which keeps all but Ctrl+L.
 pub fn read_actions(ctx: &Context) -> Vec<Action> {
     let typing = ctx.text_edit_focused();
-    let mut actions = read_keys(ctx, typing);
-    if !typing {
-        // Outside `input_mut`: egui's context lock is not reentrant.
-        let events = ctx.input(|i| i.events.clone());
+    let list = list_has_keys(ctx);
+    let mut actions = read_keys(ctx, typing, list);
+    // Outside `input_mut`: egui's context lock is not reentrant.
+    let events = ctx.input(|i| i.events.clone());
+    if list {
         actions.extend(clipboard_actions(ctx, &events));
+    }
+    if !typing {
         actions.extend(wheel_zoom(ctx, &events));
     }
     actions
+}
+
+/// The list holds the keys while it has the keyboard focus or nothing has.
+/// egui drops the focus on Escape before the app reads the keys: that Escape
+/// only gave the keys back, so it must not also clear the filter.
+fn list_has_keys(ctx: &Context) -> bool {
+    let last_id = Id::new("lumen_focus_last_frame");
+    let now = ctx.memory(|m| m.focused());
+    let before = ctx.data(|d| d.get_temp::<Option<Id>>(last_id)).flatten();
+    ctx.data_mut(|d| d.insert_temp(last_id, now));
+    let list = crate::ui::file_list::focus_id();
+    if now.is_none() && before.is_some_and(|id| id != list) {
+        ctx.input_mut(|i| i.events.retain(|e| !matches!(e, Event::Key { key: Key::Escape, .. })));
+    }
+    now.is_none_or(|id| id == list)
 }
 
 /// Touchpad scrolling, in points, needed for one zoom level.
@@ -135,7 +155,7 @@ fn wheel_zoom(ctx: &Context, events: &[Event]) -> Vec<Action> {
     actions
 }
 
-fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
+fn read_keys(ctx: &Context, typing: bool, list: bool) -> Vec<Action> {
     ctx.input_mut(|i| {
         let mut actions = Vec::new();
         if i.consume_key(Modifiers::COMMAND, Key::L) {
@@ -146,9 +166,6 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
         }
         if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::N) {
             actions.push(Action::NewFolder);
-        }
-        if i.consume_key(Modifiers::COMMAND, Key::A) {
-            actions.push(Action::SelectAll);
         }
         if i.consume_key(Modifiers::COMMAND, Key::H) {
             actions.push(Action::ToggleHidden);
@@ -193,6 +210,12 @@ fn read_keys(ctx: &Context, typing: bool) -> Vec<Action> {
         }
         if i.consume_key(Modifiers::COMMAND, Key::Num0) {
             actions.push(Action::ZoomReset);
+        }
+        if !list {
+            return actions;
+        }
+        if i.consume_key(Modifiers::COMMAND, Key::A) {
+            actions.push(Action::SelectAll);
         }
         let plain = [
             (Key::ArrowDown, Action::Move(1)),
@@ -579,5 +602,103 @@ mod tests {
             key(Key::Backspace, Modifiers::NONE),
         ]);
         assert_eq!(actions, [Action::Move(1), Action::GoParent]);
+    }
+
+    /// A frame like the app's: the keys are read before a button is drawn;
+    /// `focus` puts the keyboard focus on that button.
+    fn with_button(ctx: &Context, events: Vec<Event>, focus: bool) -> Vec<Action> {
+        let mut actions = Vec::new();
+        ctx.run_ui(RawInput { events, ..RawInput::default() }, |ui| {
+            actions = read_actions(ui.ctx());
+            let button = ui.button("other part");
+            if focus {
+                button.request_focus();
+            }
+        })
+        .drop_without_applying_deltas();
+        actions
+    }
+
+    /// A context whose keyboard focus sits on a button, not on the list.
+    fn focused_elsewhere() -> Context {
+        let ctx = Context::default();
+        with_button(&ctx, Vec::new(), true);
+        with_button(&ctx, Vec::new(), false);
+        assert!(ctx.memory(|m| m.focused()).is_some());
+        ctx
+    }
+
+    #[test]
+    fn the_lists_keys_stay_with_another_focused_part() {
+        let ctx = focused_elsewhere();
+        let keys = vec![
+            key(Key::ArrowDown, Modifiers::NONE),
+            key(Key::End, Modifiers::NONE),
+            key(Key::ArrowUp, Modifiers::SHIFT),
+            key(Key::Enter, Modifiers::NONE),
+            key(Key::Delete, Modifiers::NONE),
+            key(Key::F2, Modifiers::NONE),
+            key(Key::F10, Modifiers::SHIFT),
+            key(Key::Backspace, Modifiers::NONE),
+            key(Key::A, Modifiers::COMMAND),
+            Event::Text("a".into()),
+            Event::Copy,
+            Event::Paste("t".into()),
+        ];
+        assert_eq!(with_button(&ctx, keys, false), []);
+    }
+
+    #[test]
+    fn window_shortcuts_work_wherever_the_focus_is() {
+        let ctx = focused_elsewhere();
+        let keys = vec![
+            key(Key::L, Modifiers::COMMAND),
+            key(Key::T, Modifiers::COMMAND),
+            key(Key::D, Modifiers::COMMAND),
+            key(Key::ArrowLeft, Modifiers::ALT),
+            key(Key::Tab, Modifiers::COMMAND),
+        ];
+        let actions = with_button(&ctx, keys, false);
+        assert_eq!(
+            actions,
+            [Action::FocusPathBar, Action::ToggleBookmark, Action::NewTab, Action::NextTab, Action::Back]
+        );
+    }
+
+    #[test]
+    fn escape_on_another_part_gives_the_list_its_keys_back_without_cancelling() {
+        let ctx = focused_elsewhere();
+        let escape = vec![key(Key::Escape, Modifiers::NONE), repeat(Key::Escape)];
+        assert_eq!(with_button(&ctx, escape, false), []);
+        assert!(ctx.memory(|m| m.focused()).is_none());
+        let down = vec![release(Key::Escape, Modifiers::NONE), key(Key::ArrowDown, Modifiers::NONE)];
+        assert_eq!(with_button(&ctx, down, false), [Action::Move(1)]);
+        // The next Escape is the list's again.
+        let escape = vec![key(Key::Escape, Modifiers::NONE)];
+        assert_eq!(with_button(&ctx, escape, false), [Action::Cancel]);
+    }
+
+    #[test]
+    fn the_focused_list_keeps_its_keys_and_its_escape() {
+        let ctx = Context::default();
+        let stop = |ctx: &Context, events| {
+            let mut actions = Vec::new();
+            ctx.run_ui(RawInput { events, ..RawInput::default() }, |ui| {
+                actions = read_actions(ui.ctx());
+                crate::ui::file_list::focus_stop(ui, ui.max_rect());
+            })
+            .drop_without_applying_deltas();
+            actions
+        };
+        stop(&ctx, Vec::new());
+        ctx.memory_mut(|m| m.request_focus(crate::ui::file_list::focus_id()));
+        stop(&ctx, Vec::new());
+        assert_eq!(ctx.memory(|m| m.focused()), Some(crate::ui::file_list::focus_id()));
+        let keys = vec![key(Key::ArrowDown, Modifiers::NONE), key(Key::Enter, Modifiers::NONE), Event::Text("a".into())];
+        assert_eq!(stop(&ctx, keys), [Action::Move(1), Action::Activate, Action::TypeChar('a')]);
+        let escape = vec![release(Key::ArrowDown, Modifiers::NONE), release(Key::Enter, Modifiers::NONE), key(Key::Escape, Modifiers::NONE)];
+        assert_eq!(stop(&ctx, escape), [Action::Cancel]);
+        // The ring went away with the keys; the list still has them.
+        assert_eq!(stop(&ctx, vec![release(Key::Escape, Modifiers::NONE), key(Key::ArrowDown, Modifiers::NONE)]), [Action::Move(1)]);
     }
 }

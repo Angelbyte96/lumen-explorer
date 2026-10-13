@@ -11,6 +11,42 @@ pub mod tabs;
 pub mod theme;
 pub mod toolbar;
 
+use eframe::egui;
+
+/// The panels whose border drags to resize them: egui makes that border a
+/// Tab stop although it does nothing with keys.
+pub const RESIZABLE_PANELS: [&str; 2] = ["sidebar", "preview"];
+
+/// Passes the keyboard focus over a panel's resize border, the way Tab or
+/// Shift+Tab was going. Call each frame before the panels are drawn.
+pub fn skip_panel_borders(ctx: &egui::Context) {
+    let back_id = egui::Id::new("lumen_tab_back");
+    let tab = ctx.input(|i| {
+        i.events.iter().rev().find_map(|e| match e {
+            egui::Event::Key { key: egui::Key::Tab, pressed: true, modifiers, .. } => Some(modifiers.shift),
+            _ => None,
+        })
+    });
+    if let Some(back) = tab {
+        ctx.data_mut(|d| d.insert_temp(back_id, back));
+    }
+    let Some(focused) = ctx.memory(|m| m.focused()) else { return };
+    if RESIZABLE_PANELS.iter().any(|&panel| egui::Id::new(panel).with("__resize") == focused) {
+        let back = ctx.data(|d| d.get_temp::<bool>(back_id)).unwrap_or(false);
+        let way = if back { egui::FocusDirection::Previous } else { egui::FocusDirection::Next };
+        ctx.memory_mut(|m| m.move_focus(way));
+    }
+}
+
+/// A ring round `response` while it has the keyboard focus, so it shows
+/// where Tab landed and what Enter or Space will press.
+pub fn focus_ring(ui: &egui::Ui, response: &egui::Response) {
+    if response.has_focus() {
+        let stroke = ui.visuals().selection.stroke;
+        ui.painter().rect_stroke(response.rect, 3, stroke, egui::StrokeKind::Inside);
+    }
+}
+
 /// Drives egui frame by frame, with real pointer events, for UI tests.
 #[cfg(test)]
 pub mod testing {
