@@ -87,7 +87,7 @@ impl RenameEdit {
 }
 
 /// How opaque a cut entry's icon and name are until it is pasted.
-const CUT_OPACITY: f32 = 0.5;
+pub(crate) const CUT_OPACITY: f32 = 0.5;
 
 /// The icon's side in Details: one line of text.
 pub fn icon_side(text_height: f32) -> f32 {
@@ -456,7 +456,7 @@ fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths
     event
 }
 
-fn cursor_row_id() -> egui::Id {
+pub(crate) fn cursor_row_id() -> egui::Id {
     egui::Id::new("lumen_cursor_row")
 }
 
@@ -573,7 +573,7 @@ pub fn rename_id() -> egui::Id {
 }
 
 /// The text field drawn in place of the name while renaming.
-fn rename_field(ui: &mut egui::Ui, edit: &mut RenameEdit) -> Option<bool> {
+pub(crate) fn rename_field(ui: &mut egui::Ui, edit: &mut RenameEdit) -> Option<bool> {
     let id = rename_id();
     // Characters a name cannot hold are dropped before the field reads them, as
     // File Pilot does: typing one does nothing, a pasted name keeps the rest.
