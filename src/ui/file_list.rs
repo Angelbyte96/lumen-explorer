@@ -547,14 +547,14 @@ pub fn focus_id() -> egui::Id {
 /// The list's one Tab stop, over the whole list: Tab lands here, not on each
 /// row or header. While it has the focus the arrows and Escape stay with the
 /// list instead of moving egui's focus to a nearby widget. Its ring only shows
-/// where Tab landed: the first other key or click on the list lets the focus
+/// where Tab landed: the first key (not Tab or a modifier alone) or click on the list lets the focus
 /// go, which leaves the keys with the list all the same.
 pub fn focus_stop(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Response {
     let response = ui.interact(rect, focus_id(), egui::Sense::FOCUSABLE);
     if response.has_focus() {
         let used = ui.input(|i| {
             i.raw.events.iter().any(|e| match e {
-                egui::Event::Key { key, pressed: true, .. } => *key != egui::Key::Tab,
+                egui::Event::Key { key, pressed: true, .. } => !is_tab_or_modifier(*key),
                 egui::Event::Text(_) => true,
                 egui::Event::PointerButton { pos, pressed: true, .. } => rect.contains(*pos),
                 _ => false,
@@ -568,6 +568,13 @@ pub fn focus_stop(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Response {
         }
     }
     response
+}
+
+/// Keys that do not count as using the list: Tab moves the focus, and a
+/// modifier pressed alone (Shift before Shift+Tab) does nothing yet.
+fn is_tab_or_modifier(key: egui::Key) -> bool {
+    use egui::Key::*;
+    matches!(key, Tab | ShiftLeft | ShiftRight | ControlLeft | ControlRight | AltLeft | AltRight | SuperLeft | SuperRight)
 }
 
 /// Id of the rename field, so the app can tell when it lost focus silently.
@@ -1554,5 +1561,27 @@ mod tests {
         between_buttons(&ctx, &view, vec![press(false)]);
         let focused = ctx.memory(|m| m.focused());
         assert!(focused.is_none_or(|id| id == focus_id()), "the list holds the keys again, not {focused:?}");
+    }
+
+    #[test]
+    fn shift_tab_from_the_focused_list_goes_back_in_one_press() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a", "b"]);
+        let (before, _, _, _) = between_buttons(&ctx, &view, vec![]);
+        ctx.memory_mut(|m| m.request_focus(focus_id()));
+        between_buttons(&ctx, &view, vec![]);
+        let key = |key, pressed, modifiers| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers };
+        // Shift goes down first, as a key of its own.
+        let shift = egui::Modifiers::SHIFT;
+        between_buttons(&ctx, &view, vec![egui::Event::ModifiersChanged(shift), key(egui::Key::ShiftLeft, true, shift)]);
+        between_buttons(&ctx, &view, vec![]);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(focus_id()), "Shift alone keeps the ring");
+        for modifier in [egui::Key::ControlLeft, egui::Key::AltRight, egui::Key::SuperLeft] {
+            between_buttons(&ctx, &view, vec![key(modifier, true, egui::Modifiers::NONE), key(modifier, false, egui::Modifiers::NONE)]);
+            assert_eq!(ctx.memory(|m| m.focused()), Some(focus_id()), "{modifier:?} alone keeps the ring");
+        }
+        between_buttons(&ctx, &view, vec![key(egui::Key::Tab, true, shift)]);
+        between_buttons(&ctx, &view, vec![]);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(before), "one Shift+Tab goes back");
     }
 }
