@@ -308,29 +308,34 @@ fn band_id() -> egui::Id {
     egui::Id::new("lumen_list_band")
 }
 
-/// How fast the list scrolls while a band is dragged past its top or bottom:
-/// points per second for each point the pointer is past it, up to `BAND_REACH`.
-const BAND_SCROLL: f32 = 10.0;
-const BAND_REACH: f32 = 200.0;
+/// A band held this close to the list's top or bottom edge, inside it,
+/// scrolls the list: no need to leave the list, or the window, as the bottom
+/// edge often sits by the window's.
+const BAND_STRIP: f32 = 40.0;
+/// Points per second at the edge itself and past it: the same at both ends.
+const BAND_TOP_SPEED: f32 = 800.0;
 
-/// While a band is dragged above or below the rows on view, scrolls the
-/// table's `body` towards the pointer, faster the farther it is.
+/// How fast a band at height `y` scrolls a list showing `view` on screen, in
+/// points per second: positive brings the rows above down. From nothing at
+/// the inner side of each edge's strip to the top speed at the edge.
+fn band_speed(y: f32, view: egui::Rangef) -> f32 {
+    // The nearer edge decides, for lists too short for two strips.
+    let (depth, sign) = if y < view.center() { (view.min + BAND_STRIP - y, 1.0) } else { (y - (view.max - BAND_STRIP), -1.0) };
+    sign * BAND_TOP_SPEED * (depth / BAND_STRIP).clamp(0.0, 1.0)
+}
+
+/// While a band is dragged near or past the top or bottom of the rows on
+/// view, scrolls the table's `body` towards the pointer.
 fn band_scroll(body: &mut egui::Ui) {
     let (dragging, pointer, dt) = body.input(|i| (i.pointer.is_decidedly_dragging(), i.pointer.latest_pos(), i.stable_dt));
     let banding = body.ctx().data(|d| d.get_temp::<BandStart>(band_id())).is_some();
     let Some(pointer) = pointer.filter(|_| dragging && banding) else { return };
-    let view = body.clip_rect();
-    // Content moving down shows the rows above.
-    let past = if pointer.y < view.top() {
-        view.top() - pointer.y
-    } else if pointer.y > view.bottom() {
-        view.bottom() - pointer.y
-    } else {
+    let speed = band_speed(pointer.y, body.clip_rect().y_range());
+    if speed == 0.0 {
         return;
-    };
+    }
     // At once: an animated scroll would carry on after the pointer is back.
-    let delta = egui::vec2(0.0, past.clamp(-BAND_REACH, BAND_REACH) * BAND_SCROLL * dt);
-    body.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
+    body.scroll_with_delta_animation(egui::vec2(0.0, speed * dt), egui::style::ScrollAnimation::none());
     // Keep scrolling while the pointer is held still.
     body.ctx().request_repaint();
 }
@@ -929,6 +934,46 @@ mod tests {
         // The scroll asked for on the last frame below lands on the first one above.
         assert!(ends[1..].windows(2).all(|w| w[1] <= w[0]), "held above, they go back down: {ends:?}");
         assert!(ends[0] - ends[10] >= 1.0, "at least a row less: {ends:?}");
+    }
+
+    #[test]
+    fn the_band_scrolls_from_a_strip_inside_each_edge_as_fast_at_both_ends() {
+        let view = egui::Rangef::new(100.0, 500.0);
+        assert_eq!(band_speed(300.0, view), 0.0, "the middle does not scroll");
+        assert_eq!(band_speed(100.0 + BAND_STRIP + 1.0, view), 0.0, "nor just past the strip");
+        let (top, bottom) = (band_speed(110.0, view), band_speed(490.0, view));
+        assert!(top > 0.0, "inside the top strip the rows above come down: {top}");
+        assert_eq!(bottom, -top, "the same depth into the bottom strip, the same speed up");
+        assert!(band_speed(105.0, view) > top, "faster closer to the edge");
+        assert_eq!(band_speed(100.0, view), BAND_TOP_SPEED, "top speed at the edge itself");
+        assert_eq!(band_speed(500.0, view), -BAND_TOP_SPEED);
+        assert_eq!(band_speed(0.0, view), BAND_TOP_SPEED, "and no faster past it");
+        assert_eq!(band_speed(900.0, view), -BAND_TOP_SPEED);
+        // A list too short for two strips: the nearer edge decides.
+        let short = egui::Rangef::new(100.0, 140.0);
+        assert!(band_speed(110.0, short) > 0.0 && band_speed(130.0, short) < 0.0);
+    }
+
+    #[test]
+    fn a_band_held_near_the_bottom_inside_the_window_scrolls_the_list() {
+        use crate::ui::testing::{SCREEN, frame};
+        let ctx = egui::Context::default();
+        let names: Vec<String> = (0..300).map(|i| format!("f{i}")).collect();
+        let mut view = listed(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let first = row_rect(&ctx, &mut view, 0);
+        let from = egui::pos2(500.0, first.center().y);
+        let draw = |ui: &mut egui::Ui| show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default());
+        frame(&ctx, vec![egui::Event::PointerMoved(from), button(from, true)], draw);
+        // Inside the window and over the last rows on view.
+        let near = egui::pos2(500.0, SCREEN.bottom() - 12.0);
+        let mut ends = Vec::new();
+        for events in [vec![egui::Event::PointerMoved(near)], vec![], vec![], vec![], vec![]] {
+            match frame(&ctx, events, draw) {
+                Some(ListEvent::Band { end, .. }) => ends.push(end),
+                _ => panic!("no band"),
+            }
+        }
+        assert!(ends[4] > ends[0], "the rows keep coming up: {ends:?}");
     }
 
     #[test]
