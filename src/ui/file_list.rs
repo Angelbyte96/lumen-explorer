@@ -159,7 +159,7 @@ pub fn show(
     let mut band_may_start = false;
     let pressed = ui.input(|i| i.pointer.primary_pressed());
     let whole = ui.available_rect_before_wrap();
-    let stop = focus_stop(ui, whole);
+    focus_stop(ui, whole);
 
     egui::ScrollArea::horizontal().id_salt("lumen_list_columns").auto_shrink(false).show(ui, |ui| {
         let mut table = TableBuilder::new(ui)
