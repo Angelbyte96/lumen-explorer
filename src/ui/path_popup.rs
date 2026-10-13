@@ -1296,7 +1296,9 @@ mod tests {
         });
         let ctx = egui::Context::default();
         let first = restart(&ctx);
+        let start = std::time::Instant::now();
         while !first.is_done() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(10), "the first crawl never ended");
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let mut popup = PathPopup::with_crawler(first, restart);
