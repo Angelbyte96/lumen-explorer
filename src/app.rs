@@ -9,13 +9,14 @@ use eframe::egui;
 
 use crate::config::{Config, Settings};
 use crate::fs::count::{Count, Totals};
+use crate::fs::index::Crawler;
 use crate::fs::watch::Watcher;
 use crate::fs::{self, Entry, Lister, Listing};
 use crate::input::{self, Action, Confirm};
 use crate::menu::Command;
 #[cfg(not(windows))]
 use crate::menu;
-use crate::places::{self, Bookmarks, Mount, Place, Recents, Usage};
+use crate::places::{self, Bookmarks, Mount, Place, Recents, Usage, Visits};
 use crate::fs::ops::Renamed;
 use crate::fs::preview::Previewer;
 use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
@@ -770,6 +771,8 @@ pub struct LumenApp {
     batch: Option<Batch>,
     bookmarks: Bookmarks,
     recents: Recents,
+    /// Folders visited, scored for the quick jump.
+    visits: Visits,
     /// Home, Downloads... and the trash, found once at startup.
     places: Vec<Place>,
     /// Where trashed files live; nothing in it may be trashed again.
@@ -850,6 +853,7 @@ impl LumenApp {
             counting: None,
             bookmarks: Bookmarks::default(),
             recents: Recents::default(),
+            visits: Visits::default(),
             places: Vec::new(),
             trash: None,
             disks: (None, Vec::new()),
@@ -906,6 +910,7 @@ impl LumenApp {
         app.shown_columns = config.shown_columns;
         app.column_order = config.column_order;
         app.bookmarks = Bookmarks::from_paths(config.bookmarks);
+        app.visits = Visits::from_list(config.visited);
         app.window = config.window;
         app.saved = app.settings(true);
         app.config_path = path;
@@ -920,6 +925,11 @@ impl LumenApp {
             Start::Restore => restore_tabs(&settings.config.tabs, settings.config.active_tab, home),
         };
         let mut app = Self::with_config(ctx, tabs[active].clone(), log, settings);
+        // Only here, never in `new`, and not under test: a test must not
+        // crawl the machine.
+        if !cfg!(test) {
+            app.path_popup = PathPopup::with_crawler(start_index(ctx), Box::new(start_index));
+        }
         // The others list when they are first shown (see `select_tab`).
         app.tabs = tabs
             .iter()
@@ -952,6 +962,7 @@ impl LumenApp {
             column_order: self.column_order,
             tabs: if with_window { self.session().0 } else { self.saved.tabs.clone() },
             active_tab: if with_window { self.session().1 } else { self.saved.active_tab },
+            visited: if with_window { self.visits.list().to_vec() } else { self.saved.visited.clone() },
         }
     }
 
@@ -1349,6 +1360,7 @@ impl LumenApp {
                 self.reload(ctx, file_name(&path));
                 return;
             }
+            self.path_popup.mark_stale();
         }
         self.reload(ctx, select);
     }
@@ -1362,6 +1374,7 @@ impl LumenApp {
     fn new_file(&mut self, ctx: &egui::Context, template: Option<&Path>) {
         match fs::ops::create_file(&self.tab.view.current, template) {
             Ok(path) => {
+                self.path_popup.mark_stale();
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
                 self.tab.rename_after_load = Some(path);
                 self.reload(ctx, name);
@@ -1373,6 +1386,7 @@ impl LumenApp {
     fn new_folder(&mut self, ctx: &egui::Context) {
         match fs::ops::create_folder(&self.tab.view.current) {
             Ok(path) => {
+                self.path_popup.mark_stale();
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
                 self.tab.rename_after_load = Some(path);
                 self.reload(ctx, name);
@@ -1385,6 +1399,7 @@ impl LumenApp {
     fn finish_rename(&mut self, ctx: &egui::Context, mut edit: RenameEdit, replace: bool) {
         match fs::ops::rename(&edit.path, &edit.text, replace) {
             Ok(Renamed::To(_)) => {
+                self.path_popup.mark_stale();
                 self.tab.view.error = None;
                 self.reload(ctx, Some(edit.text));
             }
@@ -1546,6 +1561,7 @@ impl LumenApp {
         let mode = running.job.mode;
         let stop = match result {
             Ok(Outcome::Done) => {
+                self.path_popup.mark_stale();
                 if let Some(batch) = self.batch.as_mut() {
                     batch.landed = Some(running.target);
                 }
@@ -1796,6 +1812,7 @@ impl LumenApp {
             self.watcher.watch(&self.tab.view.current);
             if self.tab.pending_nav != NavKind::Refresh {
                 self.recents.visit(&self.tab.view.current);
+                self.visits.visit(&self.tab.view.current, unix_now());
             }
         } else if self.tab.pending_nav == NavKind::Refresh {
             // The open folder is gone; watch it afresh if it comes back.
@@ -2148,7 +2165,7 @@ impl eframe::App for LumenApp {
         let home = fs::home_dir();
         let shown = self.tab.view.show_hidden;
         let current = self.tab.view.current.clone();
-        if let Some(event) = self.path_popup.show(&ctx, list.response.rect, &current, home.as_deref(), shown) {
+        if let Some(event) = self.path_popup.show(&ctx, list.response.rect, &current, home.as_deref(), shown, || self.visits.scores(unix_now())) {
             self.handle_popup(&ctx, event);
         }
 
@@ -2187,6 +2204,18 @@ impl eframe::App for LumenApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_settings(true);
     }
+}
+
+/// Starts the background crawl of every disk behind the path box's quick jump.
+/// The disks and shares are read on the crawl's thread: a hung mount must
+/// not freeze the window.
+fn start_index(ctx: &egui::Context) -> Crawler {
+    let scope = || {
+        let disks = places::disks().into_iter().map(|mount| mount.path).collect();
+        fs::index::scope(cfg!(windows), fs::home_dir().as_deref(), disks, places::network_mounts())
+    };
+    let ctx = ctx.clone();
+    Crawler::start(scope, move || ctx.request_repaint())
 }
 
 /// What Lumen opens at startup.
@@ -2244,6 +2273,12 @@ fn start_dir_from(arg: Option<String>, cwd: Option<PathBuf>, home: Option<PathBu
         None if use_cwd => cwd.or(home).unwrap_or_else(root),
         None => home.or(cwd).unwrap_or_else(root),
     }
+}
+
+
+/// Seconds since the Unix epoch; 0 if the clock is before it.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]
@@ -2705,6 +2740,26 @@ mod tests {
         app.path_popup = PathPopup::default();
         app.raise_parked_question();
         assert!(app.dialog.is_some());
+    }
+
+    #[test]
+    fn a_folder_made_by_lumen_marks_the_index_stale_so_the_next_opening_renews_it() {
+        let (ctx, mut app, dir) = app_in("app-index-stale");
+        let starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = starts.clone();
+        let restart: Box<dyn Fn(&egui::Context) -> Crawler> = Box::new(move |_| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Crawler::fixed(fs::index::Index::default(), false)
+        });
+        app.path_popup = PathPopup::with_crawler(Crawler::fixed(fs::index::Index::default(), true), restart);
+        app.new_folder(&ctx);
+        app.path_popup.open();
+        let input = egui::RawInput { time: Some(5.0), screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))), ..egui::RawInput::default() };
+        ctx.run_ui(input, |root| {
+            egui::CentralPanel::default().show(root, |ui| app.path_popup.show(ui.ctx(), ui.max_rect(), &dir, None, false, Vec::new));
+        })
+        .drop_without_applying_deltas();
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1, "five seconds old, yet renewed");
     }
 
     #[test]
@@ -3473,6 +3528,26 @@ mod tests {
             }
             assert_eq!(app.tab_labels().len(), app.tabs.len());
         }
+    }
+
+    #[test]
+    fn visited_folders_are_scored_for_the_quick_jump_and_saved_on_closing() {
+        let (ctx, _, dir) = app_in("app-visits");
+        let saved = vec![places::Visit { path: dir.join("old"), score: 3.0, at: 5 }];
+        let config = Config { visited: saved.clone(), ..Config::default() };
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, Settings { config, path: None, error: None });
+        assert_eq!(app.visits.list(), saved, "loaded from the settings");
+        app.apply(listing_of(&dir.join("sub")));
+        app.tab.pending_nav = NavKind::Refresh;
+        app.apply(listing_of(&dir.join("sub")));
+        app.tab.pending_nav = NavKind::New;
+        let failed = Listing { id: 0, path: dir.join("gone"), result: Err(ListError::NotFound(dir.join("gone"))), elapsed: Duration::ZERO };
+        app.apply(failed);
+        let paths: Vec<PathBuf> = app.visits.list().iter().map(|v| v.path.clone()).collect();
+        assert_eq!(paths, [dir.join("sub"), dir.join("old")], "a refresh or a failure is no visit");
+        assert_eq!(app.visits.list()[0].score, 1.0);
+        assert_eq!(app.settings(false).visited, saved, "written when Lumen closes");
+        assert_eq!(app.settings(true).visited, app.visits.list());
     }
 
     #[test]

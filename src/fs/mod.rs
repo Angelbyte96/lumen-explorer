@@ -2,9 +2,11 @@
 
 pub mod count;
 pub mod entry;
+pub mod index;
 pub mod lister;
 pub mod ops;
 pub mod preview;
+pub mod search;
 #[cfg(windows)]
 pub mod pdf;
 pub mod transfer;
@@ -31,6 +33,8 @@ pub fn resolve_input_path(input: &str, current: &Path, home: Option<&Path>) -> P
     if input.is_empty() {
         return current.to_path_buf();
     }
+    let rooted = if cfg!(windows) { with_drive_root(input) } else { None };
+    let input = rooted.as_deref().unwrap_or(input);
     let expanded = match (input.strip_prefix('~'), home) {
         (Some(""), Some(home)) => home.to_path_buf(),
         (Some(rest), Some(home)) if rest.starts_with('/') || rest.starts_with('\\') => {
@@ -44,6 +48,18 @@ pub fn resolve_input_path(input: &str, current: &Path, home: Option<&Path>) -> P
         current.join(expanded)
     };
     normalize(&absolute)
+}
+
+/// A drive with no root (`C:`, `C:Users`) as from its top (`C:\`,
+/// `C:\Users`), like Explorer: Windows reads `C:` alone as the folder the
+/// program last used on that drive, not the drive itself.
+fn with_drive_root(input: &str) -> Option<String> {
+    match input.as_bytes() {
+        [letter, b':', rest @ ..] if letter.is_ascii_alphabetic() && !matches!(rest.first(), Some(b'/' | b'\\')) => {
+            Some(format!("{}:\\{}", *letter as char, &input[2..]))
+        }
+        _ => None,
+    }
 }
 
 /// Lexically drops `.` and resolves `..` (like Dolphin, without following symlinks),
@@ -111,5 +127,25 @@ mod tests {
     #[test]
     fn empty_input_keeps_current() {
         assert_eq!(resolve_input_path("", Path::new("/usr"), None), Path::new("/usr"));
+    }
+
+    #[test]
+    fn a_drive_with_no_root_is_taken_from_its_top() {
+        assert_eq!(with_drive_root("C:").as_deref(), Some("C:\\"));
+        assert_eq!(with_drive_root("c:Users").as_deref(), Some("c:\\Users"));
+        assert_eq!(with_drive_root("C:\\Users"), None, "already from the top");
+        assert_eq!(with_drive_root("C:/Users"), None, "already from the top");
+        assert_eq!(with_drive_root("docs"), None);
+        assert_eq!(with_drive_root("1:"), None, "no drive letter");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_typed_drive_opens_its_top_not_its_current_folder() {
+        let current = Path::new("D:\\work");
+        assert_eq!(resolve_input_path("C:", current, None), Path::new("C:\\"));
+        assert_eq!(resolve_input_path("C:Users", current, None), Path::new("C:\\Users"));
+        assert_eq!(resolve_input_path("C:\\Users", current, None), Path::new("C:\\Users"));
+        assert_eq!(resolve_input_path("docs", current, None), Path::new("D:\\work\\docs"));
     }
 }
