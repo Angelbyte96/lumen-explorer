@@ -799,8 +799,8 @@ pub struct LumenApp {
     /// Mounted disks with their usage, and when they were read.
     disks: (Option<Instant>, Vec<(Mount, Option<Usage>)>),
     sidebar_open: bool,
-    /// Icon and row size in the list, shared by every tab.
-    list_zoom: u8,
+    /// The view slider's position, shared by every tab.
+    view_size: ui::view_size::ViewSize,
     /// The list's column widths.
     columns: ui::file_list::Widths,
     /// Which list columns are shown.
@@ -827,8 +827,8 @@ pub struct LumenApp {
 /// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
 /// keyboard feels instant; list-wide changes skip them entirely (see [`Scroll`]).
 fn apply_style(ctx: &egui::Context) {
-    // Ctrl+Plus / Ctrl+Minus zoom only the list's icons and rows (Action::ZoomIn),
-    // not the whole window as egui would.
+    // Ctrl+Plus / Ctrl+Minus move the view slider (Action::ZoomIn), they do
+    // not zoom the whole window as egui would.
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
     ctx.all_styles_mut(|style| {
         style.scroll_animation =
@@ -877,7 +877,7 @@ impl LumenApp {
             trash: None,
             disks: (None, Vec::new()),
             sidebar_open: true,
-            list_zoom: 0,
+            view_size: ui::view_size::ViewSize::default(),
             columns: ui::file_list::DEFAULT_WIDTHS,
             shown_columns: ui::file_list::ALL_SHOWN,
             column_order: ui::file_list::DEFAULT_ORDER,
@@ -924,7 +924,7 @@ impl LumenApp {
         app.tab.view.show_hidden = config.show_hidden;
         app.sidebar_open = config.sidebar;
         app.preview_open = config.preview;
-        app.list_zoom = config.list_zoom;
+        app.view_size = config.view;
         app.columns = config.columns;
         app.shown_columns = config.shown_columns;
         app.column_order = config.column_order;
@@ -975,7 +975,7 @@ impl LumenApp {
             preview: self.preview_open,
             window: if with_window { self.window } else { self.saved.window },
             bookmarks: self.bookmarks.paths().to_vec(),
-            list_zoom: self.list_zoom,
+            view: self.view_size,
             columns: self.columns,
             shown_columns: self.shown_columns,
             column_order: self.column_order,
@@ -1276,11 +1276,11 @@ impl LumenApp {
                 self.reload(ctx, keep);
             }
             Command::FitColumn(column) => {
-                self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, self.list_zoom, column);
+                self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, column);
             }
             Command::FitAllColumns => {
                 for column in 0..self.columns.len() {
-                    self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, self.list_zoom, column);
+                    self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, column);
                 }
             }
             Command::RestoreColumns => {
@@ -1882,9 +1882,9 @@ impl LumenApp {
         match action {
             Action::FocusPathBar => self.path_popup.open(),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
-            Action::ZoomIn => self.list_zoom = (self.list_zoom + 1).min(ui::file_list::MAX_ZOOM),
-            Action::ZoomOut => self.list_zoom = self.list_zoom.saturating_sub(1),
-            Action::ZoomReset => self.list_zoom = 0,
+            Action::ZoomIn => self.view_size = self.view_size.bigger(),
+            Action::ZoomOut => self.view_size = self.view_size.smaller(),
+            Action::ZoomReset => self.view_size = ui::view_size::ViewSize::default(),
             Action::FitColumns => self.run_command(ctx, Command::FitAllColumns),
             Action::Activate => self.activate_selected(ctx),
             Action::GoParent => {
@@ -2124,7 +2124,7 @@ impl eframe::App for LumenApp {
         let list = egui::CentralPanel::default_margins().show(ui, |ui| {
             let scroll = self.tab.view.scroll.take();
             let cut = self.cut_paths().to_vec();
-            let sizes = ui::file_list::Sizes { zoom: self.list_zoom, widths: self.columns, shown: self.shown_columns, order: self.column_order };
+            let sizes = ui::file_list::Sizes { widths: self.columns, shown: self.shown_columns, order: self.column_order };
             let event = ui::file_list::show(ui, &self.tab.view, &cut, sizes, scroll, self.rename.as_mut(), &self.file_icons);
             // After drawing: the icons the list just asked for go out this frame.
             self.file_icons.poll(&ctx);
@@ -3298,7 +3298,7 @@ mod tests {
             preview: true,
             window: Some([1000.0, 700.0]),
             bookmarks: vec![PathBuf::from("/srv"), PathBuf::from("/srv")],
-            list_zoom: 3,
+            view: ui::view_size::ViewSize::new(65),
             columns: [250.0, 90.0, 140.0, 55.0, 60.0, 95.0],
             ..Config::default()
         }
@@ -3316,7 +3316,7 @@ mod tests {
         assert!(app.preview_open);
         assert_eq!(app.bookmarks.paths(), [PathBuf::from("/srv")], "repeats dropped");
         assert_eq!(app.window, Some([1000.0, 700.0]));
-        assert_eq!(app.list_zoom, 3);
+        assert_eq!(app.view_size, ui::view_size::ViewSize::new(65));
         assert_eq!(app.columns, [250.0, 90.0, 140.0, 55.0, 60.0, 95.0]);
     }
 
@@ -3331,7 +3331,7 @@ mod tests {
         app.tab.view.apply_listing(listing, None);
         // Fonts are loaded by a first frame.
         ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
-        let fit = |app: &LumenApp, column| ui::file_list::fit_width(&ctx, &app.tab.view, app.list_zoom, column);
+        let fit = |app: &LumenApp, column| ui::file_list::fit_width(&ctx, &app.tab.view, column);
         app.columns = [100.0; 6];
         app.run_command(&ctx, Command::FitColumn(0));
         assert_eq!(app.columns[0], fit(&app, 0));
@@ -3398,22 +3398,26 @@ mod tests {
     }
 
     #[test]
-    fn list_zoom_steps_between_its_limits_and_is_saved_at_once() {
+    fn ctrl_plus_and_minus_move_the_view_slider_and_it_is_saved_at_once() {
+        use ui::view_size::ViewSize;
         let (ctx, _, dir) = app_in("app-zoom");
         let path = dir.join("cfg/lumen/config");
         let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
         app.handle_action(&ctx, Action::ZoomOut);
-        assert_eq!(app.list_zoom, 0, "already the smallest");
-        for _ in 0..10 {
+        assert_eq!(app.view_size, ViewSize::new(0), "already Details");
+        let mut walked = Vec::new();
+        for _ in 0..5 {
             app.handle_action(&ctx, Action::ZoomIn);
+            walked.push(app.view_size.name());
         }
-        assert_eq!(app.list_zoom, ui::file_list::MAX_ZOOM, "stops at the biggest");
+        assert_eq!(walked, ["Tree", "List", "M Icons", "M Icons", "M Icons"]);
+        assert_eq!(app.view_size, ViewSize::new(40));
         app.handle_action(&ctx, Action::ZoomOut);
-        assert_eq!(app.list_zoom, ui::file_list::MAX_ZOOM - 1);
+        assert_eq!(app.view_size, ViewSize::new(35));
         app.save_settings(false);
-        assert_eq!(Config::load(&path).unwrap().list_zoom, ui::file_list::MAX_ZOOM - 1);
+        assert_eq!(Config::load(&path).unwrap().view, ViewSize::new(35));
         app.handle_action(&ctx, Action::ZoomReset);
-        assert_eq!(app.list_zoom, 0);
+        assert_eq!(app.view_size, ViewSize::new(0), "Ctrl+0 goes back to Details");
         assert_eq!(ctx.zoom_factor(), 1.0, "the rest of the window never zooms");
     }
 

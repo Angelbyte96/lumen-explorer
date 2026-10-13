@@ -89,28 +89,19 @@ impl RenameEdit {
 /// How opaque a cut entry's icon and name are until it is pasted.
 const CUT_OPACITY: f32 = 0.5;
 
-/// Highest list zoom level (Ctrl+wheel, Ctrl+Plus); 0 is the normal size.
-pub const MAX_ZOOM: u8 = 4;
-
-/// Icon side at each zoom level, in text heights: only icons and rows grow,
-/// the text keeps its size (like Dolphin's details view).
-const ZOOM_FACTORS: [f32; MAX_ZOOM as usize + 1] = [1.0, 1.5, 2.0, 3.0, 4.0];
-
-/// The icon side for `zoom` when a line of text is `text_height` tall.
-pub fn icon_side(zoom: u8, text_height: f32) -> f32 {
-    text_height * ZOOM_FACTORS[usize::from(zoom.min(MAX_ZOOM))]
+/// The icon's side in Details: one line of text.
+pub fn icon_side(text_height: f32) -> f32 {
+    text_height
 }
 
 /// A row is its icon plus a little air.
-pub fn row_height(zoom: u8, text_height: f32) -> f32 {
-    icon_side(zoom, text_height) + 4.0
+pub fn row_height(text_height: f32) -> f32 {
+    icon_side(text_height) + 4.0
 }
 
 /// How big the list is drawn.
 #[derive(Clone, Copy)]
 pub struct Sizes {
-    /// Icon and row size, 0 (normal) to `MAX_ZOOM`.
-    pub zoom: u8,
     pub widths: Widths,
     pub shown: Shown,
     pub order: Order,
@@ -118,7 +109,7 @@ pub struct Sizes {
 
 impl Default for Sizes {
     fn default() -> Self {
-        Self { zoom: 0, widths: DEFAULT_WIDTHS, shown: ALL_SHOWN, order: DEFAULT_ORDER }
+        Self { widths: DEFAULT_WIDTHS, shown: ALL_SHOWN, order: DEFAULT_ORDER }
     }
 }
 
@@ -132,12 +123,11 @@ pub fn show(
     mut edit: Option<&mut RenameEdit>,
     file_icons: &FileIcons,
 ) -> Option<ListEvent> {
-    let zoom = sizes.zoom;
     let View { entries, rows, totals, selected, sort, .. } = view;
     let (selected, sort) = (*selected, *sort);
     let text_height = ui.text_style_height(&egui::TextStyle::Body);
-    let header_height = row_height(0, text_height);
-    let (icon, row_height) = (icon_side(zoom, text_height), row_height(zoom, text_height));
+    let header_height = row_height(text_height);
+    let (icon, row_height) = (icon_side(text_height), header_height);
     // With rows picked, they are the highlight; the cursor row alone otherwise.
     let multi = view.picked_count() > 0;
     let mut event = None;
@@ -166,7 +156,7 @@ pub fn show(
             .striped(true)
             // The vertical scroll bar at the list's right edge, not after the last column.
             .auto_shrink([false, true])
-            // Text sits in the middle of rows made taller by the zoom.
+            // Text sits in the middle of its row, beside the taller icon.
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .sense(egui::Sense::CLICK);
         // Every column has its own width, like File Pilot: the last one stretches
@@ -218,7 +208,7 @@ pub fn show(
                         let (cell, _) = row.col(|ui| match column {
                             0 => {
                                 // Icon and name on one line as tall as the row, centred in it:
-                                // a plain `horizontal` is one text line tall, so a zoomed icon
+                                // a plain `horizontal` is one text line tall, so a taller icon
                                 // would hang below the row and be clipped (and the name with it).
                                 let line = egui::vec2(ui.available_width(), row_height);
                                 ui.allocate_ui_with_layout(line, egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -375,14 +365,14 @@ fn band(ui: &egui::Ui, pressed: bool, may_start: bool, unit: impl Fn(f32) -> f32
 }
 
 /// The width that shows every cell of `column` and its header whole, for
-/// `view`'s rows at `zoom`.
-pub fn fit_width(ctx: &egui::Context, view: &View, zoom: u8, column: usize) -> f32 {
+/// `view`'s rows.
+pub fn fit_width(ctx: &egui::Context, view: &View, column: usize) -> f32 {
     let style = ctx.global_style();
     let font = egui::TextStyle::Body.resolve(&style);
     let measure = |text: String| ctx.fonts_mut(|f| f.layout_no_wrap(text, font.clone(), egui::Color32::WHITE).size().x);
     // The header with room for the sort arrow, which may show up later.
     let header = measure(format!("{} {SORT_DESCENDING}", COLUMNS[column].0)) + 2.0 * style.spacing.button_padding.x;
-    let icon = icon_side(zoom, ctx.fonts_mut(|f| f.row_height(&font))) + style.spacing.item_spacing.x;
+    let icon = icon_side(ctx.fonts_mut(|f| f.row_height(&font))) + style.spacing.item_spacing.x;
     let widest = view
         .rows
         .iter()
@@ -707,26 +697,15 @@ mod tests {
         assert_eq!(count_cells(&dir, Some(&totals)), ["2", "9", "2.2 MB"]);
     }
 
-    #[test]
-    fn zoom_grows_icons_and_rows_from_the_normal_size_up_to_a_limit() {
-        let text = 16.0;
-        assert_eq!(icon_side(0, text), text, "level 0 looks as before");
-        assert_eq!(row_height(0, text), text + 4.0);
-        let sides: Vec<f32> = (0..=MAX_ZOOM).map(|z| icon_side(z, text)).collect();
-        assert!(sides.windows(2).all(|w| w[0] < w[1]), "each level is bigger: {sides:?}");
-        assert_eq!(icon_side(MAX_ZOOM, text), 4.0 * text);
-        assert_eq!(icon_side(MAX_ZOOM + 3, text), icon_side(MAX_ZOOM, text), "never past the limit");
-    }
-
-    /// Where each text and the icon of the first row were painted, at `zoom`.
-    fn painted(zoom: u8) -> Vec<egui::epaint::ClippedShape> {
+    /// Where each text and the icon of the first row were painted.
+    fn painted() -> Vec<egui::epaint::ClippedShape> {
         let ctx = egui::Context::default();
         let mut view = View::default();
         (view.entries, view.rows) = (vec![entry("a.txt")], vec![0]);
         let mut shapes = Vec::new();
         for _ in 0..3 {
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                show(ui, &view, &[], Sizes { zoom, ..Sizes::default() }, None, None, &FileIcons::default());
+                show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default());
             });
             output.textures_delta.clear();
             shapes = output.shapes;
@@ -770,23 +749,21 @@ mod tests {
     }
 
     #[test]
-    fn zoomed_names_stay_level_with_the_other_columns_and_icons_are_whole() {
-        for zoom in 0..=MAX_ZOOM {
-            let shapes = painted(zoom);
-            let y = |text: &str| {
-                shapes.iter().find_map(|s| match &s.shape {
-                    egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos.y + t.galley.rect.center().y),
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("{text:?} painted"))
-            };
-            assert!((y("a.txt") - y("TXT file")).abs() < 1.5, "zoom {zoom}: name off its row");
-            // The icon: small shapes in the Name column, none cut by the row's clip.
-            for s in shapes.iter().filter(|s| !matches!(s.shape, egui::Shape::Text(_)) && s.clip_rect.min.x < 20.0) {
-                let b = s.shape.visual_bounding_rect();
-                if b.is_finite() && b.width() < 80.0 {
-                    assert!(b.max.y <= s.clip_rect.max.y + 0.5, "zoom {zoom}: icon clipped {b:?} by {:?}", s.clip_rect);
-                }
+    fn names_stay_level_with_the_other_columns_and_icons_are_whole() {
+        let shapes = painted();
+        let y = |text: &str| {
+            shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos.y + t.galley.rect.center().y),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{text:?} painted"))
+        };
+        assert!((y("a.txt") - y("TXT file")).abs() < 1.5, "name off its row");
+        // The icon: small shapes in the Name column, none cut by the row's clip.
+        for s in shapes.iter().filter(|s| !matches!(s.shape, egui::Shape::Text(_)) && s.clip_rect.min.x < 20.0) {
+            let b = s.shape.visual_bounding_rect();
+            if b.is_finite() && b.width() < 80.0 {
+                assert!(b.max.y <= s.clip_rect.max.y + 0.5, "icon clipped {b:?} by {:?}", s.clip_rect);
             }
         }
     }
@@ -1410,15 +1387,14 @@ mod tests {
         let view = listed(&["a.txt", long]);
         let ctx = egui::Context::default();
         ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
-        let name = fit_width(&ctx, &view, 0, 0);
+        let name = fit_width(&ctx, &view, 0);
         assert_eq!(painted_name(&view, name, long), long, "whole at its fit width ({name})");
         assert_ne!(painted_name(&view, name - 20.0, long), long, "a little narrower cuts it");
         // Folders holds only "--": the header sets its width.
         let font = egui::TextStyle::Body.resolve(&ctx.global_style());
         let header = ctx.fonts_mut(|f| f.layout_no_wrap("Folders".into(), font, egui::Color32::WHITE).size().x);
-        let folders = fit_width(&ctx, &view, 0, 3);
+        let folders = fit_width(&ctx, &view, 3);
         assert!(folders >= header && folders < header + 40.0, "{folders} for a {header} header");
-        assert!(fit_width(&ctx, &view, MAX_ZOOM, 0) > name, "a bigger icon needs more room");
     }
 
     #[test]
