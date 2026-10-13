@@ -5,6 +5,7 @@ use eframe::egui;
 use crate::format::format_size;
 use crate::fs::count::Totals;
 use crate::fs::transfer::{Mode, Progress};
+use crate::ui::view_size::ViewSize;
 
 pub struct Status<'a> {
     /// Text typed in the filter bar.
@@ -29,9 +30,13 @@ pub struct Status<'a> {
     /// Rows picked with Ctrl+A, Ctrl+click or Shift.
     pub picked: usize,
     pub picked_size: PickedSize,
+    /// The view slider's position, shown at the bar's right end.
+    pub view: ViewSize,
 }
 
-pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
+/// Draws the bar; returns the view picked with its button this frame.
+pub fn show(ui: &mut egui::Ui, status: &Status<'_>) -> Option<ViewSize> {
+    let mut picked = None;
     ui.horizontal(|ui| {
         filter_bar(ui, status.filter, status.item_count, status.caret);
         ui.separator();
@@ -69,6 +74,8 @@ pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
             ui.label(notice);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            picked = crate::ui::view_picker::show(ui, status.view);
+            ui.separator();
             ui.label(position_text(status.selected, status.item_count))
                 .on_hover_text("Selected row / rows shown");
             crate::ui::icons::file(ui);
@@ -87,6 +94,7 @@ pub fn show(ui: &mut egui::Ui, status: &Status<'_>) {
             }
         });
     });
+    picked
 }
 
 /// Always-visible filter at the bottom left. It is drawn, not a text field:
@@ -201,10 +209,11 @@ mod tests {
             selected: None,
             picked: 0,
             picked_size: PickedSize::default(),
+            view: ViewSize::default(),
         };
         let mut shapes = Vec::new();
         for _ in 0..2 {
-            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| show(ui, &status));
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| { show(ui, &status); });
             output.textures_delta.clear();
             shapes = output.shapes;
         }
@@ -280,6 +289,7 @@ mod tests {
             selected: None,
             picked: 0,
             picked_size: PickedSize::default(),
+            view: ViewSize::default(),
         };
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 200.0));
         let mut shapes = Vec::new();
@@ -288,7 +298,7 @@ mod tests {
             if let Some(pos) = pointer {
                 input.events.push(egui::Event::PointerMoved(pos));
             }
-            let mut output = ctx.run_ui(input, |ui| show(ui, &status));
+            let mut output = ctx.run_ui(input, |ui| { show(ui, &status); });
             output.textures_delta.clear();
             shapes = output.shapes;
         }
