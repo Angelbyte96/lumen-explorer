@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
 use super::entry::is_hidden_name;
@@ -300,6 +300,48 @@ fn lower_priority() {
     }
 }
 
+/// One crawl of a share: the index it fills, and when to stop.
+struct ShareJob {
+    index: Arc<RwLock<Index>>,
+    rules: Rules,
+    cancel: Arc<AtomicBool>,
+}
+
+/// The shares a thread is crawling now, each with the crawl it takes next.
+static BUSY_SHARES: Mutex<Vec<(PathBuf, Option<ShareJob>)>> = Mutex::new(Vec::new());
+
+/// Crawls `share` on its own thread, one thread per share at most: while
+/// one is still busy (a share that hangs can stay so forever), the job waits
+/// for it, the newest replacing an older one, so re-crawls leak no threads.
+fn crawl_share(share: PathBuf, job: ShareJob) {
+    let mut busy = BUSY_SHARES.lock().expect("shares lock");
+    if let Some((_, next)) = busy.iter_mut().find(|(s, _)| *s == share) {
+        *next = Some(job);
+        return;
+    }
+    busy.push((share.clone(), None));
+    drop(busy);
+    thread::spawn(move || {
+        lower_priority();
+        let mut job = job;
+        loop {
+            // A replaced crawl's job is left alone: nothing reads its index.
+            if !job.cancel.load(Ordering::Relaxed) {
+                crawl(std::slice::from_ref(&share), &job.rules, &job.index, &job.cancel);
+            }
+            let mut busy = BUSY_SHARES.lock().expect("shares lock");
+            let at = busy.iter().position(|(s, _)| *s == share).expect("a busy share is listed");
+            match busy[at].1.take() {
+                Some(next) => job = next,
+                None => {
+                    busy.swap_remove(at);
+                    return;
+                }
+            }
+        }
+    });
+}
+
 /// A crawl on its own low-priority thread; dropping it stops the crawl.
 pub struct Crawler {
     index: Arc<RwLock<Index>>,
@@ -322,12 +364,8 @@ impl Crawler {
             // Each share on its own thread, outside `done`: one that hangs only
             // loses its own entries and never holds back the rest or a re-crawl.
             for share in network {
-                let (shared, stop) = (shared.clone(), stop.clone());
                 let rules = Rules { share: true, ..rules.clone() };
-                thread::spawn(move || {
-                    lower_priority();
-                    crawl(&[share], &rules, &shared, &stop);
-                });
+                crawl_share(share, ShareJob { index: shared.clone(), rules, cancel: stop.clone() });
             }
             crawl(&roots, &rules, &shared, &stop);
             finished.store(true, Ordering::Release);
@@ -585,6 +623,49 @@ mod tests {
             assert!(start.elapsed() < std::time::Duration::from_secs(10), "the share is crawled too");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn a_re_crawl_never_starts_a_second_thread_on_a_share_still_being_crawled() {
+        let root = tree("index-share-busy");
+        let share = root.join("Downloads");
+        std::fs::write(share.join("shared.txt"), "x").unwrap();
+        let has_shared = |index: &RwLock<Index>| {
+            let index = index.read().unwrap();
+            (0..index.len() as u32).any(|id| index.name(id) == "shared.txt")
+        };
+        let start = |share: PathBuf, wait: Option<std::sync::mpsc::Receiver<()>>| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let scope = move || {
+                if let Some(wait) = wait {
+                    wait.recv().unwrap();
+                }
+                Scope { network: vec![share], rules: rules(), ..Scope::default() }
+            };
+            let crawler = Crawler::start(scope, move || tx.send(()).unwrap());
+            (crawler, rx)
+        };
+        // The first crawl's share thread hangs: it waits for its index's lock.
+        let (go, wait) = std::sync::mpsc::channel();
+        let (first, first_done) = start(share.clone(), Some(wait));
+        let first_index = first.index().clone();
+        let hung = first_index.write().unwrap();
+        go.send(()).unwrap();
+        first_done.recv_timeout(std::time::Duration::from_secs(10)).expect("the first crawl's own part ends");
+        let (second, second_done) = start(share.clone(), None);
+        second_done.recv_timeout(std::time::Duration::from_secs(10)).expect("the re-crawl's own part ends");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!has_shared(second.index()), "no second thread went into the busy share");
+        // The first crawl is replaced (dropped) and the share answers again:
+        // the same thread then crawls the share into the new index.
+        drop(first);
+        drop(hung);
+        let waited = std::time::Instant::now();
+        while !has_shared(second.index()) {
+            assert!(waited.elapsed() < std::time::Duration::from_secs(10), "the share's thread crawls the re-crawl's index next");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!has_shared(&first_index), "the replaced crawl stopped");
     }
 
     #[test]
