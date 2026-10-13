@@ -220,6 +220,9 @@ pub struct PathPopup {
     /// Up/Down pressed while the answer was still being searched, in order
     /// (true: down), to move over the answer once it lands.
     held_moves: Vec<bool>,
+    /// Up/Down moved the picked row: scroll it into view once, so the wheel
+    /// is never undone.
+    reveal_picked: bool,
     /// The box just opened: the index may need a re-crawl.
     check_index: bool,
 }
@@ -373,6 +376,7 @@ impl PathPopup {
         moves.extend(keys.down.then_some(true));
         moves.extend(keys.up.then_some(false));
         for down in moves {
+            self.reveal_picked = true;
             if down && !rows.is_empty() {
                 self.picked = Some(self.picked.or(first).map_or(0, |p| (p + 1).min(rows.len() - 1)));
             }
@@ -381,6 +385,7 @@ impl PathPopup {
             }
         }
         let picked = self.picked.or(first);
+        let reveal = std::mem::take(&mut self.reveal_picked);
         if keys.tab
             && let Some(row) = rows.get(picked.unwrap_or(0))
         {
@@ -505,7 +510,7 @@ impl PathPopup {
                                     });
                                 })
                                 .response;
-                            if picked {
+                            if picked && reveal {
                                 response.scroll_to_me(None);
                             }
                             if response.clicked() {
@@ -1111,6 +1116,51 @@ mod tests {
         }
         let (used, _) = shown(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::NONE)], &[]);
         assert_eq!(used, Some(PopupEvent::Open(dir.join("docs/down-notes.txt"))), "down, down, up: the second row");
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_list_and_it_stays_scrolled_while_a_row_is_picked() {
+        let dir = crate::fs::ops::tests::fresh_fixture("popup-wheel");
+        for n in 0..30 {
+            std::fs::write(dir.join(format!("file-{n:02}.txt")), "x").unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut popup = PathPopup::default();
+        let mut time = 0.0;
+        let mut step = |popup: &mut PathPopup, events| {
+            time += 1.0 / 60.0;
+            let input = egui::RawInput { events, time: Some(time), screen_rect: Some(SCREEN), ..Default::default() };
+            ctx.run_ui(input, |root| {
+                egui::CentralPanel::default().show(root, |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false, Vec::new));
+            })
+            .drop_without_applying_deltas();
+        };
+        popup.open();
+        step(&mut popup, vec![]);
+        // A typed name picks its first match.
+        step(&mut popup, vec![text(&format!("{}/file", dir.display()))]);
+        step(&mut popup, vec![]);
+        let first = ctx.read_response(row_id(0)).expect("drawn").rect;
+        step(&mut popup, vec![Event::PointerMoved(first.center())]);
+        let wheel = Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -150.0), modifiers: Modifiers::NONE, phase: egui::TouchPhase::Move };
+        for _ in 0..6 {
+            step(&mut popup, vec![wheel.clone()]);
+        }
+        for _ in 0..60 {
+            step(&mut popup, vec![]);
+        }
+        let now = ctx.read_response(row_id(0)).expect("drawn").rect;
+        assert!(now.top() < first.top() - 3.0 * first.height(), "the list stayed scrolled down: first row was {first:?}, now {now:?}");
+        // Down still brings the row it picks into view, past the visible ones.
+        for _ in 0..20 {
+            step(&mut popup, vec![key(Key::ArrowDown, Modifiers::NONE)]);
+        }
+        for _ in 0..60 {
+            step(&mut popup, vec![]);
+        }
+        let picked = ctx.read_response(row_id(20)).expect("drawn").rect;
+        let bottom = first.top() + VISIBLE_ROWS * first.height();
+        assert!(picked.top() >= first.top() - 1.0 && picked.bottom() <= bottom + 1.0, "the picked row {picked:?} is in view, above {bottom}");
     }
 
     #[test]
