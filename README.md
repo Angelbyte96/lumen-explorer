@@ -95,6 +95,7 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 | Ctrl+T | Open the current folder in a new tab (also the + in the tab bar) |
 | Ctrl+W | Close the tab (also its ×); the last tab stays open |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
+| Tab / Shift+Tab | Move the keyboard focus through the window, a ring around the part that has it: each tab, +, ☰, ←, →, ↑, ☆ and the path bar, then the side panel, then the list, and round again. Enter or Space presses a focused button (Enter on the path bar opens the path box). In the side panel ↑/↓ and Home/End move through the items of the open sections and Enter opens one. The list's keys (arrows, Enter, Delete, typing…) act on the list only while it has the focus; Esc or a click on the list gives it the keys back. Ctrl, Alt and F-key shortcuts work wherever the focus is |
 | Ctrl+D | Bookmark the current folder, or remove its bookmark (same as the ☆ button) |
 | Ctrl+H | Show / hide hidden files |
 | Alt+← / Alt+→ | Back / forward through visited folders |
