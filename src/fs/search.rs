@@ -12,6 +12,7 @@ use std::collections::{BinaryHeap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 
@@ -185,11 +186,22 @@ impl Eq for Ranked {}
 /// The best `limit` hits for `query`. Hidden entries (and all inside hidden
 /// folders) only when shown or when the query starts with a dot. `frecent`
 /// holds visited folders and their scores.
+#[cfg(test)]
 pub fn search(index: &Index, query: &str, show_hidden: bool, frecent: &[(PathBuf, f64)], limit: usize) -> Vec<Hit> {
+    search_unless(index, query, show_hidden, frecent, limit, &|| false).expect("never stopped")
+}
+
+/// Entries scanned between two looks at `stop`.
+const STOP_EVERY: u32 = 4096;
+
+/// The best `limit` hits for `query`, like `search`, or None once `stop`
+/// says a newer search replaced it, so typing fast never leaves old scans
+/// of the whole index running.
+fn search_unless(index: &Index, query: &str, show_hidden: bool, frecent: &[(PathBuf, f64)], limit: usize, stop: &dyn Fn() -> bool) -> Option<Vec<Hit>> {
     let typed: String = query.trim().chars().map(fold).collect();
     let compact: String = typed.chars().filter(|c| !c.is_whitespace()).collect();
     if compact.is_empty() || limit == 0 {
-        return Vec::new();
+        return Some(Vec::new());
     }
     let letters_typed: Vec<char> = compact.chars().collect();
     let ascii = compact.is_ascii().then_some(compact.as_bytes());
@@ -202,6 +214,9 @@ pub fn search(index: &Index, query: &str, show_hidden: bool, frecent: &[(PathBuf
     let mut best: BinaryHeap<Ranked> = BinaryHeap::with_capacity(limit + 1);
     let mut lower = String::new();
     for id in 0..index.len() as u32 {
+        if id % STOP_EVERY == 0 && stop() {
+            return None;
+        }
         // Roots ("/", "C:\") are where the search looks, not results.
         if index.parent(id).is_none() || (!hidden_ok && index.is_hidden(id)) {
             continue;
@@ -247,7 +262,7 @@ pub fn search(index: &Index, query: &str, show_hidden: bool, frecent: &[(PathBuf
             hits.push(Hit { id, path: index.path(id), is_dir: index.is_dir(id), hidden: index.is_hidden(id), ranges: Vec::new() });
         }
     }
-    hits
+    Some(hits)
 }
 
 /// What a search found.
@@ -265,12 +280,14 @@ pub struct Searcher {
     tx: Sender<Answer>,
     rx: Receiver<Answer>,
     latest_id: u64,
+    /// `latest_id` for the search threads: an older one stops on seeing it.
+    latest: Arc<AtomicU64>,
 }
 
 impl Searcher {
     pub fn new(index: Arc<RwLock<Index>>) -> Self {
         let (tx, rx) = mpsc::channel();
-        Self { index, tx, rx, latest_id: 0 }
+        Self { index, tx, rx, latest_id: 0, latest: Arc::new(AtomicU64::new(0)) }
     }
 
     /// Starts a search; `on_done` runs on its thread when the answer is ready
@@ -278,9 +295,14 @@ impl Searcher {
     pub fn request(&mut self, query: String, show_hidden: bool, frecent: Vec<(PathBuf, f64)>, limit: usize, on_done: impl FnOnce() + Send + 'static) -> u64 {
         self.latest_id += 1;
         let id = self.latest_id;
-        let (index, tx) = (self.index.clone(), self.tx.clone());
+        self.latest.store(id, AtomicOrdering::Relaxed);
+        let (index, tx, latest) = (self.index.clone(), self.tx.clone(), self.latest.clone());
         thread::spawn(move || {
-            let hits = search(&index.read().expect("index lock"), &query, show_hidden, &frecent, limit);
+            let replaced = || latest.load(AtomicOrdering::Relaxed) != id;
+            // A replaced search's answer would be dropped anyway.
+            let Some(hits) = search_unless(&index.read().expect("index lock"), &query, show_hidden, &frecent, limit, &replaced) else {
+                return;
+            };
             // The receiver only disappears when the app is closing.
             let _ = tx.send(Answer { id, hits });
             on_done();
@@ -397,6 +419,14 @@ mod tests {
         assert_eq!(names(&index, &hits), ["Downloads", "Windows NT", "photos", "song.mp3"]);
         assert!(hits[2].ranges.is_empty(), "listed for its folder, not for a match");
         assert_eq!(search(&index, "down", false, &[], 3).len(), 3);
+    }
+
+    #[test]
+    fn a_search_told_to_stop_gives_up_and_otherwise_finds_the_same() {
+        let index = index(&["Downloads/", "Windows NT/"]);
+        assert!(search_unless(&index, "down", false, &[], 10, &|| true).is_none(), "a replaced search stops");
+        let kept = search_unless(&index, "down", false, &[], 10, &|| false).expect("not stopped");
+        assert_eq!(names(&index, &kept), names(&index, &search(&index, "down", false, &[], 10)));
     }
 
     #[test]
