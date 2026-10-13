@@ -35,6 +35,9 @@ pub struct Rules {
     /// [`SHARE_DEPTH`], and a folder holding a whole Linux system gives only
     /// its home, like this machine's.
     pub share: bool,
+    /// The network shares' tops: a link pointing into one is never stat'ed,
+    /// so a share that hangs cannot stall the crawl that finds the link.
+    pub shares: Vec<PathBuf>,
 }
 
 /// How deep a share is crawled: past any real folder, short of a loop.
@@ -135,13 +138,14 @@ pub fn scope(windows: bool, home: Option<&Path>, disks: Vec<PathBuf>, network: V
         // Each user's program settings and caches.
         skip_names.push("AppData".into());
         let skip_paths = disks.iter().chain(&network).flat_map(|drive| WINDOWS_SYSTEM.map(|name| drive.join(name))).collect();
-        return Scope { roots: disks, network, rules: Rules { skip_names, skip_paths, mounts: Vec::new(), share: false } };
+        let rules = Rules { skip_names, skip_paths, mounts: Vec::new(), share: false, shares: network.clone() };
+        return Scope { roots: disks, network, rules };
     }
     // `/` and a disk holding home (a /home partition) would bring in the
     // system or other users; a disk inside home is crossed into from it.
     let others = disks.iter().filter(|d| home.is_none_or(|h| !h.starts_with(d) && !d.starts_with(h)) && d.parent().is_some());
     let roots = home.map(Path::to_path_buf).into_iter().chain(others.cloned()).collect();
-    let rules = Rules { skip_names, skip_paths: network.clone(), mounts: disks, share: false };
+    let rules = Rules { skip_names, skip_paths: network.clone(), mounts: disks, share: false, shares: network.clone() };
     Scope { roots, network, rules }
 }
 
@@ -212,9 +216,12 @@ fn read_folder(path: &Path, parent_dev: Option<u64>, rules: &Rules) -> Found {
             if may_enter(&child, dev, parent_dev, || same_filesystem(path, &child), rules) {
                 next = Some((child, dev));
             }
-        } else if kind.is_symlink() && std::fs::metadata(&child).is_ok_and(|m| m.is_dir()) {
+        } else if kind.is_symlink() {
             // Found as the folder it points to, never followed: no loops.
-            is_dir = true;
+            is_dir = match link_into_share(path, &child, rules) {
+                Some(target) => rules.shares.contains(&target),
+                None => std::fs::metadata(&child).is_ok_and(|m| m.is_dir()),
+            };
         }
         found.push((name, is_dir, next));
     }
@@ -223,6 +230,25 @@ fn read_folder(path: &Path, parent_dev: Option<u64>, rules: &Rules) -> Found {
         found.retain(|(name, ..)| name == "home");
     }
     found
+}
+
+/// Where the link `child` in `folder` points, when that is inside a share:
+/// read from the link itself, lexically, without touching the target.
+fn link_into_share(folder: &Path, child: &Path, rules: &Rules) -> Option<PathBuf> {
+    if rules.shares.is_empty() {
+        return None;
+    }
+    let mut target = PathBuf::new();
+    for part in folder.join(std::fs::read_link(child).ok()?).components() {
+        match part {
+            std::path::Component::ParentDir => {
+                target.pop();
+            }
+            std::path::Component::CurDir => {}
+            part => target.push(part),
+        }
+    }
+    rules.shares.iter().any(|share| target.starts_with(share)).then_some(target)
 }
 
 /// Crawls `roots` into `index`, breadth first, until done or `cancel` is set.
@@ -465,6 +491,7 @@ mod tests {
         assert_eq!(scope.network, network);
         assert_eq!(scope.rules.skip_names, SKIPPED_NAMES);
         assert_eq!(scope.rules.skip_paths, network, "the local crawl never touches a share");
+        assert_eq!(scope.rules.shares, network, "nor a link into one");
         assert!(scope.rules.mounts.contains(&PathBuf::from("/home/u/data")), "a disk inside home is crossed into");
     }
 
@@ -480,6 +507,7 @@ mod tests {
                 assert!(scope.rules.skip_paths.contains(&drive.join(name)), "{name}");
             }
         }
+        assert_eq!(scope.rules.shares, std::slice::from_ref(&z), "no link into a share is followed");
         assert!(scope.rules.skip_names.iter().any(|n| n == "AppData"));
         assert!(scope.rules.skip_names.iter().any(|n| n == "node_modules"));
     }
@@ -496,6 +524,26 @@ mod tests {
         assert_eq!(linux.roots, [home, PathBuf::from("/media/usb")]);
         assert_eq!(linux.network, std::slice::from_ref(&nas));
         assert!(!linux.rules.mounts.contains(&nas), "the local crawl never crosses into a share");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_into_a_share_is_found_without_asking_the_share_what_it_points_to() {
+        let root = fixture("index-share-link");
+        let share = root.join("share");
+        std::fs::create_dir_all(share.join("deep")).unwrap();
+        std::fs::create_dir_all(root.join("local")).unwrap();
+        let link = |target: &Path, name: &str| std::os::unix::fs::symlink(target, root.join(name)).unwrap();
+        link(&share.join("deep"), "to-deep");
+        link(Path::new("share/deep"), "to-deep-relative");
+        link(Path::new("local/../share/deep"), "to-deep-around");
+        link(&share, "to-share");
+        link(&root.join("local"), "to-local");
+        let rules = Rules { skip_paths: vec![share.clone()], shares: vec![share.clone()], ..rules() };
+        let index = crawled(std::slice::from_ref(&root), &rules);
+        // Inside the share only its top is known to be a folder; a link to
+        // anything else there is found as a plain entry.
+        assert_eq!(listed(&index, &root), ["", "local/", "to-deep", "to-deep-around", "to-deep-relative", "to-local/", "to-share/"]);
     }
 
     #[test]
