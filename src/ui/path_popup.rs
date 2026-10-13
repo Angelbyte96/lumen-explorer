@@ -393,6 +393,8 @@ impl PathPopup {
             let prefix = match &row.parent {
                 Some(parent) => initial_text(parent),
                 None if folder_text.is_empty() => initial_text(current),
+                // A drive alone ("C:") completes from its top: C:\Users\.
+                None if !folder_text.ends_with(['/', '\\']) => initial_text(&folder),
                 None => folder_text,
             };
             self.set_text(complete(&prefix, &row.entry), Cursor::End);
@@ -600,8 +602,15 @@ fn is_bare_word(text: &str) -> bool {
 /// Splits the text after its last separator: the folder part (kept with its
 /// separator) and the name being typed.
 pub fn split_input(text: &str) -> (&str, &str) {
+    split_input_on(text, cfg!(windows))
+}
+
+/// [`split_input`] for Windows or not. On Windows a drive with no separator
+/// after it ("C:", "C:Us") is the folder part, so its top is listed.
+fn split_input_on(text: &str, windows: bool) -> (&str, &str) {
     match text.rfind(['/', '\\']) {
         Some(at) => text.split_at(at + 1),
+        None if windows && matches!(text.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic()) => text.split_at(2),
         None => ("", text),
     }
 }
@@ -1214,6 +1223,28 @@ mod tests {
         assert_eq!(split_input("/home/u/"), ("/home/u/", ""));
         assert_eq!(split_input("De"), ("", "De"));
         assert_eq!(split_input("~/Do"), ("~/", "Do"));
+    }
+
+    #[test]
+    fn on_windows_a_typed_drive_is_the_folder_part_even_with_no_separator() {
+        assert_eq!(split_input_on("C:", true), ("C:", ""));
+        assert_eq!(split_input_on("C:Us", true), ("C:", "Us"));
+        assert_eq!(split_input_on(r"C:\Users\De", true), (r"C:\Users\", "De"));
+        assert_eq!(split_input_on("De", true), ("", "De"));
+        assert_eq!(split_input_on("C:Us", false), ("", "C:Us"), "elsewhere C: is a plain name");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_typed_drive_lists_its_top_and_tab_completes_from_there() {
+        let (ctx, mut popup, dir) = opened("popup-drive");
+        step(&ctx, &mut popup, &dir, vec![text("C:User")]);
+        step(&ctx, &mut popup, &dir, vec![key(Key::Tab, Modifiers::NONE)]);
+        assert_eq!(popup.text(), r"C:\Users\");
+        let (ctx, mut popup, dir) = opened("popup-drive-enter");
+        step(&ctx, &mut popup, &dir, vec![text("C:User")]);
+        let used = step(&ctx, &mut popup, &dir, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert_eq!(used, go(PathBuf::from(r"C:\Users"), None, false));
     }
 
     #[test]
