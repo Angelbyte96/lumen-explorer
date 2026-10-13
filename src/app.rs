@@ -2044,7 +2044,7 @@ impl eframe::App for LumenApp {
         });
 
         egui::Panel::bottom("status_bar").show(ui, |ui| {
-            ui::status_bar::show(
+            let picked = ui::status_bar::show(
                 ui,
                 &Status {
                     filter: self.tab.view.filter(),
@@ -2071,8 +2071,12 @@ impl eframe::App for LumenApp {
                         let name = file_name(&c.path).unwrap_or_default();
                         ui::status_bar::counting_text(&name, &c.progress)
                     }),
+                    view: self.view_size,
                 },
             );
+            if let Some(view) = picked {
+                self.view_size = view;
+            }
         });
 
         if self.sidebar_open {
