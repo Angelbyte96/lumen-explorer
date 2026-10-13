@@ -57,7 +57,6 @@ pub fn show(
     file_list::focus_stop(ui, whole);
     let shape = GridShape::new(per_row(whole.width() - 2.0 * GAP, card.x), view.folder_count(), view.rows.len());
     let pitch = card.y + GAP;
-    let multi = view.picked_count() > 0;
     let mut event = None;
     ui.ctx().data_mut(|d| d.remove::<Rect>(file_list::cursor_row_id()));
 
@@ -81,17 +80,7 @@ pub fn show(
                 let entry = &view.entries[view.rows[i]];
                 let rect = place(i);
                 let response = ui.interact(rect, egui::Id::new(("lumen_card", i)), egui::Sense::click());
-                let selected = if multi { view.is_picked(i) } else { view.selected == Some(i) };
-                let visuals = ui.visuals();
-                if selected {
-                    ui.painter().rect_filled(rect, 4.0, visuals.selection.bg_fill.gamma_multiply(0.35));
-                    ui.painter().rect_stroke(rect, 4.0, visuals.selection.stroke, egui::StrokeKind::Inside);
-                } else if response.hovered() {
-                    ui.painter().rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
-                }
-                if view.selected == Some(i) {
-                    ui.ctx().data_mut(|d| d.insert_temp(file_list::cursor_row_id(), rect));
-                }
+                paint_cell(ui, view, i, rect, &response);
                 let inner = rect.shrink2(vec2(PAD / 2.0, PAD));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
                     if cut.contains(&entry.path) {
@@ -109,20 +98,8 @@ pub fn show(
                     let size = if entry.is_dir { view.totals.get(&entry.name).map(|t| t.bytes) } else { entry.size };
                     ui.add(egui::Label::new(egui::RichText::new(size.map(format_size).unwrap_or_default()).weak()).selectable(false));
                 });
-                let response = response.on_hover_text(&entry.name);
-                if response.secondary_clicked() {
-                    event = Some(ListEvent::Menu(i));
-                } else if response.double_clicked() {
-                    event = Some(ListEvent::Activate(i));
-                } else if response.clicked() {
-                    let m = ui.input(|input| input.modifiers);
-                    event = Some(if m.command {
-                        ListEvent::Toggle(i)
-                    } else if m.shift {
-                        ListEvent::Extend(i)
-                    } else {
-                        ListEvent::Select(i)
-                    });
+                if let Some(clicked) = cell_event(&response.on_hover_text(&entry.name), i) {
+                    event = Some(clicked);
                 }
             }
         }
@@ -138,6 +115,42 @@ pub fn show(
         ui.painter().rect_stroke(whole.shrink(1.0), 2, ui.visuals().selection.stroke, egui::StrokeKind::Inside);
     }
     GridOut { event, shape }
+}
+
+/// A cell's highlight: picked or the cursor, else hovered. The cursor's
+/// place is kept for Shift+F10.
+pub(crate) fn paint_cell(ui: &egui::Ui, view: &View, i: usize, rect: Rect, response: &egui::Response) {
+    let selected = if view.picked_count() > 0 { view.is_picked(i) } else { view.selected == Some(i) };
+    let visuals = ui.visuals();
+    if selected {
+        ui.painter().rect_filled(rect, 4.0, visuals.selection.bg_fill.gamma_multiply(0.35));
+        ui.painter().rect_stroke(rect, 4.0, visuals.selection.stroke, egui::StrokeKind::Inside);
+    } else if response.hovered() {
+        ui.painter().rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
+    }
+    if view.selected == Some(i) {
+        ui.ctx().data_mut(|d| d.insert_temp(file_list::cursor_row_id(), rect));
+    }
+}
+
+/// What a click on cell `i` means, like a click on a Details row.
+pub(crate) fn cell_event(response: &egui::Response, i: usize) -> Option<ListEvent> {
+    if response.secondary_clicked() {
+        Some(ListEvent::Menu(i))
+    } else if response.double_clicked() {
+        Some(ListEvent::Activate(i))
+    } else if response.clicked() {
+        let m = response.ctx.input(|input| input.modifiers);
+        Some(if m.command {
+            ListEvent::Toggle(i)
+        } else if m.shift {
+            ListEvent::Extend(i)
+        } else {
+            ListEvent::Select(i)
+        })
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

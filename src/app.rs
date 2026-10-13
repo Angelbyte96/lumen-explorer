@@ -1890,18 +1890,22 @@ impl LumenApp {
     }
 
     /// Where an arrow key lands in a view laid out in lines: in Icons, Up and
-    /// Down cross the rows and Left and Right walk the cards. `None` in Details.
+    /// Down cross the rows and Left and Right walk the cards; in List, Up and
+    /// Down walk the column and Left and Right cross the columns. `None` in Details.
     fn grid_target(&self, action: Action) -> Option<usize> {
         let shape = self.grid?;
         let last = self.tab.view.rows.len().checked_sub(1)?;
         let cur = self.tab.view.selected.unwrap_or(0).min(last);
-        Some(match action {
-            Action::Extend(isize::MIN) => 0,
-            Action::Extend(isize::MAX) => last,
-            Action::Move(lines) | Action::Extend(lines) => shape.across(cur, lines),
-            Action::Side(cells) | Action::ExtendSide(cells) => shape.along(cur, cells),
+        let rows_are_lines = self.view_size.layout() == ui::view_size::Layout::Icons;
+        let (down, side) = match action {
+            Action::Extend(isize::MIN) => return Some(0),
+            Action::Extend(isize::MAX) => return Some(last),
+            Action::Move(n) | Action::Extend(n) => (n, 0),
+            Action::Side(n) | Action::ExtendSide(n) => (0, n),
             _ => return None,
-        })
+        };
+        let (across, along) = if rows_are_lines { (down, side) } else { (side, down) };
+        Some(if across != 0 { shape.across(cur, across) } else { shape.along(cur, along) })
     }
 
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
@@ -2166,16 +2170,15 @@ impl eframe::App for LumenApp {
             let scroll = self.tab.view.scroll.take();
             let cut = self.cut_paths().to_vec();
             let sizes = ui::file_list::Sizes { widths: self.columns, shown: self.shown_columns, order: self.column_order };
-            let event = match self.view_size.growth() {
-                Some(growth) => {
-                    let out = ui::icon_grid::show(ui, &self.tab.view, &cut, growth, scroll, self.rename.as_mut(), &self.file_icons);
-                    self.grid = Some(out.shape);
-                    out.event
-                }
-                None => {
-                    self.grid = None;
-                    ui::file_list::show(ui, &self.tab.view, &cut, sizes, scroll, self.rename.as_mut(), &self.file_icons)
-                }
+            let lined = match (self.view_size.layout(), self.view_size.growth()) {
+                (_, Some(growth)) => Some(ui::icon_grid::show(ui, &self.tab.view, &cut, growth, scroll, self.rename.as_mut(), &self.file_icons)),
+                (ui::view_size::Layout::List, _) => Some(ui::list_view::show(ui, &self.tab.view, &cut, scroll, self.rename.as_mut(), &self.file_icons)),
+                _ => None,
+            };
+            self.grid = lined.as_ref().map(|out| out.shape);
+            let event = match lined {
+                Some(out) => out.event,
+                None => ui::file_list::show(ui, &self.tab.view, &cut, sizes, scroll, self.rename.as_mut(), &self.file_icons),
             };
             // After drawing: the icons the list just asked for go out this frame.
             self.file_icons.poll(&ctx);
@@ -3494,6 +3497,24 @@ mod tests {
         app.handle_action(&ctx, Action::Extend(isize::MIN));
         assert_eq!(app.tab.view.selected, Some(0), "Shift+Home: the first card");
         assert!(app.tab.view.is_picked(0) && app.tab.view.is_picked(1) && !app.tab.view.is_picked(2), "from the anchor a.txt back to sub");
+    }
+
+    #[test]
+    fn in_the_list_view_up_and_down_walk_a_column_and_left_right_cross_columns() {
+        use ui::grid::GridShape;
+        let (ctx, mut app, _dir) = app_in("app-list-keys");
+        app.view_size = ui::view_size::ViewSize::new(20);
+        // Columns of 2: sub / a.txt b.txt.
+        app.grid = Some(GridShape::new(2, 1, 3));
+        let mut at = |action| {
+            app.handle_action(&ctx, action);
+            app.tab.view.selected_entry().map(|e| e.name.clone()).unwrap()
+        };
+        assert_eq!(at(Action::First), "sub");
+        assert_eq!(at(Action::Move(1)), "a.txt", "down: the next cell, here the next column's top");
+        assert_eq!(at(Action::Move(1)), "b.txt");
+        assert_eq!(at(Action::Side(-1)), "sub", "left: the column before, held to its last cell");
+        assert_eq!(at(Action::Side(1)), "a.txt", "right: same place in the next column");
     }
 
     #[test]

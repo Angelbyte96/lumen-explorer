@@ -5,6 +5,7 @@ pub mod file_list;
 pub mod grid;
 pub mod icon_grid;
 pub mod icons;
+pub mod list_view;
 pub mod path_popup;
 pub mod preview;
 pub mod sidebar;
