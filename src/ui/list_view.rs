@@ -138,6 +138,30 @@ mod tests {
     }
 
     #[test]
+    fn the_sideways_scroll_bar_stays_above_the_room_kept_for_the_islands() {
+        let ctx = egui::Context::default();
+        let files: Vec<String> = (0..200).map(|n| format!("file-{n:03}.txt")).collect();
+        let view = listed(&[], &files);
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 300.0));
+        let room = 40.0;
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let mut output = ctx.run_ui(input, |root| {
+                egui::CentralPanel::default_margins().show(root, |ui| {
+                    crate::ui::status_bar::above_islands(ui, room, |ui| {
+                        show(ui, &view, &[], None, None, &FileIcons::default());
+                    });
+                });
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let low: Vec<Rect> = shapes.iter().map(|s| s.shape.visual_bounding_rect()).filter(|r| r.is_finite() && *r != screen && r.max.y > screen.max.y - room + 0.5).collect();
+        assert!(low.is_empty(), "nothing drawn in the islands' strip: {low:?}");
+    }
+
+    #[test]
     fn a_column_fits_the_height_and_never_holds_less_than_one() {
         assert_eq!(per_column(240.0, 24.0), 10);
         assert_eq!(per_column(5.0, 24.0), 1);
