@@ -661,6 +661,9 @@ pub enum NavKind {
 }
 
 /// How often the side panel reads the mounted disks again.
+/// How long a newly picked view takes to fade in, in seconds: short, so the
+/// switch still feels instant.
+const VIEW_FADE: f64 = 0.12;
 const DISKS_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Wait between the first change on disk and the reload. Later changes in that
@@ -1017,6 +1020,9 @@ pub struct LumenApp {
     /// The cells' lines as last drawn, in views laid out in lines (Icons);
     /// the arrows move through them.
     grid: Option<ui::grid::GridShape>,
+    /// The view last drawn and when (egui time, seconds) the list started
+    /// showing it: a new view fades in for `VIEW_FADE`.
+    shown_layout: (ui::view_size::Layout, f64),
     /// The list's column widths.
     columns: ui::file_list::Widths,
     /// Which list columns are shown.
@@ -1095,6 +1101,7 @@ impl LumenApp {
             sidebar_open: true,
             view_size: ui::view_size::ViewSize::default(),
             grid: None,
+            shown_layout: (ui::view_size::Layout::Details, f64::NEG_INFINITY),
             columns: ui::file_list::DEFAULT_WIDTHS,
             shown_columns: ui::file_list::ALL_SHOWN,
             column_order: ui::file_list::DEFAULT_ORDER,
@@ -2140,6 +2147,18 @@ impl LumenApp {
         Some(if across != 0 { shape.across(cur, across) } else { shape.along(cur, along) })
     }
 
+    /// How opaque the list is at time `now`: a view just picked (Details,
+    /// Tree, List or Icons) fades in over `VIEW_FADE`, like File Pilot's quick
+    /// switch; icons growing inside the grid are the same view and never fade.
+    fn list_opacity(&mut self, now: f64) -> f32 {
+        let layout = self.view_size.layout();
+        if layout != self.shown_layout.0 {
+            self.shown_layout = (layout, now);
+        }
+        let done = ((now - self.shown_layout.1) / VIEW_FADE).clamp(0.0, 1.0) as f32;
+        0.35 + 0.65 * done
+    }
+
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::FocusPathBar => self.path_popup.open(),
@@ -2373,6 +2392,11 @@ impl eframe::App for LumenApp {
             ui.set_max_height(ui.available_height() - ui::status_bar::island_room(&ctx));
             let scroll = self.tab.view.scroll.take();
             let cut = self.cut_paths().to_vec();
+            let opacity = self.list_opacity(ctx.input(|i| i.time));
+            if opacity < 1.0 {
+                ui.multiply_opacity(opacity);
+                ctx.request_repaint();
+            }
             let tree = self.view_size.layout() == ui::view_size::Layout::Tree;
             if !tree {
                 // The unfolded folders belong to the Tree view alone.
@@ -3774,6 +3798,23 @@ mod tests {
         assert_eq!(app.tab.view.selected, Some(0));
         app.handle_action(&ctx, Action::Move(1));
         assert_eq!(app.tab.view.selected, Some(1), "Down still moves one row");
+    }
+
+    #[test]
+    fn a_new_view_fades_in_briefly_and_growing_icons_do_not() {
+        use ui::view_size::ViewSize;
+        let (_ctx, mut app, _dir) = app_in("app-view-fade");
+        assert_eq!(app.list_opacity(0.0), 1.0, "nothing changed: drawn whole");
+        app.view_size = ViewSize::new(20);
+        let start = app.list_opacity(10.0);
+        assert!(start < 1.0, "List just picked: still fading in ({start})");
+        let mid = app.list_opacity(10.0 + VIEW_FADE / 2.0);
+        assert!(mid > start && mid < 1.0, "half way: {mid}");
+        assert_eq!(app.list_opacity(10.0 + VIEW_FADE), 1.0, "done after the fade");
+        app.view_size = ViewSize::new(30);
+        assert!(app.list_opacity(20.0) < 1.0, "List to M Icons is another view");
+        app.view_size = ViewSize::new(80);
+        assert_eq!(app.list_opacity(20.0 + VIEW_FADE), 1.0, "M to XL grows the icons, no new fade");
     }
 
     #[test]
