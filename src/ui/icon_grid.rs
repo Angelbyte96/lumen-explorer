@@ -93,7 +93,7 @@ pub fn show(
                             event = Some(ListEvent::RenameEnded(submit));
                         }
                     } else {
-                        file_list::name_label(ui, entry, view.filter());
+                        file_list::cell_name_label(ui, entry, view.filter());
                     }
                     let size = if entry.is_dir { view.totals.get(&entry.path).map(|t| t.bytes) } else { entry.size };
                     ui.add(egui::Label::new(egui::RichText::new(size.map(format_size).unwrap_or_default()).weak()).selectable(false));
@@ -288,6 +288,20 @@ mod tests {
         let xl = settled(&ctx, &view, 1.0);
         assert!(!at(&xl, "07 - ").2, "whole at XL");
         assert!(xl.out.shape.per_line < settled(&ctx, &view, 0.0).out.shape.per_line);
+    }
+
+    #[test]
+    fn hovering_a_cut_name_shows_the_whole_name_once() {
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|s| s.interaction.tooltip_delay = 0.0);
+        let name = "verify-f4.J1fQ-a-rather-long-name.png";
+        let view = listed(&[], &[name]);
+        let cut = at(&settled(&ctx, &view, 0.0), "verify").1;
+        draw_at(&ctx, &view, 0.0, vec![egui::Event::PointerMoved(cut.center())], Some(1.0));
+        draw_at(&ctx, &view, 0.0, vec![], Some(2.0));
+        let drawn = draw_at(&ctx, &view, 0.0, vec![], Some(3.0));
+        let whole = drawn.texts.iter().filter(|(t, _, elided)| t == name && !elided).count();
+        assert_eq!(whole, 1, "one tooltip: {:?}", drawn.texts);
     }
 
     fn click(pos: egui::Pos2, button: egui::PointerButton) -> Vec<egui::Event> {

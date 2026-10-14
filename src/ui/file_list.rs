@@ -498,14 +498,25 @@ pub fn name_label(ui: &mut egui::Ui, entry: &Entry, typed: &str) {
     ranged_name_label(ui, entry, &ranges);
 }
 
-/// [`name_label`] with the letters to mark given, for names found by the
-/// quick jump, whose letters need not be whole words.
-pub fn ranged_name_label(ui: &mut egui::Ui, entry: &Entry, ranges: &[std::ops::Range<usize>]) {
+/// `name_label` without its own tooltip when cut: for a cell whose whole
+/// area already shows the name on hover, so it never shows twice.
+pub fn cell_name_label(ui: &mut egui::Ui, entry: &Entry, typed: &str) {
+    let ranges = word_ranges(&entry.name, typed).unwrap_or_default();
+    ui.add(name_widget(ui, entry, &ranges).show_tooltip_when_elided(false));
+}
+
+fn name_widget(ui: &egui::Ui, entry: &Entry, ranges: &[std::ops::Range<usize>]) -> egui::Label {
     let visuals = ui.visuals();
     let normal = if entry.hidden { visuals.weak_text_color() } else { visuals.text_color() };
     let font = egui::TextStyle::Body.resolve(ui.style());
     let job = marked_name(&entry.name, ranges, normal, visuals.hyperlink_color, font);
-    ui.add(egui::Label::new(job).selectable(false).truncate());
+    egui::Label::new(job).selectable(false).truncate()
+}
+
+/// [`name_label`] with the letters to mark given, for names found by the
+/// quick jump, whose letters need not be whole words.
+pub fn ranged_name_label(ui: &mut egui::Ui, entry: &Entry, ranges: &[std::ops::Range<usize>]) {
+    ui.add(name_widget(ui, entry, ranges));
 }
 
 /// Header labels and the column each one sorts, in display order.
