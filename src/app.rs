@@ -375,12 +375,19 @@ impl View {
 
     /// What an operation acts on, in display order: the picked rows shown, or
     /// the cursor row when none is.
+    /// What the actions act on: the picked rows, or the cursor row. An entry
+    /// inside a picked unfolded folder goes with that folder, so it is left
+    /// out: acting on it again would fail once the folder is gone, or copy it twice.
     pub fn selection(&self) -> Vec<&Entry> {
         let picked: Vec<&Entry> = (0..self.rows.len())
             .filter(|&row| self.is_picked(row))
             .map(|row| self.entry(self.rows[row]))
             .collect();
-        if picked.is_empty() { self.selected_entry().into_iter().collect() } else { picked }
+        if picked.is_empty() {
+            return self.selected_entry().into_iter().collect();
+        }
+        let folders: Vec<&Path> = picked.iter().filter(|e| e.is_dir).map(|e| e.path.as_path()).collect();
+        picked.into_iter().filter(|e| !folders.iter().any(|f| e.path != *f && e.path.starts_with(f))).collect()
     }
 
     pub fn selected_entry(&self) -> Option<&Entry> {
@@ -5347,6 +5354,24 @@ mod tests {
         app.handle_action(&ctx, Action::TypeChar(' '));
         app.sync_preview(&ctx);
         assert_eq!(app.preview.as_ref().map(|p| p.path.clone()), Some(dir.join("sub/deeper")), "Space previews the child");
+    }
+
+    #[test]
+    fn a_picked_folder_takes_its_picked_children_with_it_so_each_is_acted_on_once() {
+        let (ctx, mut app, dir) = unfolded_app("app-tree-nested-picks");
+        app.handle_action(&ctx, Action::SelectAll);
+        assert_eq!(app.tab.view.picked_count(), 5, "every row is picked");
+        let tops = vec![dir.join("sub"), dir.join("a.txt"), dir.join("b.txt")];
+        app.handle_action(&ctx, Action::Copy);
+        assert_eq!(app.clipboard.as_ref().map(|c| c.paths.clone()), Some(tops.clone()), "sub's children go with sub, not twice");
+        app.handle_action(&ctx, Action::DeleteForever);
+        let Some(Dialog::Delete { paths, .. }) = &app.dialog else { panic!("asks first") };
+        assert_eq!(paths, &tops);
+        app.answer_dialog(&ctx, Confirm::Yes);
+        land(&mut app);
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name()).filter(|n| n != "cfg").collect();
+        assert!(left.is_empty(), "everything picked is gone, nothing left behind by an error: {left:?}");
+        assert_eq!(app.tab.view.error, None);
     }
 
     #[test]
