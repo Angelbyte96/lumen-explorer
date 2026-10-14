@@ -80,15 +80,15 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 
 | Key | Action |
 |---|---|
-| ↑ / ↓ | Move selection |
-| ← / → | Tree view: → unfolds a folded folder, and on an unfolded one goes to its first child; ← folds an unfolded folder, and on a child goes to its parent folder. In the Icons and List views they walk the cells; in Details they do nothing |
+| ↑ / ↓ | Move selection (in Icons, to the card above / below; in List, along the column and on into the next) |
+| ← / → | Tree view: → unfolds a folded folder, and on an unfolded one goes to its first child; ← folds an unfolded folder, and on a child goes to its parent folder. In Icons they go to the card on the left / right; in List to the column on the left / right; in Details they do nothing |
 | PageUp / PageDown | Move 20 rows |
 | Home / End | First / last entry |
 | Shift+↑ / Shift+↓, Shift+PageUp / PageDown, Shift+Home / End | Select the range from where the selection started (also Shift+click) |
 | Ctrl+A | Select every row shown (with text in the filter, only the rows it left) |
 | Ctrl+click | Add a row to the selection, or take it out |
 | Click below the rows | Drop a multiple selection |
-| Drag from below the rows, or from a row outside its icon and name | Select every row the band touches; held near the list's top or bottom edge (or past it), the list scrolls, faster closer to the edge |
+| Drag from below the rows, or from a row outside its icon and name | Select every row the band touches; held near the list's top or bottom edge (or past it), the list scrolls, faster closer to the edge. In Icons and List, drag from the space around the cards: every card the band touches is picked, and near an edge the view scrolls (sideways in List) |
 | Right click, Shift+F10, Menu key | The menu for the selection (a row outside it becomes the selection) or, below the rows, for the folder: type to search it ("sort size"), ↑/↓ to move, → / ← to open or close a submenu, Enter or a click to run, Esc to close. On Linux, "Open With" lists the apps installed for the entry's type (as GNOME and KDE read them), launched with `gio launch`; "Open Terminal Here" starts $TERMINAL or the first terminal installed; New ▸ creates a folder, an empty file or a copy of a file from your Templates folder (~/Templates, or its name in your language), never over an existing name, and starts renaming it. On Windows the menu holds the shell's own items, as File Explorer shows them (Open with, Send to, 7-Zip, PowerRename… whatever that PC has installed), with their icons, followed by Lumen's own; Cut, Copy, Paste, Delete and Rename there use Lumen's clipboard, trash and in-place rename |
 | Enter (or double click) | Enter folder / open file with the default app |
 | Backspace | Erase the last filter character, or go to the parent folder when the filter is empty (holding it stops once the filter is empty) |
@@ -122,6 +122,8 @@ The side panel on the left (☰ shows or hides it) lists your **Bookmarks** (rig
 The toolbar has back, forward and up buttons, the bookmark star and the current path as crumbs (`angelbyte › Descargas`): click a crumb to go there. Inside your home folder the crumbs start at it; elsewhere they start at `/`.
 
 The list and the folder preview show Name, Type, Date Modified, Folders, Files and Size. Click a header to sort by that column; click it again to reverse. Folders always stay on top; counted folders sort by their totals. Drag the border between two headers to resize a column (every column keeps its own width, the last one stretches to the list's edge, and columns wider than the window scroll sideways); the widths are saved. Right-click a header for Shift Column Left / Right (past hidden columns), Size Column To Fit, Close Column (also a middle click on the header), Size All Columns To Fit (Ctrl+Shift+F), Restore Default Columns (default widths and order, every column shown) and a checkbox per column to show or hide it; Name is always shown. Hidden columns and the order are saved too.
+
+Lumen has six views, picked with the view button at the bottom right (hover or click it; drag its knob or click a name) or with Ctrl+wheel and Ctrl+Plus / Ctrl+Minus: **Details** (0%, the table), **Tree** (10%), **List** (20%: icon and name in columns filled top to bottom, folders in their own columns first, scrolling sideways) and **M / L / XL Icons** (30%, 65%, 100%: a grid of cards with the icon, the name and the size, folders on their own rows first). From M to XL it is one view whose icons grow smoothly with the slider; the other steps are separate views and switch with a short fade. The view is shared by every tab and kept in the settings.
 
 The Tree view (10% on the view slider) is the same table with a chevron before each folder (`>` folded, `v` unfolded): click it, or press → / ←, to show what the folder holds right in the list, one step deeper, without entering it. The folder is read in the background; one that cannot be read shows nothing under it. What is unfolded follows the list's sort and Ctrl+H, is not touched by the filter (a folder the filter hides takes its children with it), is read again when the folder changes on disk, and is forgotten when you enter another folder or leave the Tree view. Click, Ctrl+click, Shift+click, the band, Delete, F2, Ctrl+C / Ctrl+X, the right-click menu, Alt+R and Space work on the children too, on their own paths; Enter or a double click on a folder still enters it.
 
