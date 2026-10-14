@@ -171,17 +171,26 @@ pub(crate) fn cell_band(ui: &egui::Ui, content: Rect, may_start: bool, shape: &G
 /// A cell's highlight: picked or the cursor, else hovered. The cursor's
 /// place is kept for Shift+F10.
 pub(crate) fn paint_cell(ui: &egui::Ui, view: &View, i: usize, rect: Rect, response: &egui::Response) {
-    let selected = if view.picked_count() > 0 { view.is_picked(i) } else { view.selected == Some(i) };
     let visuals = ui.visuals();
-    if selected {
+    if view.is_highlighted(i) {
         ui.painter().rect_filled(rect, 4.0, visuals.selection.bg_fill.gamma_multiply(0.35));
         ui.painter().rect_stroke(rect, 4.0, visuals.selection.stroke, egui::StrokeKind::Inside);
     } else if response.hovered() {
         ui.painter().rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
     }
+    if view.is_outlined(i) {
+        paint_dashed(ui.painter(), rect.shrink(1.0), visuals.weak_text_color());
+    }
     if view.selected == Some(i) {
         ui.ctx().data_mut(|d| d.insert_temp(file_list::cursor_row_id(), rect));
     }
+}
+
+/// A thin dashed outline around `rect`: the cursor when nothing is selected,
+/// as in other file managers.
+pub(crate) fn paint_dashed(painter: &egui::Painter, rect: Rect, color: egui::Color32) {
+    let corners = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom(), rect.left_top()];
+    painter.extend(egui::Shape::dashed_line(&corners, egui::Stroke::new(1.0, color), 3.0, 3.0));
 }
 
 /// What a click on cell `i` means, like a click on a Details row.
@@ -205,7 +214,7 @@ pub(crate) fn cell_event(response: &egui::Response, i: usize) -> Option<ListEven
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::fs::Entry;
     use eframe::egui::pos2;
@@ -302,6 +311,44 @@ mod tests {
         let drawn = draw_at(&ctx, &view, 0.0, vec![], Some(3.0));
         let whole = drawn.texts.iter().filter(|(t, _, elided)| t == name && !elided).count();
         assert_eq!(whole, 1, "one tooltip: {:?}", drawn.texts);
+    }
+
+    /// Short line segments painted inside `rect`: a dashed outline.
+    pub(crate) fn dashes_in(shapes: &[egui::epaint::ClippedShape], rect: Rect) -> usize {
+        let weak = egui::Context::default().global_style().visuals.weak_text_color();
+        shapes
+            .iter()
+            .filter(|s| matches!(s.shape, egui::Shape::LineSegment { stroke, .. } if stroke.color == weak && stroke.width == 1.0))
+            .filter(|s| rect.expand(2.0).contains_rect(s.shape.visual_bounding_rect()))
+            .count()
+    }
+
+    #[test]
+    fn an_unselected_cursor_card_has_a_dashed_outline_and_no_highlight() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&[], &["a.txt", "b.txt"]);
+        view.select_row(0);
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 480.0));
+        let paint = |view: &View| {
+            let mut shapes = Vec::new();
+            for _ in 0..2 {
+                let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                    show(ui, view, &[], 0.0, None, None, &FileIcons::default());
+                });
+                output.textures_delta.clear();
+                shapes = output.shapes;
+            }
+            shapes
+        };
+        let card = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(GAP + card_size(M_ICON, 20.0).x + 2.0, 200.0));
+        let fill = ctx.global_style().visuals.selection.bg_fill.gamma_multiply(0.35);
+        let filled = |shapes: &[egui::epaint::ClippedShape]| shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == fill));
+        let selected = paint(&view);
+        assert!(filled(&selected) && dashes_in(&selected, card) == 0, "selected: filled, no dashes");
+        view.unselect();
+        let unselected = paint(&view);
+        assert!(!filled(&unselected), "no highlight");
+        assert!(dashes_in(&unselected, card) >= 8, "a dashed outline around the cursor card");
     }
 
     fn click(pos: egui::Pos2, button: egui::PointerButton) -> Vec<egui::Event> {
