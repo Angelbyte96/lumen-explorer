@@ -40,6 +40,15 @@ pub fn island_room(ctx: &egui::Context) -> f32 {
     text.max(14.0) + 2.0 * (ISLAND_MARGIN as f32 + EDGE) + 6.0
 }
 
+/// Runs `add` in the room left above `room` points at the bottom: the views
+/// (and their scroll bars) end there, so the islands never cover them. A plain
+/// maximum height is not enough, as a scroll area still takes the whole height.
+pub fn above_islands<R>(ui: &mut egui::Ui, room: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let mut rect = ui.available_rect_before_wrap();
+    rect.max.y = (rect.max.y - room).max(rect.min.y);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), add).inner
+}
+
 /// Air between an island and the list's edges.
 const EDGE: f32 = 6.0;
 const ISLAND_MARGIN: i8 = 4;

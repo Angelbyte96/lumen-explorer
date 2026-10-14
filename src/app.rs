@@ -2404,7 +2404,8 @@ impl eframe::App for LumenApp {
 
         let list = egui::CentralPanel::default_margins().show(ui, |ui| {
             // Room at the bottom for the floating islands, so they never hide a row.
-            ui.set_max_height(ui.available_height() - ui::status_bar::island_room(&ctx));
+            let room = ui::status_bar::island_room(&ctx);
+            ui::status_bar::above_islands(ui, room, |ui| {
             let scroll = self.tab.view.scroll.take();
             let cut = self.cut_paths().to_vec();
             let opacity = self.list_opacity(ctx.input(|i| i.time));
@@ -2477,6 +2478,7 @@ impl eframe::App for LumenApp {
                 }
                 None => {}
             }
+            });
         });
 
         // Floating over the list's bottom, in the room left for them there.
