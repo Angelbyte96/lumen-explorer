@@ -81,6 +81,7 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 | Key | Action |
 |---|---|
 | ↑ / ↓ | Move selection |
+| ← / → | Tree view: → unfolds a folded folder, and on an unfolded one goes to its first child; ← folds an unfolded folder, and on a child goes to its parent folder. In the Icons and List views they walk the cells; in Details they do nothing |
 | PageUp / PageDown | Move 20 rows |
 | Home / End | First / last entry |
 | Shift+↑ / Shift+↓, Shift+PageUp / PageDown, Shift+Home / End | Select the range from where the selection started (also Shift+click) |
@@ -121,6 +122,8 @@ The side panel on the left (☰ shows or hides it) lists your **Bookmarks** (rig
 The toolbar has back, forward and up buttons, the bookmark star and the current path as crumbs (`angelbyte › Descargas`): click a crumb to go there. Inside your home folder the crumbs start at it; elsewhere they start at `/`.
 
 The list and the folder preview show Name, Type, Date Modified, Folders, Files and Size. Click a header to sort by that column; click it again to reverse. Folders always stay on top; counted folders sort by their totals. Drag the border between two headers to resize a column (every column keeps its own width, the last one stretches to the list's edge, and columns wider than the window scroll sideways); the widths are saved. Right-click a header for Shift Column Left / Right (past hidden columns), Size Column To Fit, Close Column (also a middle click on the header), Size All Columns To Fit (Ctrl+Shift+F), Restore Default Columns (default widths and order, every column shown) and a checkbox per column to show or hide it; Name is always shown. Hidden columns and the order are saved too.
+
+The Tree view (10% on the view slider) is the same table with a chevron before each folder (`>` folded, `v` unfolded): click it, or press → / ←, to show what the folder holds right in the list, one step deeper, without entering it. The folder is read in the background; one that cannot be read shows nothing under it. What is unfolded follows the list's sort and Ctrl+H, is not touched by the filter (a folder the filter hides takes its children with it), is read again when the folder changes on disk, and is forgotten when you enter another folder or leave the Tree view. Click, Ctrl+click, Shift+click, the band, Delete, F2, Ctrl+C / Ctrl+X, the right-click menu, Alt+R and Space work on the children too, on their own paths; Enter or a double click on a folder still enters it.
 
 Rows show the system's icons. On Windows, the shell's (a program's own icon, its type's program icon for other files). On Linux, your desktop's icon theme, as Nautilus and Dolphin show it: the theme GNOME names in its settings (KDE: kdeglobals), then the themes it inherits and hicolor, picking each file's icon by its type (from its extension, through the system's MIME tables) and special folders' own (Downloads, Documents…); PNG and SVG icons alike. Lumen's own drawn icons show until the theme's arrive, or when the theme has none. The side panel shows the same icons on Windows; on Linux the theme's one-colour (symbolic) icons in the text colour, as Nautilus does: home, Desktop, Downloads, Documents, Music, Pictures, Videos, the trash, disks, and a folder for bookmarks and recents.
 

@@ -21,6 +21,8 @@ pub enum ListEvent {
     Extend(usize),
     /// Right click on the row: its menu.
     Menu(usize),
+    /// A click on the folder's chevron (Tree): unfold it, or fold it.
+    Unfold(usize),
     /// A band dragged from a row's empty part or below the rows, in row units
     /// (row `i` spans `[i, i + 1)`): sent on every frame the pointer drags it.
     Band { start: f32, end: f32 },
@@ -105,11 +107,13 @@ pub struct Sizes {
     pub widths: Widths,
     pub shown: Shown,
     pub order: Order,
+    /// The Tree view: a chevron before each folder, children indented under it.
+    pub tree: bool,
 }
 
 impl Default for Sizes {
     fn default() -> Self {
-        Self { widths: DEFAULT_WIDTHS, shown: ALL_SHOWN, order: DEFAULT_ORDER }
+        Self { widths: DEFAULT_WIDTHS, shown: ALL_SHOWN, order: DEFAULT_ORDER, tree: false }
     }
 }
 
@@ -123,7 +127,7 @@ pub fn show(
     mut edit: Option<&mut RenameEdit>,
     file_icons: &FileIcons,
 ) -> Option<ListEvent> {
-    let View { entries, rows, totals, selected, sort, .. } = view;
+    let View { rows, totals, selected, sort, .. } = view;
     let (selected, sort) = (*selected, *sort);
     let text_height = ui.text_style_height(&egui::TextStyle::Body);
     let header_height = row_height(text_height);
@@ -200,10 +204,12 @@ pub fn show(
                 band_scroll(body.ui_mut());
                 body.rows(row_height, rows.len(), |mut row| {
                     let i = row.index();
-                    let entry = &entries[rows[i]];
+                    let entry = view.entry(rows[i]);
                     let mut on_name = false;
+                    // Where the folder's chevron is drawn (Tree).
+                    let mut chevron = None;
                     row.set_selected(if multi { view.is_picked(i) } else { selected == Some(i) });
-                    let counts = count_cells(entry, totals.get(&entry.name));
+                    let counts = count_cells(entry, totals.get(&entry.path));
                     for &column in &shown {
                         let (cell, _) = row.col(|ui| match column {
                             0 => {
@@ -215,6 +221,16 @@ pub fn show(
                                     // Cut and not pasted yet: faded, like other explorers.
                                     if cut.contains(&entry.path) {
                                         ui.set_opacity(CUT_OPACITY);
+                                    }
+                                    if sizes.tree {
+                                        // A step per level; files keep the chevron's room so names line up.
+                                        ui.add_space(view.depth(i) as f32 * (icon + ui.spacing().item_spacing.x));
+                                        if entry.is_dir {
+                                            let response = icons::chevron(ui, icon, view.is_open(i));
+                                            chevron = Some(response.rect);
+                                        } else {
+                                            ui.allocate_space(egui::vec2(icon, icon));
+                                        }
                                     }
                                     icons::show(ui, entry, icon, file_icons.texture(entry));
                                     if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
@@ -247,8 +263,15 @@ pub fn show(
                     if selected == Some(i) {
                         response.ctx.data_mut(|d| d.insert_temp(cursor_row_id(), response.rect));
                     }
+                    // The chevron's column over the whole row's height.
+                    let on_chevron = chevron.is_some_and(|c| {
+                        let at = response.ctx.input(|input| input.pointer.interact_pos());
+                        at.is_some_and(|at| egui::Rect::from_x_y_ranges(c.x_range(), response.rect.y_range()).contains(at))
+                    });
                     if response.secondary_clicked() {
                         event = Some(ListEvent::Menu(i));
+                    } else if on_chevron && (response.clicked() || response.double_clicked()) {
+                        event = Some(ListEvent::Unfold(i));
                     } else if response.double_clicked() {
                         event = Some(ListEvent::Activate(i));
                     } else if response.clicked() {
@@ -377,13 +400,13 @@ pub fn fit_width(ctx: &egui::Context, view: &View, column: usize) -> f32 {
         .rows
         .iter()
         .map(|&row| {
-            let entry = &view.entries[row];
+            let entry = view.entry(row);
             match column {
                 0 => icon + measure(entry.name.clone()),
                 1 => measure(entry.kind().to_string()),
                 2 => measure(entry.modified.map(format_time).unwrap_or_default()),
                 _ => {
-                    let cells = count_cells(entry, view.totals.get(&entry.name));
+                    let cells = count_cells(entry, view.totals.get(&entry.path));
                     measure(cells[column - 3].clone())
                 }
             }
@@ -1559,5 +1582,142 @@ mod tests {
         between_buttons(&ctx, &view, vec![key(egui::Key::Tab, true, shift)]);
         between_buttons(&ctx, &view, vec![]);
         assert_eq!(ctx.memory(|m| m.focused()), Some(before), "one Shift+Tab goes back");
+    }
+
+    /// `/x` in the Tree view: src (unfolded: deep/, main.rs) and a.txt.
+    fn tree_listed() -> View {
+        let folder = |path: &str| Entry { is_dir: true, size: None, ..entry(path) };
+        let mut view = View::default();
+        let top = vec![Entry { path: PathBuf::from("/x/src"), ..folder("src") }, entry("a.txt")];
+        view.apply_listing(crate::fs::Listing { id: 1, path: PathBuf::from("/x"), result: Ok(top), elapsed: std::time::Duration::ZERO }, None);
+        view.toggle_open(0);
+        let kids = vec![
+            Entry { path: PathBuf::from("/x/src/deep"), ..folder("deep") },
+            Entry { path: PathBuf::from("/x/src/main.rs"), ..entry("main.rs") },
+        ];
+        view.apply_kids(crate::fs::Listing { id: 2, path: PathBuf::from("/x/src"), result: Ok(kids), elapsed: std::time::Duration::ZERO });
+        view
+    }
+
+    /// One frame of the list, at `time`, with these events.
+    fn draw_tree(ctx: &egui::Context, view: &View, tree: bool, events: Vec<egui::Event>, time: Option<f64>) -> (Option<ListEvent>, Vec<egui::epaint::ClippedShape>) {
+        let mut event = None;
+        let input = egui::RawInput { events, time, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        let mut output = ctx.run_ui(input, |root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                event = show(ui, view, &[], Sizes { tree, ..Sizes::default() }, None, None, &FileIcons::default());
+            });
+        });
+        output.textures_delta.clear();
+        (event, output.shapes)
+    }
+
+    fn settled_tree(ctx: &egui::Context, view: &View, tree: bool) -> Vec<egui::epaint::ClippedShape> {
+        draw_tree(ctx, view, tree, vec![], None);
+        draw_tree(ctx, view, tree, vec![], None);
+        draw_tree(ctx, view, tree, vec![], None).1
+    }
+
+    /// The chevrons painted: the corners of each one's open line, in drawing order.
+    fn chevrons(shapes: &[egui::epaint::ClippedShape]) -> Vec<Vec<egui::Pos2>> {
+        shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Path(path) if !path.closed && path.points.len() == 3 => Some(path.points.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn text_rect(shapes: &[egui::epaint::ClippedShape], text: &str) -> egui::Rect {
+        shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == text => Some(t.galley.rect.translate(t.pos.to_vec2())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{text:?} painted"))
+    }
+
+    fn bounds(points: &[egui::Pos2]) -> egui::Rect {
+        egui::Rect::from_points(points)
+    }
+
+    #[test]
+    fn the_tree_view_paints_a_chevron_before_each_folders_icon_and_details_paints_none() {
+        let ctx = egui::Context::default();
+        let view = tree_listed();
+        let shapes = settled_tree(&ctx, &view, true);
+        let chevrons = chevrons(&shapes);
+        assert_eq!(chevrons.len(), 2, "src and deep are folders; main.rs and a.txt are not: {chevrons:?}");
+        let (src, deep) = (text_rect(&shapes, "src"), text_rect(&shapes, "deep"));
+        for (chevron, name) in [(&chevrons[0], src), (&chevrons[1], deep)] {
+            let at = bounds(chevron);
+            let icon = icon_side(14.0);
+            assert!(at.right() < name.left() - icon + 1.0, "before the icon: {at:?} {name:?}");
+            assert!((at.center().y - name.center().y).abs() < 2.0, "on the folder's row");
+        }
+        let plain = settled_tree(&ctx, &view, false);
+        assert!(self::chevrons(&plain).is_empty(), "the Details table has none");
+    }
+
+    #[test]
+    fn the_chevron_points_right_when_folded_and_down_when_unfolded() {
+        let ctx = egui::Context::default();
+        let chevrons = chevrons(&settled_tree(&ctx, &tree_listed(), true));
+        let (open, folded) = (&chevrons[0], &chevrons[1]);
+        assert!(open[1].y > open[0].y + 1.0 && (open[0].y - open[2].y).abs() < 0.5, "v: {open:?}");
+        assert!(open[0].x < open[1].x && open[1].x < open[2].x, "v: {open:?}");
+        assert!(folded[1].x > folded[0].x + 1.0 && (folded[0].x - folded[2].x).abs() < 0.5, ">: {folded:?}");
+        assert!(folded[0].y < folded[1].y && folded[1].y < folded[2].y, ">: {folded:?}");
+    }
+
+    #[test]
+    fn children_are_indented_one_step_under_their_folder_and_files_line_up_with_folders() {
+        let ctx = egui::Context::default();
+        let shapes = settled_tree(&ctx, &tree_listed(), true);
+        let x = |name: &str| text_rect(&shapes, name).left();
+        let step = x("deep") - x("src");
+        assert!(step >= icon_side(14.0) - 1.0, "a step is at least an icon wide: {step}");
+        assert!((x("main.rs") - x("deep")).abs() < 0.5, "a file under src lines up with a folder under src");
+        assert!((x("a.txt") - x("src")).abs() < 0.5, "and at the top too");
+    }
+
+    #[test]
+    fn a_click_on_the_chevron_unfolds_or_folds_and_a_click_elsewhere_selects() {
+        let ctx = egui::Context::default();
+        let view = tree_listed();
+        let shapes = settled_tree(&ctx, &view, true);
+        let chevron = |i: usize| bounds(&chevrons(&shapes)[i]).center();
+        let click = |at: egui::Pos2| {
+            draw_tree(&ctx, &view, true, vec![egui::Event::PointerMoved(at)], None);
+            let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+            let event = draw_tree(&ctx, &view, true, vec![press(true), press(false)], None).0;
+            settled_tree(&ctx, &view, true);
+            event
+        };
+        assert!(matches!(click(chevron(0)), Some(ListEvent::Unfold(0))), "src's chevron");
+        assert!(matches!(click(chevron(1)), Some(ListEvent::Unfold(1))), "deep's chevron");
+        assert!(matches!(click(text_rect(&shapes, "src").center()), Some(ListEvent::Select(0))), "the name selects");
+        assert!(matches!(click(text_rect(&shapes, "main.rs").center()), Some(ListEvent::Select(2))));
+        let blank = egui::pos2(chevron(1).x, text_rect(&shapes, "main.rs").center().y);
+        assert!(matches!(click(blank), Some(ListEvent::Select(2))), "where a file has no chevron, it is the row");
+        let date = egui::pos2(500.0, text_rect(&shapes, "src").center().y);
+        assert!(matches!(click(date), Some(ListEvent::Select(0))), "the rest of the row selects");
+    }
+
+    #[test]
+    fn a_double_click_on_a_folders_name_still_opens_it() {
+        let ctx = egui::Context::default();
+        let view = tree_listed();
+        let shapes = settled_tree(&ctx, &view, true);
+        let at = text_rect(&shapes, "src").center();
+        let events = || {
+            let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+            vec![egui::Event::PointerMoved(at), press(true), press(false)]
+        };
+        draw_tree(&ctx, &view, true, events(), Some(10.0));
+        let second = draw_tree(&ctx, &view, true, events(), Some(10.1)).0;
+        assert!(matches!(second, Some(ListEvent::Activate(0))), "opens, not unfolds");
     }
 }

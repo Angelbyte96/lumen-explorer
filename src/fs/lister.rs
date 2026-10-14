@@ -174,6 +174,50 @@ impl Lister {
     }
 }
 
+/// Reads several folders at once, each on a thread of its own (the Tree
+/// view's unfolded folders). Unlike [`Lister`], every result is delivered:
+/// none of them supersedes another.
+pub struct Readers {
+    tx: Sender<Listing>,
+    rx: Receiver<Listing>,
+    next_id: u64,
+}
+
+impl Default for Readers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Readers {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self { tx, rx, next_id: 0 }
+    }
+
+    /// Starts reading `path` on a new thread; `on_done` runs on it once the
+    /// result is ready. Returns the id the result will carry: later requests
+    /// have bigger ids.
+    pub fn request(&mut self, path: PathBuf, on_done: impl FnOnce() + Send + 'static) -> u64 {
+        self.next_id += 1;
+        let id = self.next_id;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let start = Instant::now();
+            let result = read_entries(&path);
+            // The receiver only disappears when the app is closing; nothing to do then.
+            let _ = tx.send(Listing { id, path, result, elapsed: start.elapsed() });
+            on_done();
+        });
+        id
+    }
+
+    /// Every result that is ready.
+    pub fn poll(&self) -> Vec<Listing> {
+        self.rx.try_iter().collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +325,30 @@ mod tests {
         assert_eq!(listing.result.unwrap().len(), 6);
         assert!(!lister.is_pending(listing.id));
         assert!(lister.poll().is_none(), "stale result must be discarded");
+    }
+
+    #[test]
+    fn readers_deliver_every_folder_asked_for_not_only_the_newest() {
+        let dir = sample_dir("readers");
+        let mut readers = Readers::new();
+        let (done_tx, done_rx) = mpsc::channel();
+        let mut ids = Vec::new();
+        for path in [dir.clone(), dir.join("Alpha_dir"), dir.join("does-not-exist")] {
+            let done = done_tx.clone();
+            ids.push(readers.request(path, move || done.send(()).unwrap()));
+        }
+        for _ in 0..3 {
+            done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let mut listings = readers.poll();
+        listings.sort_by_key(|l| l.id);
+        let paths: Vec<&Path> = listings.iter().map(|l| l.path.as_path()).collect();
+        assert_eq!(paths, [dir.as_path(), dir.join("Alpha_dir").as_path(), dir.join("does-not-exist").as_path()]);
+        assert_eq!(listings[0].result.as_ref().unwrap().len(), 6);
+        assert!(listings[1].result.as_ref().unwrap().is_empty());
+        assert!(matches!(listings[2].result, Err(ListError::NotFound(_))), "an unreadable folder is an error, not a crash");
+        let delivered: Vec<u64> = listings.iter().map(|l| l.id).collect();
+        assert_eq!(ids, delivered, "a request returns the id its result will carry");
+        assert!(readers.poll().is_empty(), "each result is delivered once");
     }
 }

@@ -457,6 +457,10 @@ pub mod native {
     /// The shell's menu for `paths`, which share one folder. The caller's
     /// thread has COM (the loader's has OLE).
     pub fn for_entries(paths: &[PathBuf], folder: &Path, window: Option<isize>) -> Result<(ShellMenu, Vec<Item>), String> {
+        // The menu binds every item to the first entry's folder.
+        if paths.iter().any(|path| path.parent() != paths[0].parent()) {
+            return Err("The entries are in different folders".into());
+        }
         // SAFETY: every pointer handed to the shell outlives the call; ids are
         // freed by `Pidls`, after GetUIObjectOf copied what it needs.
         unsafe {
