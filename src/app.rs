@@ -273,8 +273,18 @@ impl View {
     }
 
     /// Ctrl+A: every row shown.
+    /// Ctrl+A: every row of the folder the cursor is in. In the Tree view a
+    /// cursor inside an unfolded folder picks what that folder holds, and one
+    /// at the top picks the top rows, not the unfolded children.
     pub fn select_all(&mut self) {
-        self.picks = self.rows.iter().map(|&i| self.entry(i).path.clone()).collect();
+        let folder = self.selected_entry().and_then(|e| e.path.parent()).unwrap_or(&self.current).to_path_buf();
+        self.picks = self
+            .rows
+            .iter()
+            .map(|&i| &self.entry(i).path)
+            .filter(|path| path.parent() == Some(folder.as_path()))
+            .cloned()
+            .collect();
     }
 
     /// Ctrl+click: adds or removes `row`. The first one keeps the cursor row
@@ -5124,6 +5134,22 @@ mod tests {
         assert_eq!(v.selected, Some(2), "the cursor stays");
     }
 
+    #[test]
+    fn ctrl_a_in_the_tree_picks_what_the_cursors_folder_holds() {
+        let mut v = unfolded_view(); // src, deep, main.rs, a.txt, b.txt
+        v.select_row(2); // src/main.rs
+        v.select_all();
+        let picked: Vec<usize> = (0..v.rows.len()).filter(|&r| v.is_picked(r)).collect();
+        assert_eq!(picked, [1, 2], "src's deep and main.rs, nothing of the top level");
+        v.select_row(3); // a.txt, top level
+        v.select_all();
+        let picked: Vec<usize> = (0..v.rows.len()).filter(|&r| v.is_picked(r)).collect();
+        assert_eq!(picked, [0, 3, 4], "the top level, not the unfolded children");
+        let mut flat = loaded_view();
+        flat.select_all();
+        assert_eq!(flat.picked_count(), flat.rows.len(), "without unfolded folders: every row, as before");
+    }
+
     fn depths(v: &View) -> Vec<usize> {
         (0..v.rows.len()).map(|row| v.depth(row)).collect()
     }
@@ -5270,7 +5296,8 @@ mod tests {
         v.extend_to(3);
         assert_eq!(v.picked_count(), 3, "a range from the anchor crosses the folders");
         v.select_all();
-        assert_eq!(v.picked_count(), 5);
+        assert_eq!(v.picked_count(), 1, "Ctrl+A on src's notes.txt picks what src holds, not the rest");
+        assert!(v.is_picked(3));
         v.select_band(1.2, 3.5);
         assert_eq!(v.picked_count(), 3, "a band picks the children it touches");
         assert!(v.is_picked(1) && v.is_picked(3) && !v.is_picked(4));
@@ -5430,8 +5457,9 @@ mod tests {
     #[test]
     fn a_picked_folder_takes_its_picked_children_with_it_so_each_is_acted_on_once() {
         let (ctx, mut app, dir) = unfolded_app("app-tree-nested-picks");
-        app.handle_action(&ctx, Action::SelectAll);
-        assert_eq!(app.tab.view.picked_count(), 5, "every row is picked");
+        app.tab.view.select_row(0);
+        app.tab.view.extend_to(4);
+        assert_eq!(app.tab.view.picked_count(), 5, "a Shift range over every row");
         let tops = vec![dir.join("sub"), dir.join("a.txt"), dir.join("b.txt")];
         app.handle_action(&ctx, Action::Copy);
         assert_eq!(app.clipboard.as_ref().map(|c| c.paths.clone()), Some(tops.clone()), "sub's children go with sub, not twice");
