@@ -26,6 +26,9 @@ pub enum ListEvent {
     /// A band dragged from a row's empty part or below the rows, in row units
     /// (row `i` spans `[i, i + 1)`): sent on every frame the pointer drags it.
     Band { start: f32, end: f32 },
+    /// A band dragged from the space around the cards (List, Icons): the cells
+    /// it touches and the one under the pointer; sent on every frame it moves.
+    Cells { cells: Vec<usize>, cursor: Option<usize> },
     /// A click below the rows; `menu` for a right click.
     Empty { menu: bool },
     Activate(usize),
@@ -337,7 +340,7 @@ const BAND_TOP_SPEED: f32 = 800.0;
 /// How fast a band at height `y` scrolls a list showing `view` on screen, in
 /// points per second: positive brings the rows above down. From nothing at
 /// the inner side of each edge's strip to the top speed at the edge.
-fn band_speed(y: f32, view: egui::Rangef) -> f32 {
+pub(crate) fn band_speed(y: f32, view: egui::Rangef) -> f32 {
     // The nearer edge decides, for lists too short for two strips.
     let (depth, sign) = if y < view.center() { (view.min + BAND_STRIP - y, 1.0) } else { (y - (view.max - BAND_STRIP), -1.0) };
     sign * BAND_TOP_SPEED * (depth / BAND_STRIP).clamp(0.0, 1.0)

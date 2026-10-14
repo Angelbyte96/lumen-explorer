@@ -10,7 +10,7 @@ use crate::app::{Scroll, View};
 use crate::ui::file_icons::FileIcons;
 use crate::ui::file_list::{self, ListEvent, RenameEdit};
 use crate::ui::grid::GridShape;
-use crate::ui::icon_grid::{GridOut, cell_event, paint_cell};
+use crate::ui::icon_grid::{GridOut, cell_band, cell_event, paint_cell};
 use crate::ui::icons;
 
 /// A column's width, in points.
@@ -81,6 +81,10 @@ pub fn show(
                     event = Some(clicked);
                 }
             }
+        }
+        let may_start = ui.input(|i| i.pointer.primary_pressed()) && background.is_pointer_button_down_on();
+        if let Some(band) = cell_band(ui, content, may_start, &shape, place, true) {
+            event = Some(band);
         }
         if event.is_none() {
             if background.clicked() {
@@ -154,6 +158,24 @@ mod tests {
         assert!(second.top() > first.bottom() && (second.left() - first.left()).abs() < 1.0, "down the column");
         let next = find(&texts, &format!("{:02}.png", per + 1));
         assert!(next.left() > first.right() && (next.top() - first.top()).abs() < 1.0, "the next column starts at the top");
+    }
+
+    #[test]
+    fn a_drag_from_beside_the_cells_picks_the_cells_it_touches() {
+        let ctx = egui::Context::default();
+        let view = listed(&[], &["a.txt".into(), "b.txt".into(), "c.txt".into()]);
+        draw(&ctx, &view, vec![]);
+        let (_, texts) = draw(&ctx, &view, vec![]);
+        let (a, b) = (find(&texts, "a.txt"), find(&texts, "b.txt"));
+        let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        // From the empty column on the right, left and up over b.txt and a.txt.
+        let (from, to) = (egui::pos2(700.0, b.center().y), a.center());
+        let mut last = None;
+        for events in [vec![egui::Event::PointerMoved(from), button(from, true)], vec![egui::Event::PointerMoved(from + (to - from) * 0.1)], vec![egui::Event::PointerMoved(to)]] {
+            last = draw(&ctx, &view, events).0.event;
+        }
+        draw(&ctx, &view, vec![button(to, false)]);
+        assert!(matches!(last, Some(ListEvent::Cells { ref cells, cursor: Some(0) }) if cells == &[0, 1]), "a and b, cursor on a");
     }
 
     #[test]
