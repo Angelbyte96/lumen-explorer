@@ -341,6 +341,21 @@ impl View {
         self.selected = Some(row(end));
     }
 
+    /// A band over the cards of a view laid out in lines: picks `cells` (rows
+    /// shown) and moves the cursor to `cursor`. Over no card it drops the picks.
+    pub fn select_cells(&mut self, cells: &[usize], cursor: Option<usize>) {
+        let cells: Vec<usize> = cells.iter().copied().filter(|&row| row < self.rows.len()).collect();
+        if cells.is_empty() {
+            self.drop_picks();
+            return;
+        }
+        self.want = None;
+        self.picks = cells.iter().map(|&row| self.entry(self.rows[row]).path.clone()).collect();
+        let cursor = cursor.filter(|row| cells.contains(row)).unwrap_or(cells[cells.len() - 1]);
+        self.anchor = Some(self.entry(self.rows[cells[0]]).path.clone());
+        self.selected = Some(cursor);
+    }
+
     /// Back to the cursor row alone. `false` when nothing was picked.
     pub fn drop_picks(&mut self) -> bool {
         self.anchor = None;
@@ -2429,6 +2444,7 @@ impl eframe::App for LumenApp {
                 }
                 Some(ListEvent::Extend(i)) => self.tab.view.extend_to(i),
                 Some(ListEvent::Band { start, end }) => self.tab.view.select_band(start, end),
+                Some(ListEvent::Cells { cells, cursor }) => self.tab.view.select_cells(&cells, cursor),
                 Some(ListEvent::Activate(i)) => {
                     self.tab.view.select_row(i);
                     self.activate_selected(&ctx);
@@ -5092,6 +5108,18 @@ mod tests {
         v.apply_kids(inside("/x/src/deep", &[("c1", false)]));
         v.select_row(1);
         assert_eq!(v.path_after_removal(), Some(p("/x/src/main.rs")), "not deep/c1, which goes with it");
+    }
+
+    #[test]
+    fn a_band_over_cards_picks_those_cards_and_over_none_drops_the_picks() {
+        let mut v = loaded_view(); // src, a.txt, b.txt
+        v.select_cells(&[0, 2, 9], Some(2));
+        assert_eq!(v.picked_count(), 2, "a cell past the rows is ignored");
+        assert!(v.is_picked(0) && v.is_picked(2) && !v.is_picked(1));
+        assert_eq!(v.selected, Some(2));
+        v.select_cells(&[], None);
+        assert_eq!(v.picked_count(), 0, "a band over no card drops the picks");
+        assert_eq!(v.selected, Some(2), "the cursor stays");
     }
 
     fn depths(v: &View) -> Vec<usize> {

@@ -103,6 +103,10 @@ pub fn show(
                 }
             }
         }
+        let may_start = ui.input(|i| i.pointer.primary_pressed()) && background.is_pointer_button_down_on();
+        if let Some(band) = cell_band(ui, content, may_start, &shape, place, false) {
+            event = Some(band);
+        }
         if event.is_none() {
             if background.clicked() {
                 event = Some(ListEvent::Empty { menu: false });
@@ -115,6 +119,53 @@ pub fn show(
         ui.painter().rect_stroke(whole.shrink(1.0), 2, ui.visuals().selection.stroke, egui::StrokeKind::Inside);
     }
     GridOut { event, shape }
+}
+
+/// Where a band over the cells started, from the content's top left, so a
+/// scroll does not move it.
+#[derive(Clone, Copy)]
+struct CellBand(egui::Vec2);
+
+fn cell_band_id() -> egui::Id {
+    egui::Id::new("lumen_cell_band")
+}
+
+/// The rubber band of the views laid out in lines: a drag that starts on the
+/// space around the cells (`may_start`) draws a band and picks every cell of
+/// `shape` it touches (`place` gives each one's rect on screen). Held near an
+/// edge it scrolls: down/up in Icons, sideways in List (`sideways`).
+pub(crate) fn cell_band(ui: &egui::Ui, content: Rect, may_start: bool, shape: &GridShape, place: impl Fn(usize) -> Rect, sideways: bool) -> Option<ListEvent> {
+    let (pressed, origin, down, dragging, pointer, dt) = ui.input(|i| {
+        (i.pointer.primary_pressed(), i.pointer.press_origin(), i.pointer.primary_down(), i.pointer.is_decidedly_dragging(), i.pointer.latest_pos(), i.stable_dt)
+    });
+    if pressed {
+        let start = origin.filter(|_| may_start).map(|p| CellBand(p - content.min));
+        ui.ctx().data_mut(|d| match start {
+            Some(start) => {
+                d.insert_temp(cell_band_id(), start);
+            }
+            None => d.remove::<CellBand>(cell_band_id()),
+        });
+    }
+    let start = ui.ctx().data(|d| d.get_temp::<CellBand>(cell_band_id()))?;
+    if !down {
+        ui.ctx().data_mut(|d| d.remove::<CellBand>(cell_band_id()));
+        return None;
+    }
+    let pointer = pointer.filter(|_| dragging)?;
+    let clip = ui.clip_rect();
+    let speed = if sideways { file_list::band_speed(pointer.x, clip.x_range()) } else { file_list::band_speed(pointer.y, clip.y_range()) };
+    if speed != 0.0 {
+        let delta = if sideways { vec2(speed * dt, 0.0) } else { vec2(0.0, speed * dt) };
+        ui.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
+        ui.ctx().request_repaint();
+    }
+    let band = Rect::from_two_pos(content.min + start.0, pointer);
+    let selection = ui.visuals().selection;
+    ui.painter().rect(band, 0.0, selection.bg_fill.gamma_multiply(0.3), selection.stroke, egui::StrokeKind::Inside);
+    let cells: Vec<usize> = (0..shape.total).filter(|&i| place(i).intersects(band)).collect();
+    let cursor = cells.iter().copied().find(|&i| place(i).contains(pointer)).or(cells.last().copied());
+    Some(ListEvent::Cells { cells, cursor })
 }
 
 /// A cell's highlight: picked or the cursor, else hovered. The cursor's
@@ -242,6 +293,49 @@ mod tests {
     fn click(pos: egui::Pos2, button: egui::PointerButton) -> Vec<egui::Event> {
         let press = |pressed| egui::Event::PointerButton { pos, button, pressed, modifiers: Default::default() };
         vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+    }
+
+    /// Presses at `from`, drags to `to` and lets go; the events of each frame.
+    fn drag(ctx: &egui::Context, view: &View, from: egui::Pos2, to: egui::Pos2) -> Vec<Option<ListEvent>> {
+        let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        let steps = vec![
+            vec![egui::Event::PointerMoved(from), button(from, true)],
+            vec![egui::Event::PointerMoved(from + (to - from) * 0.1)],
+            vec![egui::Event::PointerMoved(to)],
+            vec![button(to, false)],
+        ];
+        steps.into_iter().map(|events| draw(ctx, view, 0.0, events).out.event).collect()
+    }
+
+    fn banded(event: &Option<ListEvent>) -> Option<Vec<usize>> {
+        match event {
+            Some(ListEvent::Cells { cells, .. }) => Some(cells.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_drag_from_the_space_around_the_cards_picks_every_card_it_touches() {
+        let ctx = egui::Context::default();
+        let view = listed(&["test"], &["a.txt", "b.txt", "c.txt"]);
+        let drawn = settled(&ctx, &view, 0.0);
+        let (a, b) = (at(&drawn, "a.txt").1, at(&drawn, "b.txt").1);
+        // From the gap left of the first file card, down-right over a.txt and b.txt.
+        let from = egui::pos2(a.left() - 30.0, a.top() - 70.0);
+        let events = drag(&ctx, &view, from.max(egui::pos2(2.0, 2.0)), egui::pos2(b.center().x, b.center().y));
+        assert_eq!(banded(&events[2]), Some(vec![1, 2]), "the folder row above is not reached: {:?}", events.iter().map(banded).collect::<Vec<_>>());
+        assert!(matches!(&events[2], Some(ListEvent::Cells { cursor: Some(2), .. })), "the cursor goes to the card under the pointer");
+        let events = drag(&ctx, &view, egui::pos2(630.0, 470.0), egui::pos2(2.0, 2.0));
+        assert_eq!(banded(&events[2]), Some(vec![0, 1, 2, 3]), "a band over everything picks everything");
+    }
+
+    #[test]
+    fn a_drag_that_starts_on_a_card_is_not_a_band() {
+        let ctx = egui::Context::default();
+        let view = listed(&[], &["a.txt", "b.txt"]);
+        let drawn = settled(&ctx, &view, 0.0);
+        let events = drag(&ctx, &view, at(&drawn, "a.txt").1.center(), egui::pos2(630.0, 470.0));
+        assert!(events.iter().all(|e| banded(e).is_none()), "kept for dragging files later");
     }
 
     #[test]
