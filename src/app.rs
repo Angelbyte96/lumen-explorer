@@ -675,10 +675,10 @@ pub enum NavKind {
     Refresh,
 }
 
-/// How often the side panel reads the mounted disks again.
 /// How long a newly picked view takes to fade in, in seconds: short, so the
 /// switch still feels instant.
 const VIEW_FADE: f64 = 0.12;
+/// How often the side panel reads the mounted disks again.
 const DISKS_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Wait between the first change on disk and the reload. Later changes in that
