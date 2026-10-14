@@ -298,14 +298,15 @@ impl View {
     /// Ctrl+click: adds or removes `row`. The first one keeps the cursor row
     /// picked, as it was the selection until then.
     pub fn toggle_pick(&mut self, row: usize) {
-        self.unselected = false;
         let Some(&idx) = self.rows.get(row) else { return };
         self.want = None;
+        // An unselected cursor (only outlined) was not selected: it stays out.
         if self.picks.is_empty()
             && let Some(cursor) = self.selected_entry()
         {
             self.picks.insert(cursor.path.clone());
         }
+        self.unselected = false;
         let path = self.entry(idx).path.clone();
         if !self.picks.remove(&path) {
             self.picks.insert(path.clone());
@@ -5196,6 +5197,17 @@ mod tests {
         v.unselect();
         v.select_row(0);
         assert!(v.is_highlighted(0), "a click selects as usual");
+    }
+
+    #[test]
+    fn a_ctrl_click_after_unselecting_picks_only_the_clicked_row() {
+        let mut v = loaded_view(); // src, a.txt, b.txt
+        v.select_row(1);
+        v.unselect();
+        v.toggle_pick(2);
+        let paths: Vec<&Path> = v.selection().iter().map(|e| e.path.as_path()).collect();
+        assert_eq!(paths, [Path::new("/x/b.txt")], "not the outlined a.txt, which nobody picked");
+        assert!(!v.is_highlighted(1));
     }
 
     #[test]
