@@ -135,8 +135,6 @@ pub fn show(
     let text_height = ui.text_style_height(&egui::TextStyle::Body);
     let header_height = row_height(text_height);
     let (icon, row_height) = (icon_side(text_height), header_height);
-    // With rows picked, they are the highlight; the cursor row alone otherwise.
-    let multi = view.picked_count() > 0;
     let mut event = None;
     // Set again below if the cursor row is drawn this frame.
     ui.ctx().data_mut(|d| d.remove::<egui::Rect>(cursor_row_id()));
@@ -211,7 +209,8 @@ pub fn show(
                     let mut on_name = false;
                     // Where the folder's chevron is drawn (Tree).
                     let mut chevron = None;
-                    row.set_selected(if multi { view.is_picked(i) } else { selected == Some(i) });
+                    row.set_selected(view.is_highlighted(i));
+                    let mut row_rect = egui::Rect::NOTHING;
                     let counts = count_cells(entry, totals.get(&entry.path));
                     for &column in &shown {
                         let (cell, _) = row.col(|ui| match column {
@@ -258,6 +257,7 @@ pub fn show(
                         });
                         // Where the row is this frame: `row.response()` holds the last frame's place.
                         first_drawn.get_or_insert((i, cell.top()));
+                        row_rect = row_rect.union(cell);
                     }
                     let response = row.response();
                     if pressed && response.is_pointer_button_down_on() && !on_name {
@@ -265,6 +265,10 @@ pub fn show(
                     }
                     if selected == Some(i) {
                         response.ctx.data_mut(|d| d.insert_temp(cursor_row_id(), response.rect));
+                    }
+                    if view.is_outlined(i) && row_rect.is_positive() {
+                        let painter = egui::Painter::new(response.ctx.clone(), response.layer_id, row_rect.expand(1.0));
+                        crate::ui::icon_grid::paint_dashed(&painter, row_rect.shrink(1.0), painter.ctx().global_style().visuals.weak_text_color());
                     }
                     // The chevron's column over the whole row's height.
                     let on_chevron = chevron.is_some_and(|c| {
@@ -1080,6 +1084,33 @@ mod tests {
         assert!(name_opacity("a.txt", &cut) < 0.7, "the cut one is faded");
         assert_eq!(name_opacity("b.txt", &cut), 1.0, "the others are not");
         assert_eq!(name_opacity("a.txt", &[]), 1.0);
+    }
+
+    #[test]
+    fn an_unselected_cursor_row_has_a_dashed_outline() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["a.txt", "b.txt"]);
+        view.select_row(1);
+        view.unselect();
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() }, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default());
+                });
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let y = |text: &str| shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos.y + t.galley.size().y / 2.0),
+            _ => None,
+        }).unwrap();
+        let (a, b) = (y("a.txt"), y("b.txt"));
+        let pitch = b - a;
+        let band = |mid: f32| egui::Rect::from_min_max(egui::pos2(0.0, mid - pitch / 2.0), egui::pos2(crate::ui::testing::SCREEN.max.x, mid + pitch / 2.0));
+        assert!(crate::ui::icon_grid::tests::dashes_in(&shapes, band(b)) >= 8, "dashes around b.txt's row");
+        assert_eq!(crate::ui::icon_grid::tests::dashes_in(&shapes, band(a)), 0);
     }
 
     #[test]

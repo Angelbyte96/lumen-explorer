@@ -73,8 +73,11 @@ pub struct View {
     pub entries: Vec<Entry>,
     /// Indices into `entries` that pass the hidden-files and text filters, in display order.
     pub rows: Vec<usize>,
-    /// Index into `rows`.
+    /// Index into `rows`; outlined only while `unselected`.
     pub selected: Option<usize>,
+    /// A click on the empty space unselected everything: the cursor stays on
+    /// `selected`, outlined, but nothing is selected until a click or a key.
+    unselected: bool,
     pub show_hidden: bool,
     /// Kept across folders, like the hidden-files toggle.
     pub sort: Sort,
@@ -129,6 +132,7 @@ impl View {
                     self.filter.clear();
                     self.totals.clear();
                     self.drop_picks();
+                    self.unselected = false;
                     self.tree.clear();
                 }
                 // Reloading with folders unfolded: the cursor stays where it was.
@@ -244,6 +248,7 @@ impl View {
     }
 
     pub fn move_selection(&mut self, action: Action) {
+        self.unselected = false;
         self.drop_picks();
         let Some(last) = self.rows.len().checked_sub(1) else {
             self.selected = None;
@@ -261,6 +266,7 @@ impl View {
 
     /// An arrow key in a view laid out in lines: the cursor to `row` alone.
     pub fn move_to(&mut self, row: usize) {
+        self.unselected = false;
         self.drop_picks();
         self.selected = Some(row.min(self.rows.len().saturating_sub(1)));
         self.scroll = Some(Scroll::Smooth);
@@ -268,6 +274,7 @@ impl View {
 
     /// A plain click: this row alone.
     pub fn select_row(&mut self, row: usize) {
+        self.unselected = false;
         self.drop_picks();
         self.selected = Some(row);
     }
@@ -277,6 +284,7 @@ impl View {
     /// cursor inside an unfolded folder picks what that folder holds, and one
     /// at the top picks the top rows, not the unfolded children.
     pub fn select_all(&mut self) {
+        self.unselected = false;
         let folder = self.selected_entry().and_then(|e| e.path.parent()).unwrap_or(&self.current).to_path_buf();
         self.picks = self
             .rows
@@ -290,6 +298,7 @@ impl View {
     /// Ctrl+click: adds or removes `row`. The first one keeps the cursor row
     /// picked, as it was the selection until then.
     pub fn toggle_pick(&mut self, row: usize) {
+        self.unselected = false;
         let Some(&idx) = self.rows.get(row) else { return };
         self.want = None;
         if self.picks.is_empty()
@@ -307,6 +316,7 @@ impl View {
 
     /// Shift+click: the rows from the anchor (the last plain or Ctrl click) to `row`.
     pub fn extend_to(&mut self, row: usize) {
+        self.unselected = false;
         if row >= self.rows.len() {
             return;
         }
@@ -336,6 +346,7 @@ impl View {
     /// row it touches and moves the cursor to the row at `end`. Over no row it
     /// drops the picks, like a click below the rows.
     pub fn select_band(&mut self, start: f32, end: f32) {
+        self.unselected = false;
         let Some(last) = self.rows.len().checked_sub(1) else { return };
         let (low, high) = (start.min(end), start.max(end));
         if high < 0.0 || low >= self.rows.len() as f32 {
@@ -354,6 +365,7 @@ impl View {
     /// A band over the cards of a view laid out in lines: picks `cells` (rows
     /// shown) and moves the cursor to `cursor`. Over no card it drops the picks.
     pub fn select_cells(&mut self, cells: &[usize], cursor: Option<usize>) {
+        self.unselected = false;
         let cells: Vec<usize> = cells.iter().copied().filter(|&row| row < self.rows.len()).collect();
         if cells.is_empty() {
             self.drop_picks();
@@ -364,6 +376,23 @@ impl View {
         let cursor = cursor.filter(|row| cells.contains(row)).unwrap_or(cells[cells.len() - 1]);
         self.anchor = Some(self.entry(self.rows[cells[0]]).path.clone());
         self.selected = Some(cursor);
+    }
+
+    /// A click on the empty space: nothing is selected any more, the cursor
+    /// stays where it was with a dashed outline.
+    pub fn unselect(&mut self) {
+        self.drop_picks();
+        self.unselected = self.selected.is_some();
+    }
+
+    /// Whether `row` is drawn selected: picked, or the cursor when nothing is picked.
+    pub fn is_highlighted(&self, row: usize) -> bool {
+        if self.picked_count() > 0 { self.is_picked(row) } else { !self.unselected && self.selected == Some(row) }
+    }
+
+    /// Whether `row` is the unselected cursor, drawn with a dashed outline.
+    pub fn is_outlined(&self, row: usize) -> bool {
+        self.unselected && self.picked_count() == 0 && self.selected == Some(row)
     }
 
     /// Back to the cursor row alone. `false` when nothing was picked.
@@ -416,6 +445,9 @@ impl View {
     }
 
     pub fn selected_entry(&self) -> Option<&Entry> {
+        if self.unselected {
+            return None;
+        }
         self.selected
             .and_then(|i| self.rows.get(i))
             .map(|&idx| self.entry(idx))
@@ -2478,9 +2510,7 @@ impl eframe::App for LumenApp {
                 }
                 // Below the rows: a click ends a multiple selection, a right click
                 // opens the folder's menu.
-                Some(ListEvent::Empty { menu: false }) => {
-                    self.tab.view.drop_picks();
-                }
+                Some(ListEvent::Empty { menu: false }) => self.tab.view.unselect(),
                 Some(ListEvent::Empty { menu: true }) => {
                     if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
                         self.open_background_menu(pos);
@@ -5148,6 +5178,37 @@ mod tests {
         let mut flat = loaded_view();
         flat.select_all();
         assert_eq!(flat.picked_count(), flat.rows.len(), "without unfolded folders: every row, as before");
+    }
+
+    #[test]
+    fn a_click_on_the_empty_space_unselects_but_keeps_the_cursor_and_an_arrow_selects_again() {
+        let mut v = loaded_view(); // src, a.txt, b.txt
+        v.select_row(1);
+        v.toggle_pick(2);
+        v.unselect();
+        assert_eq!(v.picked_count(), 0);
+        assert!(v.selection().is_empty() && v.selected_entry().is_none(), "nothing is selected");
+        assert_eq!(v.selected, Some(2), "the cursor stays where it was, outlined");
+        assert!(!v.is_highlighted(2) && v.is_outlined(2));
+        v.move_selection(Action::Move(1));
+        assert_eq!(v.selected_entry().map(|e| e.name.as_str()), Some("b.txt"), "Down from the last row keeps it, selected again");
+        assert!(v.is_highlighted(2) && !v.is_outlined(2));
+        v.unselect();
+        v.select_row(0);
+        assert!(v.is_highlighted(0), "a click selects as usual");
+    }
+
+    #[test]
+    fn with_nothing_selected_delete_rename_and_enter_do_nothing() {
+        let (ctx, mut app, dir) = app_in("app-unselected");
+        app.tab.view.select_row(1);
+        app.tab.view.unselect();
+        for action in [Action::Trash, Action::DeleteForever, Action::Rename, Action::Copy] {
+            app.handle_action(&ctx, action);
+        }
+        assert!(app.dialog.is_none() && app.rename.is_none() && app.clipboard.is_none());
+        app.handle_action(&ctx, Action::Activate);
+        assert_eq!(app.tab.view.current, dir, "Enter enters nothing");
     }
 
     fn depths(v: &View) -> Vec<usize> {
