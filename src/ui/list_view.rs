@@ -59,7 +59,7 @@ pub fn show(
         let last = ((viewport.max.x / step).ceil() as usize).min(shape.lines());
         for column in first..last {
             for i in shape.line(column) {
-                let entry = &view.entries[view.rows[i]];
+                let entry = view.entry(view.rows[i]);
                 let rect = place(i);
                 let response = ui.interact(rect, egui::Id::new(("lumen_list_cell", i)), egui::Sense::click());
                 paint_cell(ui, view, i, rect, &response);

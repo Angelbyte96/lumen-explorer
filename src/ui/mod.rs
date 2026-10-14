@@ -13,6 +13,7 @@ pub mod status_bar;
 pub mod tabs;
 pub mod theme;
 pub mod toolbar;
+pub mod tree;
 pub mod view_picker;
 pub mod view_size;
 

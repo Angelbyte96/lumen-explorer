@@ -77,7 +77,7 @@ pub fn show(
         let last = ((viewport.max.y / pitch).ceil() as usize).min(shape.lines());
         for line in first..last {
             for i in shape.line(line) {
-                let entry = &view.entries[view.rows[i]];
+                let entry = view.entry(view.rows[i]);
                 let rect = place(i);
                 let response = ui.interact(rect, egui::Id::new(("lumen_card", i)), egui::Sense::click());
                 paint_cell(ui, view, i, rect, &response);
@@ -95,7 +95,7 @@ pub fn show(
                     } else {
                         file_list::name_label(ui, entry, view.filter());
                     }
-                    let size = if entry.is_dir { view.totals.get(&entry.name).map(|t| t.bytes) } else { entry.size };
+                    let size = if entry.is_dir { view.totals.get(&entry.path).map(|t| t.bytes) } else { entry.size };
                     ui.add(egui::Label::new(egui::RichText::new(size.map(format_size).unwrap_or_default()).weak()).selectable(false));
                 });
                 if let Some(clicked) = cell_event(&response.on_hover_text(&entry.name), i) {
