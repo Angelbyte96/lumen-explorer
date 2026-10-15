@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use crate::config::{Config, Settings};
+use crate::folder_views::{FolderViews, Look};
 use crate::fs::count::{Count, Totals};
 use crate::fs::index::Crawler;
 use crate::fs::watch::Watcher;
@@ -983,6 +984,11 @@ pub struct Tab {
     /// How the pending listing was started.
     pending_nav: NavKind,
     history: History,
+    /// The view slider's position in this tab.
+    view_size: ui::view_size::ViewSize,
+    /// The folder whose saved view or default this tab shows, and that look
+    /// as last applied or kept: a change of it goes to the folder's rule.
+    look_for: Option<(PathBuf, Look)>,
     /// Folder just created: rename it once a listing shows it selected.
     rename_after_load: Option<PathBuf>,
     /// Error to show once the pending reload lands (a reload clears errors).
@@ -990,12 +996,12 @@ pub struct Tab {
 }
 
 impl Tab {
-    /// A tab about to list `current`, sorted and filtered for hidden files like `like`.
-    fn new(current: PathBuf, like: Option<&View>, log: bool) -> Self {
+    /// A tab about to list `current`, shown, sorted and filtered for hidden files like `like`.
+    fn new(current: PathBuf, like: Option<&Tab>, log: bool) -> Self {
         let mut view = View { current, ..View::default() };
         if let Some(like) = like {
-            view.sort = like.sort;
-            view.show_hidden = like.show_hidden;
+            view.sort = like.view.sort;
+            view.show_hidden = like.view.show_hidden;
         }
         Self {
             view,
@@ -1006,6 +1012,8 @@ impl Tab {
             select_path_after_load: None,
             pending_nav: NavKind::New,
             history: History::default(),
+            view_size: like.map_or_else(Default::default, |like| like.view_size),
+            look_for: like.and_then(|like| like.look_for.clone()),
             rename_after_load: None,
             error_after_load: None,
         }
@@ -1073,8 +1081,10 @@ pub struct LumenApp {
     /// Mounted disks with their usage, and when they were read.
     disks: (Option<Instant>, Vec<(Mount, Option<Usage>)>),
     sidebar_open: bool,
-    /// The view slider's position, shared by every tab.
-    view_size: ui::view_size::ViewSize,
+    /// The view and order of a folder with no saved rule.
+    default_look: Look,
+    /// Saved view settings per folder.
+    folder_views: FolderViews,
     /// The cells' lines as last drawn, in views laid out in lines (Icons);
     /// the arrows move through them.
     grid: Option<ui::grid::GridShape>,
@@ -1157,7 +1167,8 @@ impl LumenApp {
             trash: None,
             disks: (None, Vec::new()),
             sidebar_open: true,
-            view_size: ui::view_size::ViewSize::default(),
+            default_look: Look::default(),
+            folder_views: FolderViews::default(),
             grid: None,
             shown_layout: (ui::view_size::Layout::Details, f64::NEG_INFINITY),
             columns: ui::file_list::DEFAULT_WIDTHS,
@@ -1206,7 +1217,9 @@ impl LumenApp {
         app.tab.view.show_hidden = config.show_hidden;
         app.sidebar_open = config.sidebar;
         app.preview_open = config.preview;
-        app.view_size = config.view;
+        app.tab.view_size = config.view;
+        app.default_look = Look { view: config.view, sort: config.sort };
+        app.folder_views = config.folder_views;
         app.columns = config.columns;
         app.shown_columns = config.shown_columns;
         app.column_order = config.column_order;
@@ -1235,7 +1248,7 @@ impl LumenApp {
         app.tabs = tabs
             .iter()
             .enumerate()
-            .map(|(i, path)| (i != active).then(|| Tab::new(path.clone(), Some(&app.tab.view), log)))
+            .map(|(i, path)| (i != active).then(|| Tab::new(path.clone(), Some(&app.tab), log)))
             .collect();
         app.active = active;
         app
@@ -1251,20 +1264,20 @@ impl LumenApp {
     /// the ones last saved unless `with_window`: they are written when Lumen closes.
     fn settings(&self, with_window: bool) -> Config {
         Config {
-            sort: self.tab.view.sort,
+            sort: self.default_look.sort,
             show_hidden: self.tab.view.show_hidden,
             sidebar: self.sidebar_open,
             preview: self.preview_open,
             window: if with_window { self.window } else { self.saved.window },
             bookmarks: self.bookmarks.paths().to_vec(),
-            view: self.view_size,
+            view: self.default_look.view,
             columns: self.columns,
             shown_columns: self.shown_columns,
             column_order: self.column_order,
             tabs: if with_window { self.session().0 } else { self.saved.tabs.clone() },
             active_tab: if with_window { self.session().1 } else { self.saved.active_tab },
             visited: if with_window { self.visits.list().to_vec() } else { self.saved.visited.clone() },
-            folder_views: self.saved.folder_views.clone(),
+            folder_views: self.folder_views.clone(),
         }
     }
 
@@ -1272,6 +1285,7 @@ impl LumenApp {
     /// Another Lumen window may have saved meanwhile: the file is read again
     /// and only what changed here is written over it.
     fn save_settings(&mut self, with_window: bool) {
+        self.keep_rule();
         let Some(path) = self.config_path.clone() else { return };
         let settings = self.settings(with_window);
         // Closing always writes: the last window closed leaves its session.
@@ -1932,7 +1946,7 @@ impl LumenApp {
 
     /// Ctrl+T or +: opens the current folder in a new tab after this one.
     fn new_tab(&mut self, ctx: &egui::Context) {
-        let tab = Tab::new(self.tab.view.current.clone(), Some(&self.tab.view), self.log);
+        let tab = Tab::new(self.tab.view.current.clone(), Some(&self.tab), self.log);
         self.leave_tab();
         let old = std::mem::replace(&mut self.tab, tab);
         self.tabs[self.active] = Some(old);
@@ -2112,8 +2126,29 @@ impl LumenApp {
         }
     }
 
+    /// A change of view or order since the tab's look was last applied or
+    /// kept goes to the rule its folder opens with; without one it lasts
+    /// only this visit.
+    fn keep_rule(&mut self) {
+        let Some((folder, kept)) = &mut self.tab.look_for else { return };
+        let look = Look { view: self.tab.view_size, sort: self.tab.view.sort };
+        if look != *kept {
+            *kept = look;
+            self.folder_views.update(folder, look);
+        }
+    }
+
     /// Shows a finished listing and settles what depended on it.
     fn apply(&mut self, listing: Listing) {
+        self.keep_rule();
+        // Another folder opens with its saved view and order, or the default;
+        // set before the listing lands so it is sorted with them.
+        if listing.result.is_ok() && self.tab.look_for.as_ref().is_none_or(|(folder, _)| *folder != listing.path) {
+            let look = self.folder_views.rule_for(&listing.path).map_or(self.default_look, |rule| rule.look);
+            self.tab.view_size = look.view;
+            self.tab.view.sort = look.sort;
+            self.tab.look_for = Some((listing.path.clone(), look));
+        }
         self.tab.shown_id = listing.id;
         let select = self.tab.select_after_load.take();
         let select_path = self.tab.select_path_after_load.take();
@@ -2194,7 +2229,7 @@ impl LumenApp {
         let shape = self.grid?;
         let last = self.tab.view.rows.len().checked_sub(1)?;
         let cur = self.tab.view.selected.unwrap_or(0).min(last);
-        let rows_are_lines = self.view_size.layout() == ui::view_size::Layout::Icons;
+        let rows_are_lines = self.tab.view_size.layout() == ui::view_size::Layout::Icons;
         let (down, side) = match action {
             Action::Extend(isize::MIN) => return Some(0),
             Action::Extend(isize::MAX) => return Some(last),
@@ -2210,7 +2245,7 @@ impl LumenApp {
     /// Tree, List or Icons) fades in over `VIEW_FADE`, like File Pilot's quick
     /// switch; icons growing inside the grid are the same view and never fade.
     fn list_opacity(&mut self, now: f64) -> f32 {
-        let layout = self.view_size.layout();
+        let layout = self.tab.view_size.layout();
         if layout != self.shown_layout.0 {
             self.shown_layout = (layout, now);
         }
@@ -2222,9 +2257,9 @@ impl LumenApp {
         match action {
             Action::FocusPathBar => self.path_popup.open(),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
-            Action::ZoomIn => self.view_size = self.view_size.bigger(),
-            Action::ZoomOut => self.view_size = self.view_size.smaller(),
-            Action::ZoomReset => self.view_size = ui::view_size::ViewSize::default(),
+            Action::ZoomIn => self.tab.view_size = self.tab.view_size.bigger(),
+            Action::ZoomOut => self.tab.view_size = self.tab.view_size.smaller(),
+            Action::ZoomReset => self.tab.view_size = ui::view_size::ViewSize::default(),
             Action::FitColumns => self.run_command(ctx, Command::FitAllColumns),
             Action::Activate => self.activate_selected(ctx),
             Action::GoParent => {
@@ -2241,7 +2276,7 @@ impl LumenApp {
                     self.go_parent(ctx);
                 }
             }
-            Action::Side(delta) if self.view_size.layout() == ui::view_size::Layout::Tree => {
+            Action::Side(delta) if self.tab.view_size.layout() == ui::view_size::Layout::Tree => {
                 self.tab.view.tree_side(delta);
                 self.read_kids(ctx);
             }
@@ -2460,13 +2495,13 @@ impl eframe::App for LumenApp {
                 ui.multiply_opacity(opacity);
                 ctx.request_repaint();
             }
-            let tree = self.view_size.layout() == ui::view_size::Layout::Tree;
+            let tree = self.tab.view_size.layout() == ui::view_size::Layout::Tree;
             if !tree {
                 // The unfolded folders belong to the Tree view alone.
                 self.tab.view.fold_all();
             }
             let sizes = ui::file_list::Sizes { widths: self.columns, shown: self.shown_columns, order: self.column_order, tree };
-            let lined = match (self.view_size.layout(), self.view_size.growth()) {
+            let lined = match (self.tab.view_size.layout(), self.tab.view_size.growth()) {
                 (_, Some(growth)) => Some(ui::icon_grid::show(ui, &self.tab.view, &cut, growth, scroll, self.rename.as_mut(), &self.file_icons)),
                 (ui::view_size::Layout::List, _) => Some(ui::list_view::show(ui, &self.tab.view, &cut, scroll, self.rename.as_mut(), &self.file_icons)),
                 _ => None,
@@ -2555,11 +2590,11 @@ impl eframe::App for LumenApp {
                     let name = file_name(&c.path).unwrap_or_default();
                     ui::status_bar::counting_text(&name, &c.progress)
                 }),
-                view: self.view_size,
+                view: self.tab.view_size,
             },
         );
         if let Some(view) = picked {
-            self.view_size = view;
+            self.tab.view_size = view;
         }
 
         #[cfg(windows)]
@@ -2838,8 +2873,10 @@ mod tests {
         let entries = fs::lister::read_entries(&dir).unwrap();
         let listing = Listing { id: 0, path: dir.clone(), result: Ok(entries), elapsed: Duration::ZERO };
         app.tab.view.apply_listing(listing, None);
-        // As if the startup listing had landed: nothing is in flight.
+        // As if the startup listing had landed: nothing is in flight, and
+        // the folder shows the default look.
         app.tab.shown_id = app.tab.lister.latest_id();
+        app.tab.look_for = Some((dir.clone(), Look::default()));
         (ctx, app, dir)
     }
 
@@ -3585,10 +3622,10 @@ mod tests {
     #[test]
     fn a_new_tab_opens_the_same_folder_after_this_one_with_its_own_history() {
         let (ctx, mut app, dir) = app_in("app-tab-new");
-        app.tab.view.sort_by(SortColumn::Size);
-        app.tab.view.toggle_hidden();
         app.handle_action(&ctx, Action::Activate); // into sub
         land(&mut app);
+        app.tab.view.sort_by(SortColumn::Size);
+        app.tab.view.toggle_hidden();
         assert!(app.tab.history.back_target().is_some());
         app.handle_action(&ctx, Action::NewTab);
         assert_eq!((app.tabs.len(), app.active), (2, 1));
@@ -3694,6 +3731,96 @@ mod tests {
         }
     }
 
+    fn look_of(app: &LumenApp) -> (u8, Sort) {
+        (app.tab.view_size.percent(), app.tab.view.sort)
+    }
+
+    #[test]
+    fn a_folder_opens_with_its_saved_view_and_one_without_with_the_default() {
+        use crate::folder_views::{Rule, Scope};
+        use ui::view_size::ViewSize;
+        let (ctx, _, dir) = app_in("app-folder-rule");
+        std::fs::create_dir(dir.join("other")).unwrap();
+        let size_desc = Sort { column: SortColumn::Size, descending: true };
+        let rule = Rule { folder: dir.join("sub"), scope: Scope::Folder, look: Look { view: ViewSize::new(100), sort: size_desc } };
+        let config = Config { view: ViewSize::new(20), folder_views: FolderViews::from_rules(vec![rule]), ..Config::default() };
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, Settings { config, path: None, error: None });
+        app.apply(listing_of(&dir));
+        assert_eq!(look_of(&app), (20, Sort::default()), "no rule: the default");
+        app.handle_action(&ctx, Action::ZoomIn);
+        app.tab.view.sort_by(SortColumn::Size);
+        let changed = (30, Sort { column: SortColumn::Size, descending: false });
+        assert_eq!(look_of(&app), changed);
+        app.apply(listing_of(&dir));
+        assert_eq!(look_of(&app), changed, "a reload of the same folder keeps the visit's change");
+        app.apply(listing_of(&dir.join("sub")));
+        assert_eq!(look_of(&app), (100, size_desc), "its saved view");
+        let names: Vec<_> = app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i).name.clone()).collect();
+        assert!(names.is_empty(), "sub is empty here: {names:?}");
+        app.apply(listing_of(&dir.join("other")));
+        assert_eq!(look_of(&app), (20, Sort::default()), "the change in the first folder lasted only that visit");
+        let failed = Listing { id: 0, path: dir.join("gone"), result: Err(ListError::NotFound(dir.join("gone"))), elapsed: Duration::ZERO };
+        app.handle_action(&ctx, Action::ZoomIn);
+        app.apply(failed);
+        assert_eq!(look_of(&app), (30, Sort::default()), "a folder that could not be read changes nothing");
+    }
+
+    #[test]
+    fn the_listing_that_lands_is_sorted_with_the_folders_saved_order() {
+        use crate::folder_views::{Rule, Scope};
+        let (ctx, _, dir) = app_in("app-folder-rule-sort");
+        std::fs::write(dir.join("sub/a-small.txt"), "1").unwrap();
+        std::fs::write(dir.join("sub/z-big.txt"), "1234567890").unwrap();
+        let size_desc = Sort { column: SortColumn::Size, descending: true };
+        let rule = Rule { folder: dir.join("sub"), scope: Scope::Folder, look: Look { view: Default::default(), sort: size_desc } };
+        let config = Config { folder_views: FolderViews::from_rules(vec![rule]), ..Config::default() };
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, Settings { config, path: None, error: None });
+        app.apply(listing_of(&dir.join("sub")));
+        let names: Vec<_> = app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i).name.clone()).collect();
+        assert_eq!(names, ["z-big.txt", "a-small.txt"], "biggest first, as saved");
+    }
+
+    #[test]
+    fn a_change_under_a_rule_updates_it_and_one_elsewhere_never_moves_the_default() {
+        use crate::folder_views::{Rule, Scope};
+        use ui::view_size::ViewSize;
+        let (ctx, _, dir) = app_in("app-folder-rule-keep");
+        std::fs::create_dir(dir.join("sub/deep")).unwrap();
+        let path = dir.join("cfg/lumen/config");
+        let rule = Rule { folder: dir.join("sub"), scope: Scope::Tree, look: Look { view: ViewSize::new(100), sort: Sort::default() } };
+        Config { folder_views: FolderViews::from_rules(vec![rule]), ..Config::default() }.save(&path).unwrap();
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
+        app.apply(listing_of(&dir.join("sub/deep")));
+        assert_eq!(look_of(&app).0, 100, "covered by the rule above");
+        app.handle_action(&ctx, Action::ZoomOut);
+        app.save_settings(false);
+        let saved = Config::load(&path).unwrap();
+        let rules: Vec<_> = saved.folder_views.rules().iter().map(|r| (r.folder.clone(), r.look.view.percent())).collect();
+        assert_eq!(rules, [(dir.join("sub"), 95)], "the rule the folder opens with keeps the change");
+        app.apply(listing_of(&dir));
+        assert_eq!(look_of(&app).0, 0, "no rule: the default");
+        app.handle_action(&ctx, Action::ZoomIn);
+        app.save_settings(false);
+        let saved = Config::load(&path).unwrap();
+        assert_eq!(saved.view, ViewSize::new(0), "the default did not move");
+        assert_eq!(saved.folder_views.rules().len(), 1, "a change makes no rule");
+    }
+
+    #[test]
+    fn each_tab_shows_its_own_view_and_a_new_one_carries_the_visits() {
+        use ui::view_size::ViewSize;
+        let (ctx, mut app, _dir) = app_in("app-tab-view");
+        app.tab.view_size = ViewSize::new(100);
+        app.handle_action(&ctx, Action::NewTab);
+        land(&mut app);
+        assert_eq!(app.tab.view_size, ViewSize::new(100), "the same folder, the same visit");
+        app.handle_action(&ctx, Action::ZoomReset);
+        app.select_tab(&ctx, 0);
+        assert_eq!(app.tab.view_size, ViewSize::new(100), "the first tab kept its own");
+        app.select_tab(&ctx, 1);
+        assert_eq!(app.tab.view_size, ViewSize::new(0));
+    }
+
     #[test]
     fn saved_settings_are_applied_at_startup() {
         let dir = crate::fs::ops::tests::fresh_fixture("app-config-start");
@@ -3706,7 +3833,7 @@ mod tests {
         assert!(app.preview_open);
         assert_eq!(app.bookmarks.paths(), [PathBuf::from("/srv")], "repeats dropped");
         assert_eq!(app.window, Some([1000.0, 700.0]));
-        assert_eq!(app.view_size, ui::view_size::ViewSize::new(65));
+        assert_eq!(app.tab.view_size, ui::view_size::ViewSize::new(65));
         assert_eq!(app.columns, [250.0, 90.0, 140.0, 55.0, 60.0, 95.0]);
     }
 
@@ -3788,26 +3915,26 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_plus_and_minus_move_the_view_slider_and_it_is_saved_at_once() {
+    fn ctrl_plus_and_minus_move_the_view_slider_and_leave_the_default_alone() {
         use ui::view_size::ViewSize;
         let (ctx, _, dir) = app_in("app-zoom");
         let path = dir.join("cfg/lumen/config");
         let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
         app.handle_action(&ctx, Action::ZoomOut);
-        assert_eq!(app.view_size, ViewSize::new(0), "already Details");
+        assert_eq!(app.tab.view_size, ViewSize::new(0), "already Details");
         let mut walked = Vec::new();
         for _ in 0..5 {
             app.handle_action(&ctx, Action::ZoomIn);
-            walked.push(app.view_size.name());
+            walked.push(app.tab.view_size.name());
         }
         assert_eq!(walked, ["Tree", "List", "M Icons", "M Icons", "M Icons"]);
-        assert_eq!(app.view_size, ViewSize::new(40));
+        assert_eq!(app.tab.view_size, ViewSize::new(40));
         app.handle_action(&ctx, Action::ZoomOut);
-        assert_eq!(app.view_size, ViewSize::new(35));
+        assert_eq!(app.tab.view_size, ViewSize::new(35));
         app.save_settings(false);
-        assert_eq!(Config::load(&path).unwrap().view, ViewSize::new(35));
+        assert!(!path.exists(), "a folder with no rule: the default did not move, nothing to write");
         app.handle_action(&ctx, Action::ZoomReset);
-        assert_eq!(app.view_size, ViewSize::new(0), "Ctrl+0 goes back to Details");
+        assert_eq!(app.tab.view_size, ViewSize::new(0), "Ctrl+0 goes back to Details");
         assert_eq!(ctx.zoom_factor(), 1.0, "the rest of the window never zooms");
     }
 
@@ -3815,7 +3942,7 @@ mod tests {
     fn in_the_icons_view_up_and_down_cross_rows_and_left_right_walk_the_cards() {
         use ui::grid::GridShape;
         let (ctx, mut app, _dir) = app_in("app-grid-keys");
-        app.view_size = ui::view_size::ViewSize::new(30);
+        app.tab.view_size = ui::view_size::ViewSize::new(30);
         // sub / a.txt b.txt: the folder alone on the first row.
         app.grid = Some(GridShape::new(2, 1, 3));
         let mut at = |action| {
@@ -3839,7 +3966,7 @@ mod tests {
     fn in_the_list_view_up_and_down_walk_a_column_and_left_right_cross_columns() {
         use ui::grid::GridShape;
         let (ctx, mut app, _dir) = app_in("app-list-keys");
-        app.view_size = ui::view_size::ViewSize::new(20);
+        app.tab.view_size = ui::view_size::ViewSize::new(20);
         // Columns of 2: sub / a.txt b.txt.
         app.grid = Some(GridShape::new(2, 1, 3));
         let mut at = |action| {
@@ -3868,15 +3995,15 @@ mod tests {
         use ui::view_size::ViewSize;
         let (_ctx, mut app, _dir) = app_in("app-view-fade");
         assert_eq!(app.list_opacity(0.0), 1.0, "nothing changed: drawn whole");
-        app.view_size = ViewSize::new(20);
+        app.tab.view_size = ViewSize::new(20);
         let start = app.list_opacity(10.0);
         assert!(start < 1.0, "List just picked: still fading in ({start})");
         let mid = app.list_opacity(10.0 + VIEW_FADE / 2.0);
         assert!(mid > start && mid < 1.0, "half way: {mid}");
         assert_eq!(app.list_opacity(10.0 + VIEW_FADE), 1.0, "done after the fade");
-        app.view_size = ViewSize::new(30);
+        app.tab.view_size = ViewSize::new(30);
         assert!(app.list_opacity(20.0) < 1.0, "List to M Icons is another view");
-        app.view_size = ViewSize::new(80);
+        app.tab.view_size = ViewSize::new(80);
         assert_eq!(app.list_opacity(20.0 + VIEW_FADE), 1.0, "M to XL grows the icons, no new fade");
     }
 
@@ -3902,7 +4029,7 @@ mod tests {
         let written = Config::load(&path).unwrap();
         assert_eq!(written.bookmarks, std::slice::from_ref(&dir));
         assert!(written.show_hidden && !written.sidebar && written.preview);
-        assert_eq!(written.sort.column, SortColumn::Modified);
+        assert_eq!(written.sort, Sort::default(), "a sort in a folder with no rule lasts the visit");
         app.window = Some([900.0, 600.0]);
         app.save_settings(false);
         assert_eq!(Config::load(&path).unwrap().window, None, "a resize alone is not written");
@@ -5481,7 +5608,7 @@ mod tests {
         let (ctx, mut app, dir) = app_in(name);
         std::fs::create_dir(dir.join("sub/deeper")).unwrap();
         std::fs::write(dir.join("sub/inner.txt"), "i").unwrap();
-        app.view_size = ui::view_size::ViewSize::new(10);
+        app.tab.view_size = ui::view_size::ViewSize::new(10);
         (ctx, app, dir)
     }
 
@@ -5645,7 +5772,7 @@ mod tests {
         std::fs::write(dir.join("README.md"), "top").unwrap();
         std::fs::write(dir.join("sub/a.md"), "a").unwrap();
         std::fs::write(dir.join("sub/README.md"), "child").unwrap();
-        app.view_size = ui::view_size::ViewSize::new(10);
+        app.tab.view_size = ui::view_size::ViewSize::new(10);
         let mut listing = listing_of(&dir);
         listing.id = app.tab.lister.latest_id();
         app.apply(listing);
