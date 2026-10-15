@@ -87,7 +87,7 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 | Shift+↑ / Shift+↓, Shift+PageUp / PageDown, Shift+Home / End | Select the range from where the selection started (also Shift+click) |
 | Ctrl+A | Select every row shown (with text in the filter, only the rows it left) |
 | Ctrl+click | Add a row to the selection, or take it out |
-| Click below the rows (or beside the cards) | Unselect everything: the cursor stays on its entry with a dashed outline, and Delete, F2 or Enter do nothing until a click or an arrow selects again |
+| Click below the rows (or beside the cards), or Esc with nothing else to undo | Unselect everything: the cursor stays on its entry with a dashed outline, and Delete, F2 or Enter do nothing until a click or an arrow selects again |
 | Drag from below the rows, or from a row outside its icon and name | Select every row the band touches; held near the list's top or bottom edge (or past it), the list scrolls, faster closer to the edge. In Icons and List, drag from the space around the cards: every card the band touches is picked, and near an edge the view scrolls (sideways in List) |
 | Right click, Shift+F10, Menu key | The menu for the selection (a row outside it becomes the selection) or, below the rows, for the folder: type to search it ("sort size"), ↑/↓ to move, → / ← to open or close a submenu, Enter or a click to run, Esc to close. On Linux, "Open With" lists the apps installed for the entry's type (as GNOME and KDE read them), launched with `gio launch`; "Open Terminal Here" starts $TERMINAL or the first terminal installed; New ▸ creates a folder, an empty file or a copy of a file from your Templates folder (~/Templates, or its name in your language), never over an existing name, and starts renaming it. On Windows the menu holds the shell's own items, as File Explorer shows them (Open with, Send to, 7-Zip, PowerRename… whatever that PC has installed), with their icons, followed by Lumen's own; Cut, Copy, Paste, Delete and Rename there use Lumen's clipboard, trash and in-place rename |
 | Enter (or double click) | Enter folder / open file with the default app |
@@ -113,7 +113,7 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 | Ctrl+Plus / Ctrl+Minus, Ctrl+wheel | Move the view slider: Details, Tree, List, then icons that grow from M to L to XL (and back) |
 | Ctrl+0 | Back to the Details view |
 | Ctrl+Shift+F | Size every list column to fit its content (also in the header's right-click menu) |
-| Esc | Clear the filter; with an empty filter, drop a multiple selection, then stop the Alt+R count, then cancel the copy or move in progress with the entries still waiting, then forget a cut waiting to be pasted (holding it stops at the first thing it undid) |
+| Esc | Clear the filter; with an empty filter, drop a multiple selection, then stop the Alt+R count, then cancel the copy or move in progress with the entries still waiting, then forget a cut waiting to be pasted, then unselect as a click on the empty space does (holding it stops at the first thing it undid) |
 
 Each tab keeps its own folder, history, filter and selection; a tab is reloaded when you come back to it.
 

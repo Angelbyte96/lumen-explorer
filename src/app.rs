@@ -379,7 +379,7 @@ impl View {
         self.selected = Some(cursor);
     }
 
-    /// A click on the empty space: nothing is selected any more, the cursor
+    /// A click on the empty space or Escape: nothing is selected any more, the cursor
     /// stays where it was with a dashed outline.
     pub fn unselect(&mut self) {
         self.drop_picks();
@@ -2311,6 +2311,9 @@ impl LumenApp {
                         // Last: a cut waiting to be pasted is forgotten, as in other explorers.
                         self.clipboard = None;
                         self.notice = Some("Cut cancelled".into());
+                    } else {
+                        // With nothing else to undo, the cursor keeps only its outline.
+                        self.tab.view.unselect();
                     }
                 }
             }
@@ -5221,6 +5224,43 @@ mod tests {
         assert!(app.dialog.is_none() && app.rename.is_none() && app.clipboard.is_none());
         app.handle_action(&ctx, Action::Activate);
         assert_eq!(app.tab.view.current, dir, "Enter enters nothing");
+    }
+
+    #[test]
+    fn escape_with_nothing_else_to_undo_unselects_and_keeps_the_cursor() {
+        let (ctx, mut app, dir) = app_in("app-escape-unselect");
+        app.tab.view.select_row(1);
+        let cursor = app.tab.view.selected;
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.tab.view.selected_entry().is_none() && app.tab.view.selection().is_empty());
+        assert!(app.tab.view.is_outlined(1), "the cursor keeps its place, outlined");
+        app.handle_action(&ctx, Action::Trash);
+        assert!(app.dialog.is_none(), "Delete acts on nothing");
+        app.handle_action(&ctx, Action::Move(1));
+        assert_eq!(app.tab.view.selected, cursor.map(|row| row + 1), "an arrow selects again from the cursor");
+        assert!(app.tab.view.selected_entry().is_some());
+        assert_eq!(app.tab.view.current, dir);
+    }
+
+    #[test]
+    fn escape_drops_a_filter_picks_a_copy_and_a_cut_before_it_unselects() {
+        let (ctx, mut app, dir) = app_in("app-escape-unselect-last");
+        app.tab.view.select_row(1);
+        app.handle_action(&ctx, Action::TypeChar('b'));
+        app.handle_action(&ctx, Action::Cancel);
+        assert_eq!(app.tab.view.filter(), "");
+        assert!(app.tab.view.selected_entry().is_some(), "clearing the filter keeps the selection");
+        app.tab.view.select_row(1);
+        app.tab.view.toggle_pick(2);
+        app.handle_action(&ctx, Action::Cancel);
+        assert_eq!(app.tab.view.picked_count(), 0);
+        assert!(app.tab.view.selected_entry().is_some(), "dropping the picks keeps the cursor selected");
+        app.clipboard = Some(Clip { paths: vec![dir.join("a.txt")], mode: Mode::Move });
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.clipboard.is_none());
+        assert!(app.tab.view.selected_entry().is_some(), "forgetting the cut keeps the selection");
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.tab.view.selected_entry().is_none(), "then Escape unselects");
     }
 
     fn depths(v: &View) -> Vec<usize> {
