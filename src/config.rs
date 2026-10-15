@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 use crate::app::{Sort, SortColumn};
 use crate::places::{VISIT_LIMIT, Visit};
-use crate::ui::file_list::{ALL_SHOWN, DEFAULT_ORDER, DEFAULT_WIDTHS, MAX_ZOOM, MIN_WIDTH, Order, Shown, Widths};
+use crate::ui::file_list::{ALL_SHOWN, DEFAULT_ORDER, DEFAULT_WIDTHS, MIN_WIDTH, Order, Shown, Widths};
+use crate::ui::view_size::ViewSize;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -18,8 +19,8 @@ pub struct Config {
     /// Inner size of the window in points; `None` for the default size.
     pub window: Option<[f32; 2]>,
     pub bookmarks: Vec<PathBuf>,
-    /// Icon and row size in the list, 0 (normal) to `MAX_ZOOM`.
-    pub list_zoom: u8,
+    /// The view slider's position: Details, Tree, List or the icon size.
+    pub view: ViewSize,
     /// The tabs' folders of the last window closed, in bar order, and the
     /// one on screen: what `--restore` opens.
     pub tabs: Vec<PathBuf>,
@@ -43,7 +44,7 @@ impl Default for Config {
             preview: false,
             window: None,
             bookmarks: Vec::new(),
-            list_zoom: 0,
+            view: ViewSize::default(),
             tabs: Vec::new(),
             active_tab: 0,
             columns: DEFAULT_WIDTHS,
@@ -72,9 +73,7 @@ impl Config {
                 "sidebar" => config.sidebar = parse_bool(value).unwrap_or(config.sidebar),
                 "preview" => config.preview = parse_bool(value).unwrap_or(config.preview),
                 "window" => config.window = parse_window(value),
-                "list_zoom" => {
-                    config.list_zoom = value.parse().ok().filter(|z| *z <= MAX_ZOOM).unwrap_or(config.list_zoom)
-                }
+                "view" => config.view = value.parse::<u16>().map(|p| ViewSize::new(p.min(100) as u8)).unwrap_or(config.view),
                 "bookmark" if !value.is_empty() => config.bookmarks.push(PathBuf::from(value)),
                 "tab" if !value.is_empty() => config.tabs.push(PathBuf::from(value)),
                 "active_tab" => config.active_tab = value.parse().unwrap_or(config.active_tab),
@@ -100,7 +99,7 @@ impl Config {
         if let Some([w, h]) = self.window {
             text += &format!("window = {}x{}\n", w.round(), h.round());
         }
-        text += &format!("list_zoom = {}\n", self.list_zoom);
+        text += &format!("view = {}\n", self.view.percent());
         let columns: Vec<String> = self.columns.iter().map(|w| w.round().to_string()).collect();
         text += &format!("columns = {}\n", columns.join(" "));
         let hidden: Vec<&str> = SORT_COLUMNS.into_iter().zip(self.shown_columns).filter(|(_, shown)| !shown).map(|(c, _)| column_name(c)).collect();
@@ -158,8 +157,8 @@ impl Config {
         if before.window != after.window {
             merged.window = after.window;
         }
-        if before.list_zoom != after.list_zoom {
-            merged.list_zoom = after.list_zoom;
+        if before.view != after.view {
+            merged.view = after.view;
         }
         if before.columns != after.columns {
             merged.columns = after.columns;
@@ -402,7 +401,7 @@ mod tests {
             preview: true,
             window: Some([1200.0, 800.0]),
             bookmarks: vec![PathBuf::from("/home/u/Descargas"), PathBuf::from("/srv/my files")],
-            list_zoom: 2,
+            view: ViewSize::new(65),
             tabs: vec![PathBuf::from("/home/u"), PathBuf::from("/srv/my files")],
             active_tab: 1,
             columns: [250.0, 90.0, 140.0, 55.0, 60.0, 95.0],
@@ -421,7 +420,8 @@ mod tests {
         assert!(text.contains("sort = size desc\n"), "{text}");
         assert!(text.contains("show_hidden = true\n"), "{text}");
         assert!(text.contains("window = 1200x800\n"), "{text}");
-        assert!(text.contains("list_zoom = 2\n"), "{text}");
+        assert!(text.contains("view = 65\n"), "{text}");
+        assert!(!text.contains("list_zoom"), "{text}");
         assert!(text.contains("columns = 250 90 140 55 60 95\n"), "{text}");
         assert!(text.contains("hidden_columns = type files\n"), "{text}");
         assert!(text.contains("column_order = type name modified folders size files\n"), "{text}");
@@ -482,23 +482,24 @@ bookmark =
     }
 
     #[test]
-    fn an_older_file_without_list_zoom_loads_unchanged() {
-        let c = Config::parse("sort = size desc\nsidebar = false\nbookmark = /srv\n");
-        assert_eq!((c.list_zoom, c.sidebar, c.bookmarks.len()), (0, false, 1));
-        assert_eq!(Config::parse("list_zoom = 255").list_zoom, 0);
+    fn an_older_file_without_a_view_opens_details_and_its_row_zoom_is_ignored() {
+        let c = Config::parse("sort = size desc\nsidebar = false\nlist_zoom = 3\nbookmark = /srv\n");
+        assert_eq!((c.view, c.sidebar, c.bookmarks.len()), (ViewSize::default(), false, 1));
+        assert!(!c.to_text().contains("list_zoom"), "the old key is dropped on the next save");
     }
 
     #[test]
-    fn a_list_zoom_out_of_range_keeps_the_normal_size() {
-        assert_eq!(Config::parse("list_zoom = 4").list_zoom, 4);
-        assert_eq!(Config::parse("list_zoom = 5").list_zoom, 0, "above MAX_ZOOM");
-        assert_eq!(Config::parse("list_zoom = -1").list_zoom, 0);
-        assert_eq!(Config::parse("list_zoom = big").list_zoom, 0);
+    fn a_broken_view_keeps_details_and_one_past_100_is_capped() {
+        assert_eq!(Config::parse("view = 40").view, ViewSize::new(40));
+        assert_eq!(Config::parse("view = 12").view, ViewSize::new(10), "below the grid: the nearest step");
+        assert_eq!(Config::parse("view = 250").view, ViewSize::new(100));
+        assert_eq!(Config::parse("view = -1").view, ViewSize::default());
+        assert_eq!(Config::parse("view = big").view, ViewSize::default());
         let before = Config::default();
-        let after = Config { list_zoom: 3, ..before.clone() };
+        let after = Config { view: ViewSize::new(65), ..before.clone() };
         let disk = Config { sidebar: false, ..before.clone() };
         let merged = Config::merge(&disk, &before, &after);
-        assert_eq!((merged.list_zoom, merged.sidebar), (3, false), "this window's zoom, the other's panel");
+        assert_eq!((merged.view, merged.sidebar), (ViewSize::new(65), false), "this window's view, the other's panel");
     }
 
     #[test]

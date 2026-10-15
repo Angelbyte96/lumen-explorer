@@ -15,7 +15,7 @@ pub mod watch;
 use std::path::{Path, PathBuf};
 
 pub use entry::Entry;
-pub use lister::{Lister, Listing};
+pub use lister::{Lister, Listing, Readers};
 
 /// Home directory from the environment (`HOME` on Unix, `USERPROFILE` on Windows).
 pub fn home_dir() -> Option<PathBuf> {

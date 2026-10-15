@@ -70,6 +70,20 @@ pub fn show(ui: &mut egui::Ui, entry: &Entry, side: f32, own: Option<egui::Textu
     response
 }
 
+/// The Tree view's chevron in a square `side` points wide: `>` for a folded
+/// folder, `v` for an unfolded one. Drawn, so it needs no glyph.
+pub fn chevron(ui: &mut egui::Ui, side: f32, open: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
+    let (c, r) = (rect.center(), side * 0.2);
+    let corners = if open {
+        vec![c + vec2(-r, -r * 0.5), c + vec2(0.0, r * 0.5), c + vec2(r, -r * 0.5)]
+    } else {
+        vec![c + vec2(-r * 0.5, -r), c + vec2(r * 0.5, 0.0), c + vec2(-r * 0.5, r)]
+    };
+    ui.painter().add(Shape::line(corners, Stroke::new((side * 0.12).max(1.0), ui.visuals().text_color())));
+    response
+}
+
 /// A folder icon, for rows that are not entries (the side panel).
 pub fn folder(ui: &mut egui::Ui) -> egui::Response {
     let side = ui.text_style_height(&egui::TextStyle::Body);
