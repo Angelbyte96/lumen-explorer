@@ -66,7 +66,8 @@ pub enum Action {
     ZoomReset,
     /// Every list column's width to its content (Ctrl+Shift+F).
     FitColumns,
-    /// Escape: clears the filter, else stops a running count, else the copy or move.
+    /// Escape: clears the filter, else drops the picks, else stops a running count,
+    /// else the copy or move, else forgets a cut, else unselects.
     Cancel,
     /// Escape held down (key repeat).
     CancelHeld,
