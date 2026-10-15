@@ -136,17 +136,54 @@ pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
     event
 }
 
+fn lock_id() -> egui::Id {
+    egui::Id::new("lumen_saved_view_lock")
+}
+
+/// The lock's menu, as `Popup::menu` names it.
+fn lock_menu_id() -> egui::Id {
+    lock_id().with("popup")
+}
+
+/// Whether the lock's menu is open.
+pub fn lock_menu_open(ctx: &egui::Context) -> bool {
+    egui::Popup::is_id_open(ctx, lock_menu_id())
+}
+
+/// Closes the lock's menu on Escape and uses that Escape up; false when the
+/// menu was closed. Runs before the app reads its keys, which may drop an
+/// Escape that moved the focus.
+pub fn close_lock_menu_on_escape(ctx: &egui::Context) -> bool {
+    if !lock_menu_open(ctx) || !ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        return false;
+    }
+    egui::Popup::close_id(ctx, lock_menu_id());
+    true
+}
+
 /// The lock: bright while a saved rule covers the folder; a click opens
 /// "Saved view settings".
 fn lock(ui: &mut egui::Ui, saved: &SavedView) -> Option<ToolbarEvent> {
     let side = ui.spacing().interact_size.y;
-    let (rect, button) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+    let (_, rect) = ui.allocate_space(egui::vec2(side, side));
+    // A fixed id: the app closes the menu on Escape by it.
+    let button = ui.interact(rect, lock_id(), egui::Sense::click());
     let saved_here = saved.own.is_some() || saved.covered_by.is_some();
     let color = if saved_here || button.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
     crate::ui::icons::paint_lock(ui.painter(), rect.shrink(side * 0.15), color);
     crate::ui::focus_ring(ui, &button);
     let button = button.on_hover_text("Saved view settings");
     let mut chosen = None;
+    // Tab took the focus out of the lock and its menu: nothing else closes it.
+    let ctx = ui.ctx().clone();
+    let menu_layer = egui::LayerId::new(egui::Order::Foreground, lock_menu_id());
+    let outside = ctx
+        .memory(|m| m.focused())
+        .filter(|&id| id != lock_id())
+        .is_some_and(|id| ctx.read_response(id).is_none_or(|focused| focused.layer_id != menu_layer));
+    if outside && lock_menu_open(&ctx) {
+        egui::Popup::close_id(&ctx, lock_menu_id());
+    }
     egui::Popup::menu(&button).show(|ui| {
         ui.label(egui::RichText::new("Saved view settings").strong());
         if let Some(above) = &saved.covered_by {
@@ -358,6 +395,70 @@ mod tests {
             let (_, shapes) = tap(&ctx, &nav, egui::Key::Escape, egui::Modifiers::NONE);
             assert!(!menu_open(&shapes), "Escape closes it");
         }
+    }
+
+    #[test]
+    fn tab_out_of_the_lock_menu_closes_it() {
+        let ctx = egui::Context::default();
+        let nav = Nav { can_back: true, can_forward: true, ..nav_with(SavedView::default()) };
+        let menu_open = |shapes: &[egui::epaint::ClippedShape]| shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "Saved view settings"));
+        window(&ctx, &nav, vec![]);
+        for _ in 0..8 {
+            tap(&ctx, &nav, egui::Key::Tab, egui::Modifiers::NONE);
+        }
+        assert!(menu_open(&tap(&ctx, &nav, egui::Key::Enter, egui::Modifiers::NONE).1));
+        // The menu itself, None, This folder, This folder and subfolders, Set as default, then the star.
+        let mut open_on = Vec::new();
+        for _ in 0..6 {
+            let (_, shapes) = tap(&ctx, &nav, egui::Key::Tab, egui::Modifiers::NONE);
+            open_on.push(menu_open(&shapes));
+        }
+        assert!(open_on[..5].iter().all(|open| *open), "moving inside the menu keeps it open: {open_on:?}");
+        assert!(!open_on[5], "the focus left the menu, so it closed: {open_on:?}");
+        assert_eq!(tap(&ctx, &nav, egui::Key::Enter, egui::Modifiers::NONE).0, Some(Pressed::Bar(ToolbarEvent::ToggleBookmark)), "the star has the focus");
+    }
+
+    #[test]
+    fn a_click_opens_the_lock_menu_even_while_another_widget_has_the_focus() {
+        let ctx = egui::Context::default();
+        let nav = Nav { can_back: true, can_forward: true, ..nav_with(SavedView::default()) };
+        let menu_open = |shapes: &[egui::epaint::ClippedShape]| shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "Saved view settings"));
+        window(&ctx, &nav, vec![]);
+        // Three tab stops, ☰, back, forward, up, the lock: the star is the ninth.
+        for _ in 0..9 {
+            tap(&ctx, &nav, egui::Key::Tab, egui::Modifiers::NONE);
+        }
+        let lock = ctx.read_response(lock_id()).expect("the lock was drawn").rect.center();
+        let star = ctx.memory(|m| m.focused());
+        assert!(star.is_some_and(|id| id != lock_id()), "another widget has the focus");
+        window(&ctx, &nav, pointer_click(lock));
+        for frame in 0..3 {
+            assert!(menu_open(&window(&ctx, &nav, vec![]).1), "still open on frame {frame}");
+        }
+    }
+
+    #[test]
+    fn escape_closes_the_lock_menu_before_the_app_reads_it() {
+        let ctx = egui::Context::default();
+        let nav = nav_with(SavedView::default());
+        let (_, texts) = bar(&ctx, &nav, vec![]);
+        bar(&ctx, &nav, pointer_click(at(&texts, LOCK).center()));
+        assert!(lock_menu_open(&ctx));
+        let escape = |pressed| egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+        let input = egui::RawInput { events: vec![escape(true)], screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        let mut left_for_the_app = true;
+        let _ = ctx.run_ui(input, |root| {
+            assert!(close_lock_menu_on_escape(root.ctx()), "it was open");
+            left_for_the_app = root.ctx().input(|i| i.key_pressed(egui::Key::Escape));
+        });
+        assert!(!left_for_the_app, "that Escape is used up: it does not also unselect");
+        assert!(!lock_menu_open(&ctx));
+        let input = egui::RawInput { events: vec![escape(true)], screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        let _ = ctx.run_ui(input, |root| {
+            assert!(!close_lock_menu_on_escape(root.ctx()), "closed: nothing to do");
+            left_for_the_app = root.ctx().input(|i| i.key_pressed(egui::Key::Escape));
+        });
+        assert!(left_for_the_app, "with the menu closed Escape is the app's");
     }
 
     fn nav_with(saved_view: SavedView) -> Nav<'static> {

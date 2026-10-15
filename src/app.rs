@@ -2420,6 +2420,8 @@ impl eframe::App for LumenApp {
             }
         } else if self.path_popup.is_open() || self.context_menu.is_some() {
             // The path box and the menu read their own keys when drawn.
+        } else if ui::toolbar::close_lock_menu_on_escape(&ctx) {
+            // That Escape closed the lock's menu and did nothing else.
         } else {
             for action in input::read_actions(&ctx) {
                 self.handle_action(&ctx, action);
