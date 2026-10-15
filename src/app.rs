@@ -11,7 +11,7 @@ use crate::config::{Config, Settings};
 use crate::fs::count::{Count, Totals};
 use crate::fs::index::Crawler;
 use crate::fs::watch::Watcher;
-use crate::fs::{self, Entry, Lister, Listing};
+use crate::fs::{self, Entry, Lister, Listing, Readers};
 use crate::input::{self, Action, Confirm};
 use crate::menu::Command;
 #[cfg(not(windows))]
@@ -24,6 +24,7 @@ use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::ui::tabs::TabEvent;
 use crate::ui::toolbar::{Nav, ToolbarEvent};
 use crate::ui::context_menu::{ContextMenu, MenuEvent};
+use crate::ui::tree::Tree;
 use crate::ui::{self, file_list::{ListEvent, RenameEdit}, path_popup::{PathPopup, PopupEvent}, preview::PreviewPane, status_bar::{PickedSize, Status}};
 
 /// How the table should bring the selection into view on the next frame.
@@ -72,8 +73,11 @@ pub struct View {
     pub entries: Vec<Entry>,
     /// Indices into `entries` that pass the hidden-files and text filters, in display order.
     pub rows: Vec<usize>,
-    /// Index into `rows`.
+    /// Index into `rows`; outlined only while `unselected`.
     pub selected: Option<usize>,
+    /// A click on the empty space unselected everything: the cursor stays on
+    /// `selected`, outlined, but nothing is selected until a click or a key.
+    unselected: bool,
     pub show_hidden: bool,
     /// Kept across folders, like the hidden-files toggle.
     pub sort: Sort,
@@ -85,15 +89,26 @@ pub struct View {
     /// in any order, ignoring case (like the Ctrl+L box). A name equal to it
     /// is listed first.
     filter: String,
-    /// Folder totals computed with Alt+R, by entry name. Kept while the folder
+    /// Folder totals computed with Alt+R, by path. Kept while the folder
     /// stays on screen, dropped when another folder is shown.
-    pub totals: HashMap<String, Totals>,
-    /// Entries picked with Ctrl+A, Ctrl+click or Shift, by name so a refresh,
-    /// a sort or the filter does not move them. Only the rows shown count.
+    pub totals: HashMap<PathBuf, Totals>,
+    /// Entries picked with Ctrl+A, Ctrl+click or Shift, by path so a refresh,
+    /// a sort or the filter does not move them (and two unfolded folders can
+    /// hold the same name). Only the rows shown count.
     /// Empty: the selection is the cursor row alone.
-    picks: HashSet<String>,
+    picks: HashSet<PathBuf>,
     /// Entry a Shift range starts from.
-    anchor: Option<String>,
+    anchor: Option<PathBuf>,
+    /// The Tree view's unfolded folders.
+    pub tree: Tree,
+    /// What the unfolded folders hold, as the rows show it: `rows` index it
+    /// after `entries`.
+    kids: Vec<Entry>,
+    /// How deep each row is, as `rows`; empty (all 0) outside the Tree view.
+    depths: Vec<usize>,
+    /// An entry inside an unfolded folder to select once that folder's read
+    /// lands (a renamed child is not listed under its new name before).
+    want: Option<PathBuf>,
 }
 
 impl View {
@@ -101,28 +116,49 @@ impl View {
     /// `select_name` re-selects an entry, e.g. the folder we just left with Backspace.
     /// A new folder starts unfiltered; reloading the same one keeps the filter
     /// unless it would hide `select_name` (a new folder, a renamed entry).
+    #[cfg(test)]
     pub fn apply_listing(&mut self, listing: Listing, select_name: Option<&str>) {
+        self.apply_listing_at(listing, select_name, None);
+    }
+
+    /// The same as `apply_listing`, that can also select an entry by its full path: one
+    /// of the folder's own or one inside an unfolded folder. A path wins over
+    /// a name; the filter is only cleared to show an entry of the folder itself.
+    pub fn apply_listing_at(&mut self, listing: Listing, select_name: Option<&str>, select_path: Option<&Path>) {
         match listing.result {
             Ok(entries) => {
-                if listing.path != self.current {
+                let same_folder = listing.path == self.current;
+                if !same_folder {
                     self.filter.clear();
                     self.totals.clear();
                     self.drop_picks();
+                    self.unselected = false;
+                    self.tree.clear();
                 }
+                // Reloading with folders unfolded: the cursor stays where it was.
+                let before = (same_folder && !self.tree.is_empty()).then(|| (self.selected_entry().map(|e| e.path.clone()), self.selected));
                 self.current = listing.path;
                 self.entries = entries;
                 self.last_elapsed = Some(listing.elapsed);
                 self.error = None;
+                self.tree.prune(&self.entries);
+                self.tree.refresh();
                 self.rebuild_rows(None);
-                if let Some(name) = select_name
-                    && self.row_of_name(name).is_none()
-                    && !self.filter.is_empty()
-                {
+                let hidden_name = select_name.is_some_and(|name| self.row_of_name(name).is_none());
+                let hidden_path = select_path
+                    .is_some_and(|path| self.row_of_path(path).is_none() && path.parent() == Some(self.current.as_path()) && self.entries.iter().any(|e| e.path == path));
+                if (hidden_name || hidden_path) && !self.filter.is_empty() {
                     self.filter.clear();
                     self.rebuild_rows(None);
                 }
-                let wanted = select_name.and_then(|name| self.row_of_name(name));
-                self.selected = wanted.or((!self.rows.is_empty()).then_some(0));
+                self.want = select_path
+                    .filter(|path| self.row_of_path(path).is_none() && path.ancestors().skip(1).any(|folder| self.tree.is_open(folder)))
+                    .map(Path::to_path_buf);
+                let wanted = select_path
+                    .and_then(|path| self.row_of_path(path))
+                    .or_else(|| select_name.and_then(|name| self.row_of_name(name)));
+                let stay = before.and_then(|(path, row)| self.row_of_path(&path?).or_else(|| Some(row?.min(self.rows.len().checked_sub(1)?))));
+                self.selected = wanted.or(stay).or((!self.rows.is_empty()).then_some(0));
                 self.scroll = Some(Scroll::Instant);
             }
             Err(err) => self.error = Some(err.to_string()),
@@ -140,36 +176,38 @@ impl View {
                 return;
             }
         };
-        let keep = self.selected_entry().map(|e| e.name.clone());
+        let keep = self.selected_entry().map(|e| e.path.clone());
         let row = self.selected;
         self.entries = entries;
         self.last_elapsed = Some(listing.elapsed);
+        self.tree.prune(&self.entries);
+        self.tree.refresh();
         self.rebuild_rows(None);
         let last = self.rows.len().checked_sub(1);
         self.selected = keep
-            .and_then(|name| self.row_of_name(&name))
+            .and_then(|path| self.row_of_path(&path))
             .or_else(|| Some(row?.min(last?)));
     }
 
     pub fn toggle_hidden(&mut self) {
-        let keep = self.selected_entry().map(|e| e.name.clone());
+        let keep = self.selected_entry().map(|e| e.path.clone());
         self.show_hidden = !self.show_hidden;
         self.rebuild_rows(keep.as_deref());
         self.scroll = Some(Scroll::Instant);
     }
 
     pub fn sort_by(&mut self, column: SortColumn) {
-        let keep = self.selected_entry().map(|e| e.name.clone());
+        let keep = self.selected_entry().map(|e| e.path.clone());
         self.sort = self.sort.clicked(column);
         self.rebuild_rows(keep.as_deref());
         self.scroll = Some(Scroll::Instant);
     }
 
     /// Stores a finished count; a list sorted by a count column moves the row.
-    pub fn set_totals(&mut self, name: String, totals: Totals) {
-        self.totals.insert(name, totals);
+    pub fn set_totals(&mut self, path: PathBuf, totals: Totals) {
+        self.totals.insert(path, totals);
         if matches!(self.sort.column, SortColumn::Folders | SortColumn::Files | SortColumn::Size) {
-            let keep = self.selected_entry().map(|e| e.name.clone());
+            let keep = self.selected_entry().map(|e| e.path.clone());
             self.rebuild_rows(keep.as_deref());
         }
     }
@@ -198,18 +236,19 @@ impl View {
         if self.filter.is_empty() {
             return false;
         }
-        let keep = self.selected_entry().map(|e| e.name.clone());
+        let keep = self.selected_entry().map(|e| e.path.clone());
         self.filter.clear();
         self.refilter(keep.as_deref());
         true
     }
 
-    fn refilter(&mut self, keep_name: Option<&str>) {
-        self.rebuild_rows(keep_name);
+    fn refilter(&mut self, keep: Option<&Path>) {
+        self.rebuild_rows(keep);
         self.scroll = Some(Scroll::Instant);
     }
 
     pub fn move_selection(&mut self, action: Action) {
+        self.unselected = false;
         self.drop_picks();
         let Some(last) = self.rows.len().checked_sub(1) else {
             self.selected = None;
@@ -225,48 +264,73 @@ impl View {
         self.scroll = Some(Scroll::Smooth);
     }
 
+    /// An arrow key in a view laid out in lines: the cursor to `row` alone.
+    pub fn move_to(&mut self, row: usize) {
+        self.unselected = false;
+        self.drop_picks();
+        self.selected = Some(row.min(self.rows.len().saturating_sub(1)));
+        self.scroll = Some(Scroll::Smooth);
+    }
+
     /// A plain click: this row alone.
     pub fn select_row(&mut self, row: usize) {
+        self.unselected = false;
         self.drop_picks();
         self.selected = Some(row);
     }
 
     /// Ctrl+A: every row shown.
+    /// Ctrl+A: every row of the folder the cursor is in. In the Tree view a
+    /// cursor inside an unfolded folder picks what that folder holds, and one
+    /// at the top picks the top rows, not the unfolded children.
     pub fn select_all(&mut self) {
-        self.picks = self.rows.iter().map(|&i| self.entries[i].name.clone()).collect();
+        self.unselected = false;
+        let folder = self.selected_entry().and_then(|e| e.path.parent()).unwrap_or(&self.current).to_path_buf();
+        self.picks = self
+            .rows
+            .iter()
+            .map(|&i| &self.entry(i).path)
+            .filter(|path| path.parent() == Some(folder.as_path()))
+            .cloned()
+            .collect();
     }
 
     /// Ctrl+click: adds or removes `row`. The first one keeps the cursor row
     /// picked, as it was the selection until then.
     pub fn toggle_pick(&mut self, row: usize) {
         let Some(&idx) = self.rows.get(row) else { return };
+        self.want = None;
+        // An unselected cursor (only outlined) was not selected: it stays out.
         if self.picks.is_empty()
             && let Some(cursor) = self.selected_entry()
         {
-            self.picks.insert(cursor.name.clone());
+            self.picks.insert(cursor.path.clone());
         }
-        let name = &self.entries[idx].name;
-        if !self.picks.remove(name) {
-            self.picks.insert(name.clone());
+        self.unselected = false;
+        let path = self.entry(idx).path.clone();
+        if !self.picks.remove(&path) {
+            self.picks.insert(path.clone());
         }
-        self.anchor = Some(name.clone());
+        self.anchor = Some(path);
         self.selected = Some(row);
     }
 
     /// Shift+click: the rows from the anchor (the last plain or Ctrl click) to `row`.
     pub fn extend_to(&mut self, row: usize) {
+        self.unselected = false;
         if row >= self.rows.len() {
             return;
         }
+        self.want = None;
         let anchor = self
             .anchor
             .as_deref()
-            .and_then(|name| self.row_of_name(name))
+            .and_then(|path| self.row_of_path(path))
             .or(self.selected)
             .unwrap_or(row);
-        self.anchor = Some(self.entries[self.rows[anchor]].name.clone());
+        self.anchor = Some(self.entry(self.rows[anchor]).path.clone());
         let (from, to) = (anchor.min(row), anchor.max(row));
-        self.picks = self.rows[from..=to].iter().map(|&i| self.entries[i].name.clone()).collect();
+        self.picks = self.rows[from..=to].iter().map(|&i| self.entry(i).path.clone()).collect();
         self.selected = Some(row);
     }
 
@@ -283,28 +347,64 @@ impl View {
     /// row it touches and moves the cursor to the row at `end`. Over no row it
     /// drops the picks, like a click below the rows.
     pub fn select_band(&mut self, start: f32, end: f32) {
+        self.unselected = false;
         let Some(last) = self.rows.len().checked_sub(1) else { return };
         let (low, high) = (start.min(end), start.max(end));
         if high < 0.0 || low >= self.rows.len() as f32 {
             self.drop_picks();
             return;
         }
+        self.want = None;
         // Saturating casts: anything above the rows is row 0.
         let row = |at: f32| (at.floor().max(0.0) as usize).min(last);
         let (from, to) = (row(low), row(high));
-        self.picks = self.rows[from..=to].iter().map(|&i| self.entries[i].name.clone()).collect();
-        self.anchor = Some(self.entries[self.rows[row(start)]].name.clone());
+        self.picks = self.rows[from..=to].iter().map(|&i| self.entry(i).path.clone()).collect();
+        self.anchor = Some(self.entry(self.rows[row(start)]).path.clone());
         self.selected = Some(row(end));
+    }
+
+    /// A band over the cards of a view laid out in lines: picks `cells` (rows
+    /// shown) and moves the cursor to `cursor`. Over no card it drops the picks.
+    pub fn select_cells(&mut self, cells: &[usize], cursor: Option<usize>) {
+        self.unselected = false;
+        let cells: Vec<usize> = cells.iter().copied().filter(|&row| row < self.rows.len()).collect();
+        if cells.is_empty() {
+            self.drop_picks();
+            return;
+        }
+        self.want = None;
+        self.picks = cells.iter().map(|&row| self.entry(self.rows[row]).path.clone()).collect();
+        let cursor = cursor.filter(|row| cells.contains(row)).unwrap_or(cells[cells.len() - 1]);
+        self.anchor = Some(self.entry(self.rows[cells[0]]).path.clone());
+        self.selected = Some(cursor);
+    }
+
+    /// A click on the empty space: nothing is selected any more, the cursor
+    /// stays where it was with a dashed outline.
+    pub fn unselect(&mut self) {
+        self.drop_picks();
+        self.unselected = self.selected.is_some();
+    }
+
+    /// Whether `row` is drawn selected: picked, or the cursor when nothing is picked.
+    pub fn is_highlighted(&self, row: usize) -> bool {
+        if self.picked_count() > 0 { self.is_picked(row) } else { !self.unselected && self.selected == Some(row) }
+    }
+
+    /// Whether `row` is the unselected cursor, drawn with a dashed outline.
+    pub fn is_outlined(&self, row: usize) -> bool {
+        self.unselected && self.picked_count() == 0 && self.selected == Some(row)
     }
 
     /// Back to the cursor row alone. `false` when nothing was picked.
     pub fn drop_picks(&mut self) -> bool {
         self.anchor = None;
+        self.want = None;
         !std::mem::take(&mut self.picks).is_empty()
     }
 
     pub fn is_picked(&self, row: usize) -> bool {
-        self.rows.get(row).is_some_and(|&i| self.picks.contains(&self.entries[i].name))
+        self.rows.get(row).is_some_and(|&i| self.picks.contains(&self.entry(i).path))
     }
 
     /// Picked rows shown.
@@ -316,8 +416,8 @@ impl View {
     pub fn picked_size(&self) -> PickedSize {
         let mut size = PickedSize::default();
         for row in (0..self.rows.len()).filter(|&row| self.is_picked(row)) {
-            let entry = &self.entries[self.rows[row]];
-            let bytes = if entry.is_dir { self.totals.get(&entry.name).map(|t| t.bytes) } else { entry.size };
+            let entry = self.entry(self.rows[row]);
+            let bytes = if entry.is_dir { self.totals.get(&entry.path).map(|t| t.bytes) } else { entry.size };
             match bytes {
                 Some(bytes) => size.bytes += bytes,
                 None if entry.is_dir => size.uncounted += 1,
@@ -330,29 +430,42 @@ impl View {
 
     /// What an operation acts on, in display order: the picked rows shown, or
     /// the cursor row when none is.
+    /// What the actions act on: the picked rows, or the cursor row. An entry
+    /// inside a picked unfolded folder goes with that folder, so it is left
+    /// out: acting on it again would fail once the folder is gone, or copy it twice.
     pub fn selection(&self) -> Vec<&Entry> {
         let picked: Vec<&Entry> = (0..self.rows.len())
             .filter(|&row| self.is_picked(row))
-            .map(|row| &self.entries[self.rows[row]])
+            .map(|row| self.entry(self.rows[row]))
             .collect();
-        if picked.is_empty() { self.selected_entry().into_iter().collect() } else { picked }
+        if picked.is_empty() {
+            return self.selected_entry().into_iter().collect();
+        }
+        let folders: Vec<&Path> = picked.iter().filter(|e| e.is_dir).map(|e| e.path.as_path()).collect();
+        picked.into_iter().filter(|e| !folders.iter().any(|f| e.path != *f && e.path.starts_with(f))).collect()
     }
 
     pub fn selected_entry(&self) -> Option<&Entry> {
+        if self.unselected {
+            return None;
+        }
         self.selected
             .and_then(|i| self.rows.get(i))
-            .map(|&idx| &self.entries[idx])
+            .map(|&idx| self.entry(idx))
     }
 
     /// Entry to select once the selection is gone: the first row left below
-    /// it, or the nearest one above when none is.
-    pub fn name_after_removal(&self) -> Option<String> {
-        let gone = |row: usize| if self.picked_count() > 0 { self.is_picked(row) } else { Some(row) == self.selected };
+    /// it, or the nearest one above when none is. Rows inside a removed
+    /// unfolded folder go with it.
+    pub fn path_after_removal(&self) -> Option<PathBuf> {
+        let removed = |row: usize| if self.picked_count() > 0 { self.is_picked(row) } else { Some(row) == self.selected };
+        let removed_paths: Vec<&Path> = (0..self.rows.len()).filter(|&row| removed(row)).map(|row| self.entry(self.rows[row]).path.as_path()).collect();
+        let gone = |row: usize| removed_paths.iter().any(|path| self.entry(self.rows[row]).path.starts_with(path));
         let last = (0..self.rows.len()).rfind(|&row| gone(row))?;
         let row = (last + 1..self.rows.len())
             .find(|&row| !gone(row))
             .or_else(|| (0..last).rfind(|&row| !gone(row)))?;
-        Some(self.entries[self.rows[row]].name.clone())
+        Some(self.entry(self.rows[row]).path.clone())
     }
 
     /// The selected entry when exactly one is (rename, count).
@@ -365,30 +478,182 @@ impl View {
 
     /// Folders among the rows shown.
     pub fn folder_count(&self) -> usize {
-        self.rows.iter().filter(|&&i| self.entries[i].is_dir).count()
+        self.rows.iter().filter(|&&i| self.entry(i).is_dir).count()
     }
 
     pub fn hidden_count(&self) -> usize {
         self.entries.iter().filter(|e| e.hidden).count()
     }
 
-    fn rebuild_rows(&mut self, keep_name: Option<&str>) {
-        self.rows = visible_rows(&self.entries, &self.totals, self.show_hidden, &self.filter, self.sort);
-        self.selected = keep_name
-            .and_then(|name| self.row_of_name(name))
+    /// The entry a `rows` index stands for: one of the folder's own, or one
+    /// of what an unfolded folder holds.
+    pub fn entry(&self, index: usize) -> &Entry {
+        match index.checked_sub(self.entries.len()) {
+            None => &self.entries[index],
+            Some(kid) => &self.kids[kid],
+        }
+    }
+
+    /// Whether `path` is listed on screen, in the folder or an unfolded one.
+    pub fn lists(&self, path: &Path) -> bool {
+        self.entries.iter().chain(&self.kids).any(|e| e.path == path)
+    }
+
+    /// How many unfolded folders lie between `row` and the folder on screen.
+    pub fn depth(&self, row: usize) -> usize {
+        self.depths.get(row).copied().unwrap_or(0)
+    }
+
+    /// Whether `row` is a folder unfolded in the Tree view.
+    pub fn is_open(&self, row: usize) -> bool {
+        self.rows.get(row).is_some_and(|&i| self.entry(i).is_dir && self.tree.is_open(&self.entry(i).path))
+    }
+
+    /// Unfolds the folder in `row`, or folds it when it is unfolded. The
+    /// cursor stays on its entry, or goes to the folder when it was inside it.
+    pub fn toggle_open(&mut self, row: usize) {
+        let Some(&index) = self.rows.get(row) else { return };
+        let folder = self.entry(index);
+        if !folder.is_dir {
+            return;
+        }
+        let folder = folder.path.clone();
+        let cursor = self.selected_entry().map(|e| e.path.clone());
+        if self.tree.is_open(&folder) {
+            self.tree.fold(&folder);
+            self.want.take_if(|want| want.starts_with(&folder));
+            self.picks.retain(|pick| !pick.starts_with(&folder) || *pick == folder);
+            let keep = cursor.filter(|c| !c.starts_with(&folder) || *c == folder).unwrap_or(folder);
+            self.rebuild_rows(Some(&keep));
+        } else {
+            self.tree.unfold(folder);
+            self.rebuild_rows(cursor.as_deref());
+        }
+    }
+
+    /// Right or Left in the Tree view (`delta` is 1 or -1) on the cursor row:
+    /// Right unfolds a folded folder, else goes to the first child; Left folds
+    /// an unfolded folder, else goes to the parent folder.
+    pub fn tree_side(&mut self, delta: isize) {
+        let Some(row) = self.selected.filter(|&row| row < self.rows.len()) else { return };
+        let depth = self.depth(row);
+        if delta > 0 && self.entry(self.rows[row]).is_dir {
+            if !self.is_open(row) {
+                self.toggle_open(row);
+            } else if self.depth(row + 1) > depth {
+                self.move_to(row + 1);
+            }
+        } else if delta < 0 {
+            if self.is_open(row) {
+                self.toggle_open(row);
+            } else if let Some(parent) = (0..row).rfind(|&above| self.depth(above) < depth) {
+                self.move_to(parent);
+            }
+        }
+    }
+
+    /// Stores what was read of an unfolded folder and shows it.
+    pub fn apply_kids(&mut self, listing: Listing) {
+        let listing_path = listing.path.clone();
+        if !self.tree.set(&listing.path, listing.id, listing.result) {
+            return;
+        }
+        self.tree.prune(&self.entries);
+        let keep = self.selected_entry().map(|e| e.path.clone());
+        let row = self.selected;
+        self.rebuild_rows(None);
+        let last = self.rows.len().checked_sub(1);
+        self.selected = keep
+            .and_then(|path| self.row_of_path(&path))
+            .or_else(|| Some(row?.min(last?)));
+        // The entry asked for, once its folder is read: listed now, or gone.
+        if let Some(want) = self.want.take_if(|want| want.parent() == Some(listing_path.as_path()))
+            && let Some(row) = self.row_of_path(&want)
+        {
+            self.selected = Some(row);
+            self.scroll = Some(Scroll::Smooth);
+        }
+    }
+
+    /// Folds every folder (another view is shown).
+    pub fn fold_all(&mut self) {
+        if !self.tree.is_empty() {
+            // The cursor goes to the folder row that held it, if it was inside one.
+            let keep = self.selected_entry().map(|e| e.path.clone()).and_then(|path| {
+                path.ancestors().find(|a| a.parent() == Some(self.current.as_path())).map(Path::to_path_buf)
+            });
+            self.tree.clear();
+            self.want = None;
+            // Picked children are hidden for good: they must not come back picked.
+            let current = self.current.clone();
+            self.picks.retain(|pick| pick.parent() == Some(current.as_path()));
+            self.anchor.take_if(|anchor| anchor.parent() != Some(current.as_path()));
+            self.rebuild_rows(keep.as_deref());
+        }
+    }
+
+    fn rebuild_rows(&mut self, keep: Option<&Path>) {
+        let top = visible_rows(&self.entries, &self.totals, self.show_hidden, &self.filter, self.sort);
+        (self.rows, self.kids, self.depths) = tree_rows(&self.entries, top, &self.tree, &self.totals, self.show_hidden, self.sort);
+        self.selected = keep
+            .and_then(|path| self.row_of_path(path))
             .or((!self.rows.is_empty()).then_some(0));
     }
 
+    /// The row of the folder's own entry called `name`.
     fn row_of_name(&self, name: &str) -> Option<usize> {
-        self.rows.iter().position(|&i| self.entries[i].name == name)
+        (0..self.rows.len()).find(|&row| self.depth(row) == 0 && self.entry(self.rows[row]).name == name)
     }
+
+    fn row_of_path(&self, path: &Path) -> Option<usize> {
+        self.rows.iter().position(|&i| self.entry(i).path == path)
+    }
+}
+
+/// The rows of the Tree view: the `top` rows with, under each unfolded
+/// folder, what it holds (sorted like the rest, hidden files left out unless
+/// shown, not filtered). Returns the rows, the entries of the unfolded
+/// folders that they index after `entries`, and each row's depth. With no
+/// folder unfolded that is `top` alone.
+fn tree_rows(
+    entries: &[Entry],
+    top: Vec<usize>,
+    tree: &Tree,
+    totals: &HashMap<PathBuf, Totals>,
+    show_hidden: bool,
+    sort: Sort,
+) -> (Vec<usize>, Vec<Entry>, Vec<usize>) {
+    if tree.is_empty() {
+        return (top, Vec::new(), Vec::new());
+    }
+    let (mut rows, mut kids, mut depths) = (Vec::new(), Vec::new(), Vec::new());
+    // Each folder's children follow it, depth first.
+    let mut pending: Vec<(usize, usize)> = top.into_iter().rev().map(|i| (i, 0)).collect();
+    while let Some((index, depth)) = pending.pop() {
+        rows.push(index);
+        depths.push(depth);
+        let entry = if index < entries.len() { &entries[index] } else { &kids[index - entries.len()] };
+        let Some(inside) = tree.read(&entry.path).filter(|_| entry.is_dir) else { continue };
+        let order = visible_rows(inside, totals, show_hidden, "", sort);
+        let first = entries.len() + kids.len();
+        kids.extend(order.iter().map(|&j| inside[j].clone()));
+        pending.extend((0..order.len()).rev().map(|k| (first + k, depth + 1)));
+    }
+    (rows, kids, depths)
+}
+
+/// The folder every one of `paths` is in, when they all share one.
+#[cfg(any(windows, test))]
+fn shared_parent(paths: &[PathBuf]) -> Option<&Path> {
+    let parent = paths.first()?.parent()?;
+    paths.iter().all(|path| path.parent() == Some(parent)).then_some(parent)
 }
 
 /// Indices into `entries` that pass the hidden-files and text filters, in
 /// display order. Shared by the list and the folder preview.
 pub fn visible_rows(
     entries: &[Entry],
-    totals: &HashMap<String, Totals>,
+    totals: &HashMap<PathBuf, Totals>,
     show_hidden: bool,
     filter: &str,
     sort: Sort,
@@ -416,14 +681,14 @@ pub fn visible_rows(
 /// order: it sorts the Name column and breaks ties without allocating.
 fn compare(
     entries: &[Entry],
-    totals: &HashMap<String, Totals>,
+    totals: &HashMap<PathBuf, Totals>,
     kinds: &[String],
     sort: Sort,
     a: usize,
     b: usize,
 ) -> Ordering {
     let (ea, eb) = (&entries[a], &entries[b]);
-    let counted = |e: &Entry, field: fn(&Totals) -> u64| totals.get(&e.name).map(field);
+    let counted = |e: &Entry, field: fn(&Totals) -> u64| totals.get(&e.path).map(field);
     // A counted folder's size is its contents; `None` (not counted, unreadable
     // metadata) sorts before any value.
     let size = |e: &Entry| e.size.or_else(|| counted(e, |t| t.bytes));
@@ -453,6 +718,9 @@ pub enum NavKind {
     Refresh,
 }
 
+/// How long a newly picked view takes to fade in, in seconds: short, so the
+/// switch still feels instant.
+const VIEW_FADE: f64 = 0.12;
 /// How often the side panel reads the mounted disks again.
 const DISKS_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -571,9 +839,9 @@ impl MenuBasis {
 /// A destructive operation waiting for the user's Enter or Escape.
 enum Dialog {
     /// The selected entries; `select` is the row to land on once they are gone.
-    Trash { paths: Vec<PathBuf>, select: Option<String>, subject: ui::confirm::Subject },
+    Trash { paths: Vec<PathBuf>, select: Option<PathBuf>, subject: ui::confirm::Subject },
     /// Shift+Delete: the same, deleted for good.
-    Delete { paths: Vec<PathBuf>, select: Option<String>, subject: ui::confirm::Subject },
+    Delete { paths: Vec<PathBuf>, select: Option<PathBuf>, subject: ui::confirm::Subject },
     /// Renaming onto an existing name; the edit resumes if the user says no.
     Replace(RenameEdit),
     /// Pasting onto an existing name.
@@ -704,10 +972,14 @@ struct Running {
 pub struct Tab {
     view: View,
     lister: Lister,
+    /// Reads the folders unfolded in the Tree view.
+    readers: Readers,
     /// Id of the listing currently on screen (or the last one that failed).
     shown_id: u64,
-    /// Entry to select once the pending listing arrives.
+    /// Entry to select once the pending listing arrives, by name.
     select_after_load: Option<String>,
+    /// The same by full path, for entries that may be inside an unfolded folder.
+    select_path_after_load: Option<PathBuf>,
     /// How the pending listing was started.
     pending_nav: NavKind,
     history: History,
@@ -728,8 +1000,10 @@ impl Tab {
         Self {
             view,
             lister: Lister::new(log),
+            readers: Readers::new(),
             shown_id: 0,
             select_after_load: None,
+            select_path_after_load: None,
             pending_nav: NavKind::New,
             history: History::default(),
             rename_after_load: None,
@@ -799,8 +1073,14 @@ pub struct LumenApp {
     /// Mounted disks with their usage, and when they were read.
     disks: (Option<Instant>, Vec<(Mount, Option<Usage>)>),
     sidebar_open: bool,
-    /// Icon and row size in the list, shared by every tab.
-    list_zoom: u8,
+    /// The view slider's position, shared by every tab.
+    view_size: ui::view_size::ViewSize,
+    /// The cells' lines as last drawn, in views laid out in lines (Icons);
+    /// the arrows move through them.
+    grid: Option<ui::grid::GridShape>,
+    /// The view last drawn and when (egui time, seconds) the list started
+    /// showing it: a new view fades in for `VIEW_FADE`.
+    shown_layout: (ui::view_size::Layout, f64),
     /// The list's column widths.
     columns: ui::file_list::Widths,
     /// Which list columns are shown.
@@ -827,8 +1107,8 @@ pub struct LumenApp {
 /// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
 /// keyboard feels instant; list-wide changes skip them entirely (see [`Scroll`]).
 fn apply_style(ctx: &egui::Context) {
-    // Ctrl+Plus / Ctrl+Minus zoom only the list's icons and rows (Action::ZoomIn),
-    // not the whole window as egui would.
+    // Ctrl+Plus / Ctrl+Minus move the view slider (Action::ZoomIn), they do
+    // not zoom the whole window as egui would.
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
     ctx.all_styles_mut(|style| {
         style.scroll_animation =
@@ -877,7 +1157,9 @@ impl LumenApp {
             trash: None,
             disks: (None, Vec::new()),
             sidebar_open: true,
-            list_zoom: 0,
+            view_size: ui::view_size::ViewSize::default(),
+            grid: None,
+            shown_layout: (ui::view_size::Layout::Details, f64::NEG_INFINITY),
             columns: ui::file_list::DEFAULT_WIDTHS,
             shown_columns: ui::file_list::ALL_SHOWN,
             column_order: ui::file_list::DEFAULT_ORDER,
@@ -924,7 +1206,7 @@ impl LumenApp {
         app.tab.view.show_hidden = config.show_hidden;
         app.sidebar_open = config.sidebar;
         app.preview_open = config.preview;
-        app.list_zoom = config.list_zoom;
+        app.view_size = config.view;
         app.columns = config.columns;
         app.shown_columns = config.shown_columns;
         app.column_order = config.column_order;
@@ -975,7 +1257,7 @@ impl LumenApp {
             preview: self.preview_open,
             window: if with_window { self.window } else { self.saved.window },
             bookmarks: self.bookmarks.paths().to_vec(),
-            list_zoom: self.list_zoom,
+            view: self.view_size,
             columns: self.columns,
             shown_columns: self.shown_columns,
             column_order: self.column_order,
@@ -1063,6 +1345,7 @@ impl LumenApp {
         }
         self.tab.pending_nav = kind;
         self.tab.select_after_load = select;
+        self.tab.select_path_after_load = None;
         let ctx = ctx.clone();
         // Wake the UI as soon as the worker finishes, without polling in a loop.
         self.tab.lister.request(path, move || ctx.request_repaint());
@@ -1105,8 +1388,16 @@ impl LumenApp {
         #[cfg(windows)]
         {
             let paths: Vec<PathBuf> = selection.iter().map(|e| e.path.clone()).collect();
+            // The shell binds every item to one folder: entries spread over
+            // several (unfolded children) get Lumen's own menu.
+            let Some(folder) = shared_parent(&paths).map(Path::to_path_buf) else {
+                let items = crate::shell_menu::entry_menu(Vec::new(), &selection, bookmarked, self.clipboard.is_some());
+                self.context_menu = Some(ContextMenu::new(items, pos));
+                self.context_on_entry = true;
+                return;
+            };
             let repaint = self.repaint.clone();
-            self.shell_menu = Some(crate::shell_menu::native::Loader::entries(paths, view.current.clone(), self.hwnd, move || {
+            self.shell_menu = Some(crate::shell_menu::native::Loader::entries(paths, folder, self.hwnd, move || {
                 repaint.request_repaint()
             }));
             self.menu_basis = Some(MenuBasis::Entries {
@@ -1272,15 +1563,15 @@ impl LumenApp {
             }
             Command::Sort(column) => self.tab.view.sort_by(column),
             Command::Refresh => {
-                let keep = self.tab.view.selected_entry().map(|e| e.name.clone());
+                let keep = self.tab.view.selected_entry().map(|e| e.path.clone());
                 self.reload(ctx, keep);
             }
             Command::FitColumn(column) => {
-                self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, self.list_zoom, column);
+                self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, column);
             }
             Command::FitAllColumns => {
                 for column in 0..self.columns.len() {
-                    self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, self.list_zoom, column);
+                    self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, column);
                 }
             }
             Command::RestoreColumns => {
@@ -1326,9 +1617,11 @@ impl LumenApp {
         }
     }
 
-    /// Lists the current folder again after an operation changed it.
-    fn reload(&mut self, ctx: &egui::Context, select: Option<String>) {
-        self.navigate(ctx, self.tab.view.current.clone(), select);
+    /// Lists the current folder again after an operation changed it; `select`
+    /// is the entry to land on, one of the folder's or inside an unfolded one.
+    fn reload(&mut self, ctx: &egui::Context, select: Option<PathBuf>) {
+        self.navigate(ctx, self.tab.view.current.clone(), None);
+        self.tab.select_path_after_load = select;
     }
 
     fn ask_trash(&mut self) {
@@ -1347,7 +1640,7 @@ impl LumenApp {
     /// The selection to remove, the row to land on after it and what the
     /// question shows about it, unless it is empty or something in it is
     /// already in the trash.
-    fn removable_selection(&mut self) -> Option<(Vec<PathBuf>, Option<String>, ui::confirm::Subject)> {
+    fn removable_selection(&mut self) -> Option<(Vec<PathBuf>, Option<PathBuf>, ui::confirm::Subject)> {
         let selection = self.tab.view.selection();
         let paths: Vec<PathBuf> = selection.iter().map(|e| e.path.clone()).collect();
         let subject = ui::confirm::Subject::of(&selection);
@@ -1361,7 +1654,7 @@ impl LumenApp {
             self.tab.view.error = Some("This is already in the trash".into());
             return None;
         }
-        Some((paths, self.tab.view.name_after_removal(), subject))
+        Some((paths, self.tab.view.path_after_removal(), subject))
     }
 
     /// Trashes or deletes `paths` in order, stopping at the first failure; the
@@ -1370,13 +1663,13 @@ impl LumenApp {
         &mut self,
         ctx: &egui::Context,
         paths: Vec<PathBuf>,
-        select: Option<String>,
+        select: Option<PathBuf>,
         remove: fn(&Path) -> Result<(), String>,
     ) {
         for path in paths {
             if let Err(err) = remove(&path) {
                 self.tab.error_after_load = Some(err);
-                self.reload(ctx, file_name(&path));
+                self.reload(ctx, Some(path));
                 return;
             }
             self.path_popup.mark_stale();
@@ -1394,9 +1687,8 @@ impl LumenApp {
         match fs::ops::create_file(&self.tab.view.current, template) {
             Ok(path) => {
                 self.path_popup.mark_stale();
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
-                self.tab.rename_after_load = Some(path);
-                self.reload(ctx, name);
+                self.tab.rename_after_load = Some(path.clone());
+                self.reload(ctx, Some(path));
             }
             Err(err) => self.tab.view.error = Some(err),
         }
@@ -1406,9 +1698,8 @@ impl LumenApp {
         match fs::ops::create_folder(&self.tab.view.current) {
             Ok(path) => {
                 self.path_popup.mark_stale();
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
-                self.tab.rename_after_load = Some(path);
-                self.reload(ctx, name);
+                self.tab.rename_after_load = Some(path.clone());
+                self.reload(ctx, Some(path));
             }
             Err(err) => self.tab.view.error = Some(err),
         }
@@ -1417,16 +1708,16 @@ impl LumenApp {
     /// Applies a finished in-place edit. Invalid names keep the field open.
     fn finish_rename(&mut self, ctx: &egui::Context, mut edit: RenameEdit, replace: bool) {
         match fs::ops::rename(&edit.path, &edit.text, replace) {
-            Ok(Renamed::To(_)) => {
+            Ok(Renamed::To(renamed)) => {
                 self.path_popup.mark_stale();
                 self.tab.view.error = None;
-                self.reload(ctx, Some(edit.text));
+                self.reload(ctx, Some(renamed));
             }
             Ok(Renamed::Unchanged) => {}
             Ok(Renamed::TargetExists) => self.dialog = Some(Dialog::Replace(edit)),
             Err(err) => {
                 // A replace may have trashed the target before failing: reload.
-                let keep = self.tab.view.selected_entry().map(|e| e.name.clone());
+                let keep = self.tab.view.selected_entry().map(|e| e.path.clone());
                 self.tab.error_after_load = Some(err);
                 edit.focus = true;
                 self.rename = Some(edit);
@@ -1557,8 +1848,8 @@ impl LumenApp {
             return;
         }
         let select = match batch.landed {
-            Some(target) if target.parent() == Some(self.tab.view.current.as_path()) => file_name(&target),
-            _ => self.tab.view.selected_entry().map(|e| e.name.clone()),
+            Some(target) if target.parent() == Some(self.tab.view.current.as_path()) => Some(target),
+            _ => self.tab.view.selected_entry().map(|e| e.path.clone()),
         };
         self.reload(ctx, select);
     }
@@ -1767,7 +2058,7 @@ impl LumenApp {
 
     /// Stores a finished count if its folder is still on screen.
     fn finish_count(&mut self, count: Count, result: Result<Option<Totals>, String>) {
-        if count.path.parent() != Some(self.tab.view.current.as_path()) {
+        if !self.tab.view.lists(&count.path) {
             return;
         }
         let Some(name) = file_name(&count.path) else { return };
@@ -1778,7 +2069,7 @@ impl LumenApp {
                     let folders = if n == 1 { "folder" } else { "folders" };
                     self.notice = Some(format!("“{name}”: {n} {folders} could not be read"));
                 }
-                self.tab.view.set_totals(name, totals);
+                self.tab.view.set_totals(count.path.clone(), totals);
             }
             Ok(None) => {}
             Err(err) => self.tab.view.error = Some(err),
@@ -1824,12 +2115,13 @@ impl LumenApp {
     fn apply(&mut self, listing: Listing) {
         self.tab.shown_id = listing.id;
         let select = self.tab.select_after_load.take();
+        let select_path = self.tab.select_path_after_load.take();
         let from = self.tab.view.current.clone();
         let to = listing.result.is_ok().then(|| listing.path.clone());
         if self.tab.pending_nav == NavKind::Refresh {
             self.tab.view.apply_refresh(listing);
         } else {
-            self.tab.view.apply_listing(listing, select.as_deref());
+            self.tab.view.apply_listing_at(listing, select.as_deref(), select_path.as_deref());
         }
         self.tab.history.settle(self.tab.pending_nav, &from, to.as_deref());
         if to.is_some() {
@@ -1847,7 +2139,7 @@ impl LumenApp {
         }
         // The edited entry may be gone (another folder, a reload).
         if let Some(edit) = &self.rename
-            && !self.tab.view.entries.iter().any(|e| e.path == edit.path)
+            && !self.tab.view.lists(&edit.path)
         {
             self.rename = None;
         }
@@ -1856,6 +2148,22 @@ impl LumenApp {
             && self.tab.view.selected_entry().is_some_and(|e| e.path == created)
         {
             self.start_rename();
+        }
+    }
+
+    /// Starts reading the unfolded folders whose read is due, in the background.
+    fn read_kids(&mut self, ctx: &egui::Context) {
+        for folder in self.tab.view.tree.take_wanted() {
+            let ctx = ctx.clone();
+            let id = self.tab.readers.request(folder.clone(), move || ctx.request_repaint());
+            self.tab.view.tree.started(&folder, id);
+        }
+    }
+
+    /// Shows the unfolded folders the readers finished.
+    fn poll_kids(&mut self) {
+        for listing in self.tab.readers.poll() {
+            self.tab.view.apply_kids(listing);
         }
     }
 
@@ -1878,13 +2186,44 @@ impl LumenApp {
         }
     }
 
+    /// Where an arrow key lands in a view laid out in lines: in Icons, Up and
+    /// Down cross the rows and Left and Right walk the cards; in List, Up and
+    /// Down walk the column and Left and Right cross the columns. `None` in Details.
+    fn grid_target(&self, action: Action) -> Option<usize> {
+        let shape = self.grid?;
+        let last = self.tab.view.rows.len().checked_sub(1)?;
+        let cur = self.tab.view.selected.unwrap_or(0).min(last);
+        let rows_are_lines = self.view_size.layout() == ui::view_size::Layout::Icons;
+        let (down, side) = match action {
+            Action::Extend(isize::MIN) => return Some(0),
+            Action::Extend(isize::MAX) => return Some(last),
+            Action::Move(n) | Action::Extend(n) => (n, 0),
+            Action::Side(n) | Action::ExtendSide(n) => (0, n),
+            _ => return None,
+        };
+        let (across, along) = if rows_are_lines { (down, side) } else { (side, down) };
+        Some(if across != 0 { shape.across(cur, across) } else { shape.along(cur, along) })
+    }
+
+    /// How opaque the list is at time `now`: a view just picked (Details,
+    /// Tree, List or Icons) fades in over `VIEW_FADE`, like File Pilot's quick
+    /// switch; icons growing inside the grid are the same view and never fade.
+    fn list_opacity(&mut self, now: f64) -> f32 {
+        let layout = self.view_size.layout();
+        if layout != self.shown_layout.0 {
+            self.shown_layout = (layout, now);
+        }
+        let done = ((now - self.shown_layout.1) / VIEW_FADE).clamp(0.0, 1.0) as f32;
+        0.35 + 0.65 * done
+    }
+
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::FocusPathBar => self.path_popup.open(),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
-            Action::ZoomIn => self.list_zoom = (self.list_zoom + 1).min(ui::file_list::MAX_ZOOM),
-            Action::ZoomOut => self.list_zoom = self.list_zoom.saturating_sub(1),
-            Action::ZoomReset => self.list_zoom = 0,
+            Action::ZoomIn => self.view_size = self.view_size.bigger(),
+            Action::ZoomOut => self.view_size = self.view_size.smaller(),
+            Action::ZoomReset => self.view_size = ui::view_size::ViewSize::default(),
             Action::FitColumns => self.run_command(ctx, Command::FitAllColumns),
             Action::Activate => self.activate_selected(ctx),
             Action::GoParent => {
@@ -1901,8 +2240,23 @@ impl LumenApp {
                     self.go_parent(ctx);
                 }
             }
+            Action::Side(delta) if self.view_size.layout() == ui::view_size::Layout::Tree => {
+                self.tab.view.tree_side(delta);
+                self.read_kids(ctx);
+            }
+            Action::Move(_) | Action::Extend(_) | Action::Side(_) | Action::ExtendSide(_)
+                if let Some(target) = self.grid_target(action) =>
+            {
+                if matches!(action, Action::Extend(_) | Action::ExtendSide(_)) {
+                    self.tab.view.extend_to(target);
+                    self.tab.view.scroll = Some(Scroll::Smooth);
+                } else {
+                    self.tab.view.move_to(target);
+                }
+            }
             Action::Move(_) | Action::First | Action::Last => self.tab.view.move_selection(action),
             Action::Extend(rows) => self.tab.view.extend_by(rows),
+            Action::Side(_) | Action::ExtendSide(_) => {}
             Action::SelectAll => self.tab.view.select_all(),
             Action::Menu => {
                 // Under the cursor row, or mid-window when it is scrolled out of view.
@@ -1987,6 +2341,8 @@ impl eframe::App for LumenApp {
         if let Some(listing) = self.tab.lister.poll() {
             self.apply(listing);
         }
+        self.poll_kids();
+        self.read_kids(&ctx);
 
         self.refresh_if_changed(&ctx);
         self.poll_count();
@@ -2043,38 +2399,6 @@ impl eframe::App for LumenApp {
             ui.add_space(2.0);
         });
 
-        egui::Panel::bottom("status_bar").show(ui, |ui| {
-            ui::status_bar::show(
-                ui,
-                &Status {
-                    filter: self.tab.view.filter(),
-                    caret: !self.path_popup.is_open() && self.rename.is_none(),
-                    item_count: self.tab.view.rows.len(),
-                    hidden_count: self.tab.view.hidden_count(),
-                    show_hidden: self.tab.view.show_hidden,
-                    loading: self.tab.lister.is_pending(self.tab.shown_id),
-                    last_elapsed: self.tab.view.last_elapsed,
-                    error: self.tab.view.error.as_deref(),
-                    job: self
-                        .job
-                        .as_ref()
-                        .map(|r| {
-                            let item = self.batch.as_ref().and_then(Batch::item);
-                            ui::status_bar::progress_text(r.job.mode, &r.job.progress, item)
-                        }),
-                    notice: self.notice.as_deref(),
-                    folder_count: self.tab.view.folder_count(),
-                    selected: self.tab.view.selected,
-                    picked: self.tab.view.picked_count(),
-                    picked_size: self.tab.view.picked_size(),
-                    counting: self.counting.as_ref().map(|c| {
-                        let name = file_name(&c.path).unwrap_or_default();
-                        ui::status_bar::counting_text(&name, &c.progress)
-                    }),
-                },
-            );
-        });
-
         if self.sidebar_open {
             self.refresh_disks();
             ctx.request_repaint_after(DISKS_INTERVAL);
@@ -2109,7 +2433,7 @@ impl eframe::App for LumenApp {
                         ui::preview::show(
                             ui,
                             entry,
-                            self.tab.view.totals.get(&entry.name),
+                            self.tab.view.totals.get(&entry.path),
                             pane,
                             self.tab.view.show_hidden,
                             self.tab.view.sort,
@@ -2122,10 +2446,32 @@ impl eframe::App for LumenApp {
         }
 
         let list = egui::CentralPanel::default_margins().show(ui, |ui| {
+            // Room at the bottom for the floating islands, so they never hide a row.
+            let room = ui::status_bar::island_room(&ctx);
+            ui::status_bar::above_islands(ui, room, |ui| {
             let scroll = self.tab.view.scroll.take();
             let cut = self.cut_paths().to_vec();
-            let sizes = ui::file_list::Sizes { zoom: self.list_zoom, widths: self.columns, shown: self.shown_columns, order: self.column_order };
-            let event = ui::file_list::show(ui, &self.tab.view, &cut, sizes, scroll, self.rename.as_mut(), &self.file_icons);
+            let opacity = self.list_opacity(ctx.input(|i| i.time));
+            if opacity < 1.0 {
+                ui.multiply_opacity(opacity);
+                ctx.request_repaint();
+            }
+            let tree = self.view_size.layout() == ui::view_size::Layout::Tree;
+            if !tree {
+                // The unfolded folders belong to the Tree view alone.
+                self.tab.view.fold_all();
+            }
+            let sizes = ui::file_list::Sizes { widths: self.columns, shown: self.shown_columns, order: self.column_order, tree };
+            let lined = match (self.view_size.layout(), self.view_size.growth()) {
+                (_, Some(growth)) => Some(ui::icon_grid::show(ui, &self.tab.view, &cut, growth, scroll, self.rename.as_mut(), &self.file_icons)),
+                (ui::view_size::Layout::List, _) => Some(ui::list_view::show(ui, &self.tab.view, &cut, scroll, self.rename.as_mut(), &self.file_icons)),
+                _ => None,
+            };
+            self.grid = lined.as_ref().map(|out| out.shape);
+            let event = match lined {
+                Some(out) => out.event,
+                None => ui::file_list::show(ui, &self.tab.view, &cut, sizes, scroll, self.rename.as_mut(), &self.file_icons),
+            };
             // After drawing: the icons the list just asked for go out this frame.
             self.file_icons.poll(&ctx);
             match event {
@@ -2136,8 +2482,13 @@ impl eframe::App for LumenApp {
                         self.open_entry_menu(i, pos);
                     }
                 }
+                Some(ListEvent::Unfold(i)) => {
+                    self.tab.view.toggle_open(i);
+                    self.read_kids(&ctx);
+                }
                 Some(ListEvent::Extend(i)) => self.tab.view.extend_to(i),
                 Some(ListEvent::Band { start, end }) => self.tab.view.select_band(start, end),
+                Some(ListEvent::Cells { cells, cursor }) => self.tab.view.select_cells(&cells, cursor),
                 Some(ListEvent::Activate(i)) => {
                     self.tab.view.select_row(i);
                     self.activate_selected(&ctx);
@@ -2160,9 +2511,7 @@ impl eframe::App for LumenApp {
                 }
                 // Below the rows: a click ends a multiple selection, a right click
                 // opens the folder's menu.
-                Some(ListEvent::Empty { menu: false }) => {
-                    self.tab.view.drop_picks();
-                }
+                Some(ListEvent::Empty { menu: false }) => self.tab.view.unselect(),
                 Some(ListEvent::Empty { menu: true }) => {
                     if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
                         self.open_background_menu(pos);
@@ -2170,7 +2519,44 @@ impl eframe::App for LumenApp {
                 }
                 None => {}
             }
+            });
         });
+
+        // Floating over the list's bottom, in the room left for them there.
+        let picked = ui::status_bar::show(
+            &ctx,
+            list.response.rect,
+            &Status {
+                filter: self.tab.view.filter(),
+                caret: !self.path_popup.is_open() && self.rename.is_none(),
+                item_count: self.tab.view.rows.len(),
+                hidden_count: self.tab.view.hidden_count(),
+                show_hidden: self.tab.view.show_hidden,
+                loading: self.tab.lister.is_pending(self.tab.shown_id),
+                last_elapsed: self.tab.view.last_elapsed,
+                error: self.tab.view.error.as_deref(),
+                job: self
+                    .job
+                    .as_ref()
+                    .map(|r| {
+                        let item = self.batch.as_ref().and_then(Batch::item);
+                        ui::status_bar::progress_text(r.job.mode, &r.job.progress, item)
+                    }),
+                notice: self.notice.as_deref(),
+                folder_count: self.tab.view.folder_count(),
+                selected: self.tab.view.selected,
+                picked: self.tab.view.picked_count(),
+                picked_size: self.tab.view.picked_size(),
+                counting: self.counting.as_ref().map(|c| {
+                    let name = file_name(&c.path).unwrap_or_default();
+                    ui::status_bar::counting_text(&name, &c.progress)
+                }),
+                view: self.view_size,
+            },
+        );
+        if let Some(view) = picked {
+            self.view_size = view;
+        }
 
         #[cfg(windows)]
         self.poll_shell_menu();
@@ -3298,7 +3684,7 @@ mod tests {
             preview: true,
             window: Some([1000.0, 700.0]),
             bookmarks: vec![PathBuf::from("/srv"), PathBuf::from("/srv")],
-            list_zoom: 3,
+            view: ui::view_size::ViewSize::new(65),
             columns: [250.0, 90.0, 140.0, 55.0, 60.0, 95.0],
             ..Config::default()
         }
@@ -3316,7 +3702,7 @@ mod tests {
         assert!(app.preview_open);
         assert_eq!(app.bookmarks.paths(), [PathBuf::from("/srv")], "repeats dropped");
         assert_eq!(app.window, Some([1000.0, 700.0]));
-        assert_eq!(app.list_zoom, 3);
+        assert_eq!(app.view_size, ui::view_size::ViewSize::new(65));
         assert_eq!(app.columns, [250.0, 90.0, 140.0, 55.0, 60.0, 95.0]);
     }
 
@@ -3331,7 +3717,7 @@ mod tests {
         app.tab.view.apply_listing(listing, None);
         // Fonts are loaded by a first frame.
         ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
-        let fit = |app: &LumenApp, column| ui::file_list::fit_width(&ctx, &app.tab.view, app.list_zoom, column);
+        let fit = |app: &LumenApp, column| ui::file_list::fit_width(&ctx, &app.tab.view, column);
         app.columns = [100.0; 6];
         app.run_command(&ctx, Command::FitColumn(0));
         assert_eq!(app.columns[0], fit(&app, 0));
@@ -3398,23 +3784,96 @@ mod tests {
     }
 
     #[test]
-    fn list_zoom_steps_between_its_limits_and_is_saved_at_once() {
+    fn ctrl_plus_and_minus_move_the_view_slider_and_it_is_saved_at_once() {
+        use ui::view_size::ViewSize;
         let (ctx, _, dir) = app_in("app-zoom");
         let path = dir.join("cfg/lumen/config");
         let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
         app.handle_action(&ctx, Action::ZoomOut);
-        assert_eq!(app.list_zoom, 0, "already the smallest");
-        for _ in 0..10 {
+        assert_eq!(app.view_size, ViewSize::new(0), "already Details");
+        let mut walked = Vec::new();
+        for _ in 0..5 {
             app.handle_action(&ctx, Action::ZoomIn);
+            walked.push(app.view_size.name());
         }
-        assert_eq!(app.list_zoom, ui::file_list::MAX_ZOOM, "stops at the biggest");
+        assert_eq!(walked, ["Tree", "List", "M Icons", "M Icons", "M Icons"]);
+        assert_eq!(app.view_size, ViewSize::new(40));
         app.handle_action(&ctx, Action::ZoomOut);
-        assert_eq!(app.list_zoom, ui::file_list::MAX_ZOOM - 1);
+        assert_eq!(app.view_size, ViewSize::new(35));
         app.save_settings(false);
-        assert_eq!(Config::load(&path).unwrap().list_zoom, ui::file_list::MAX_ZOOM - 1);
+        assert_eq!(Config::load(&path).unwrap().view, ViewSize::new(35));
         app.handle_action(&ctx, Action::ZoomReset);
-        assert_eq!(app.list_zoom, 0);
+        assert_eq!(app.view_size, ViewSize::new(0), "Ctrl+0 goes back to Details");
         assert_eq!(ctx.zoom_factor(), 1.0, "the rest of the window never zooms");
+    }
+
+    #[test]
+    fn in_the_icons_view_up_and_down_cross_rows_and_left_right_walk_the_cards() {
+        use ui::grid::GridShape;
+        let (ctx, mut app, _dir) = app_in("app-grid-keys");
+        app.view_size = ui::view_size::ViewSize::new(30);
+        // sub / a.txt b.txt: the folder alone on the first row.
+        app.grid = Some(GridShape::new(2, 1, 3));
+        let mut at = |action| {
+            app.handle_action(&ctx, action);
+            app.tab.view.selected_entry().map(|e| e.name.clone()).unwrap()
+        };
+        assert_eq!(at(Action::First), "sub");
+        assert_eq!(at(Action::Move(1)), "a.txt", "down: same place on the next row");
+        assert_eq!(at(Action::Side(1)), "b.txt");
+        assert_eq!(at(Action::Move(-1)), "sub", "up onto a shorter row: its last card");
+        assert_eq!(at(Action::Side(-1)), "sub", "already the first");
+        assert_eq!(at(Action::Move(5)), "a.txt", "a page down stops on the last row");
+        app.handle_action(&ctx, Action::ExtendSide(1));
+        assert_eq!(app.tab.view.picked_count(), 2, "Shift+Right picks on the way");
+        app.handle_action(&ctx, Action::Extend(isize::MIN));
+        assert_eq!(app.tab.view.selected, Some(0), "Shift+Home: the first card");
+        assert!(app.tab.view.is_picked(0) && app.tab.view.is_picked(1) && !app.tab.view.is_picked(2), "from the anchor a.txt back to sub");
+    }
+
+    #[test]
+    fn in_the_list_view_up_and_down_walk_a_column_and_left_right_cross_columns() {
+        use ui::grid::GridShape;
+        let (ctx, mut app, _dir) = app_in("app-list-keys");
+        app.view_size = ui::view_size::ViewSize::new(20);
+        // Columns of 2: sub / a.txt b.txt.
+        app.grid = Some(GridShape::new(2, 1, 3));
+        let mut at = |action| {
+            app.handle_action(&ctx, action);
+            app.tab.view.selected_entry().map(|e| e.name.clone()).unwrap()
+        };
+        assert_eq!(at(Action::First), "sub");
+        assert_eq!(at(Action::Move(1)), "a.txt", "down: the next cell, here the next column's top");
+        assert_eq!(at(Action::Move(1)), "b.txt");
+        assert_eq!(at(Action::Side(-1)), "sub", "left: the column before, held to its last cell");
+        assert_eq!(at(Action::Side(1)), "a.txt", "right: same place in the next column");
+    }
+
+    #[test]
+    fn in_details_left_and_right_do_not_move_the_selection() {
+        let (ctx, mut app, _dir) = app_in("app-details-side");
+        app.handle_action(&ctx, Action::First);
+        app.handle_action(&ctx, Action::Side(1));
+        assert_eq!(app.tab.view.selected, Some(0));
+        app.handle_action(&ctx, Action::Move(1));
+        assert_eq!(app.tab.view.selected, Some(1), "Down still moves one row");
+    }
+
+    #[test]
+    fn a_new_view_fades_in_briefly_and_growing_icons_do_not() {
+        use ui::view_size::ViewSize;
+        let (_ctx, mut app, _dir) = app_in("app-view-fade");
+        assert_eq!(app.list_opacity(0.0), 1.0, "nothing changed: drawn whole");
+        app.view_size = ViewSize::new(20);
+        let start = app.list_opacity(10.0);
+        assert!(start < 1.0, "List just picked: still fading in ({start})");
+        let mid = app.list_opacity(10.0 + VIEW_FADE / 2.0);
+        assert!(mid > start && mid < 1.0, "half way: {mid}");
+        assert_eq!(app.list_opacity(10.0 + VIEW_FADE), 1.0, "done after the fade");
+        app.view_size = ViewSize::new(30);
+        assert!(app.list_opacity(20.0) < 1.0, "List to M Icons is another view");
+        app.view_size = ViewSize::new(80);
+        assert_eq!(app.list_opacity(20.0 + VIEW_FADE), 1.0, "M to XL grows the icons, no new fade");
     }
 
     #[test]
@@ -3720,7 +4179,7 @@ mod tests {
         assert_eq!(app.counting.as_ref().map(|c| c.path.clone()), Some(dir.join("sub")));
         wait_count(&mut app);
         let expected = Totals { folders: 1, files: 1, bytes: 5, unreadable: 0 };
-        assert_eq!(app.tab.view.totals.get("sub"), Some(&expected));
+        assert_eq!(app.tab.view.totals.get(&dir.join("sub")), Some(&expected));
         assert_eq!(app.notice, None);
     }
 
@@ -3775,7 +4234,7 @@ mod tests {
         let (_ctx, mut app, dir) = app_in("app-count-errors");
         let partial = Totals { folders: 4, files: 1, bytes: 9, unreadable: 2 };
         app.finish_count(Count::start(dir.join("sub"), || {}), Ok(Some(partial)));
-        assert_eq!(app.tab.view.totals.get("sub"), Some(&partial));
+        assert_eq!(app.tab.view.totals.get(&dir.join("sub")), Some(&partial));
         assert_eq!(app.notice.as_deref(), Some("“sub”: 2 folders could not be read"));
         app.finish_count(Count::start(dir.join("sub"), || {}), Err("Cannot read sub: gone".into()));
         assert_eq!(app.tab.view.error.as_deref(), Some("Cannot read sub: gone"));
@@ -3891,7 +4350,7 @@ mod tests {
     }
 
     fn row_names(v: &View) -> Vec<&str> {
-        v.rows.iter().map(|&i| v.entries[i].name.as_str()).collect()
+        v.rows.iter().map(|&i| v.entry(i).name.as_str()).collect()
     }
 
     #[test]
@@ -4032,7 +4491,7 @@ mod tests {
         big.size = Some(3 << 20);
         let entries = vec![entry("src", true), entry("docs", true), big, entry("a.txt", false), entry("b.txt", false)];
         v.apply_listing(ok_listing("/x", entries), None);
-        v.set_totals("src".into(), Totals { folders: 1, files: 2, bytes: 1000, ..Totals::default() });
+        v.set_totals(p("/x/src"), Totals { folders: 1, files: 2, bytes: 1000, ..Totals::default() });
         let row = |v: &View, name: &str| (0..v.rows.len()).find(|&r| v.entries[v.rows[r]].name == name).unwrap();
         assert_eq!(v.picked_size(), PickedSize { bytes: 0, uncounted: 0 }, "nothing picked");
         for name in ["src", "docs", "big.iso", "a.txt"] {
@@ -4176,8 +4635,8 @@ mod tests {
     #[test]
     fn counted_folders_sort_by_their_totals() {
         let mut v = sortable_view();
-        v.totals.insert("a_dir".into(), totals(500, 1, 9));
-        v.totals.insert("b_dir".into(), totals(20, 3, 2));
+        v.totals.insert(p("/x/a_dir"), totals(500, 1, 9));
+        v.totals.insert(p("/x/b_dir"), totals(20, 3, 2));
         let by = |column| visible_rows(&v.entries, &v.totals, false, "", Sort { column, descending: false });
         let names = |rows: Vec<usize>| -> Vec<String> { rows.iter().map(|&i| v.entries[i].name.clone()).collect() };
         assert_eq!(names(by(SortColumn::Size))[..2], ["b_dir", "a_dir"]);
@@ -4203,21 +4662,21 @@ mod tests {
         v.sort_by(SortColumn::Size); // descending
         v.selected = Some(0);
         assert_eq!(v.selected_entry().unwrap().name, "a_dir");
-        v.set_totals("b_dir".into(), totals(100, 0, 1));
+        v.set_totals(p("/x/b_dir"), totals(100, 0, 1));
         assert_eq!(row_names(&v)[..2], ["b_dir", "a_dir"]);
         assert_eq!(v.selected_entry().unwrap().name, "a_dir", "selection follows the entry");
-        assert_eq!(v.totals.get("b_dir"), Some(&totals(100, 0, 1)));
+        assert_eq!(v.totals.get(&p("/x/b_dir")), Some(&totals(100, 0, 1)));
     }
 
     #[test]
     fn totals_survive_a_refresh_but_not_another_folder() {
         let mut v = sortable_view();
-        v.set_totals("a_dir".into(), totals(1, 0, 1));
+        v.set_totals(p("/x/a_dir"), totals(1, 0, 1));
         let again = v.entries.clone();
         v.apply_refresh(ok_listing("/s", again.clone()));
-        assert!(v.totals.contains_key("a_dir"));
+        assert!(v.totals.contains_key(&p("/x/a_dir")));
         v.apply_listing(ok_listing("/s", again.clone()), None);
-        assert!(v.totals.contains_key("a_dir"), "reloading the same folder keeps them");
+        assert!(v.totals.contains_key(&p("/x/a_dir")), "reloading the same folder keeps them");
         v.apply_listing(ok_listing("/other", again), None);
         assert!(v.totals.is_empty());
     }
@@ -4515,9 +4974,9 @@ mod tests {
     fn after_removal_the_row_below_is_selected() {
         let mut v = loaded_view(); // src, a.txt, b.txt
         v.selected = Some(1);
-        assert_eq!(v.name_after_removal().as_deref(), Some("b.txt"));
+        assert_eq!(v.path_after_removal().as_deref(), Some(Path::new("/x/b.txt")));
         v.selected = Some(0);
-        assert_eq!(v.name_after_removal().as_deref(), Some("a.txt"));
+        assert_eq!(v.path_after_removal().as_deref(), Some(Path::new("/x/a.txt")));
     }
 
     #[test]
@@ -4525,22 +4984,22 @@ mod tests {
         let mut v = loaded_view(); // src, a.txt, b.txt
         v.select_row(0);
         v.toggle_pick(1);
-        assert_eq!(v.name_after_removal().as_deref(), Some("b.txt"));
+        assert_eq!(v.path_after_removal().as_deref(), Some(Path::new("/x/b.txt")));
         v.select_row(1);
         v.extend_by(1);
-        assert_eq!(v.name_after_removal().as_deref(), Some("src"), "none below: the nearest above");
+        assert_eq!(v.path_after_removal().as_deref(), Some(Path::new("/x/src")), "none below: the nearest above");
         v.select_all();
-        assert_eq!(v.name_after_removal(), None);
+        assert_eq!(v.path_after_removal(), None);
     }
 
     #[test]
     fn after_removing_the_last_row_the_row_above_is_selected() {
         let mut v = loaded_view();
         v.selected = Some(2);
-        assert_eq!(v.name_after_removal().as_deref(), Some("a.txt"));
+        assert_eq!(v.path_after_removal().as_deref(), Some(Path::new("/x/a.txt")));
         let mut single = View::default();
         single.apply_listing(ok_listing("/one", vec![entry("only", false)]), None);
-        assert_eq!(single.name_after_removal(), None);
+        assert_eq!(single.path_after_removal(), None);
     }
 
     #[test]
@@ -4665,5 +5124,596 @@ mod tests {
         v.apply_listing(ok_listing("/y", vec![entry("z", false)]), None);
         assert_eq!(v.error, None);
         assert_eq!(v.current, Path::new("/y"));
+    }
+
+    /// What the folder `parent` holds, as the reader of an unfolded folder delivers it.
+    fn inside(parent: &str, items: &[(&str, bool)]) -> Listing {
+        let mut entries: Vec<Entry> = items
+            .iter()
+            .map(|&(name, is_dir)| Entry { path: p(parent).join(name), ..entry(name, is_dir) })
+            .collect();
+        fs::lister::sort_entries(&mut entries);
+        ok_listing(parent, entries)
+    }
+
+    /// `/x` (src, a.txt, b.txt shown) with `src` unfolded and read: deep/, main.rs, .hidden.
+    fn unfolded_view() -> View {
+        let mut v = loaded_view();
+        v.toggle_open(0);
+        v.apply_kids(inside("/x/src", &[("main.rs", false), ("deep", true), (".hidden", false)]));
+        v
+    }
+
+    #[test]
+    fn removing_an_unfolded_child_folder_lands_after_what_it_held() {
+        let mut v = unfolded_view(); // src, deep, main.rs, a.txt, b.txt
+        v.toggle_open(1);
+        v.apply_kids(inside("/x/src/deep", &[("c1", false)]));
+        v.select_row(1);
+        assert_eq!(v.path_after_removal(), Some(p("/x/src/main.rs")), "not deep/c1, which goes with it");
+    }
+
+    #[test]
+    fn a_band_over_cards_picks_those_cards_and_over_none_drops_the_picks() {
+        let mut v = loaded_view(); // src, a.txt, b.txt
+        v.select_cells(&[0, 2, 9], Some(2));
+        assert_eq!(v.picked_count(), 2, "a cell past the rows is ignored");
+        assert!(v.is_picked(0) && v.is_picked(2) && !v.is_picked(1));
+        assert_eq!(v.selected, Some(2));
+        v.select_cells(&[], None);
+        assert_eq!(v.picked_count(), 0, "a band over no card drops the picks");
+        assert_eq!(v.selected, Some(2), "the cursor stays");
+    }
+
+    #[test]
+    fn ctrl_a_in_the_tree_picks_what_the_cursors_folder_holds() {
+        let mut v = unfolded_view(); // src, deep, main.rs, a.txt, b.txt
+        v.select_row(2); // src/main.rs
+        v.select_all();
+        let picked: Vec<usize> = (0..v.rows.len()).filter(|&r| v.is_picked(r)).collect();
+        assert_eq!(picked, [1, 2], "src's deep and main.rs, nothing of the top level");
+        v.select_row(3); // a.txt, top level
+        v.select_all();
+        let picked: Vec<usize> = (0..v.rows.len()).filter(|&r| v.is_picked(r)).collect();
+        assert_eq!(picked, [0, 3, 4], "the top level, not the unfolded children");
+        let mut flat = loaded_view();
+        flat.select_all();
+        assert_eq!(flat.picked_count(), flat.rows.len(), "without unfolded folders: every row, as before");
+    }
+
+    #[test]
+    fn a_click_on_the_empty_space_unselects_but_keeps_the_cursor_and_an_arrow_selects_again() {
+        let mut v = loaded_view(); // src, a.txt, b.txt
+        v.select_row(1);
+        v.toggle_pick(2);
+        v.unselect();
+        assert_eq!(v.picked_count(), 0);
+        assert!(v.selection().is_empty() && v.selected_entry().is_none(), "nothing is selected");
+        assert_eq!(v.selected, Some(2), "the cursor stays where it was, outlined");
+        assert!(!v.is_highlighted(2) && v.is_outlined(2));
+        v.move_selection(Action::Move(1));
+        assert_eq!(v.selected_entry().map(|e| e.name.as_str()), Some("b.txt"), "Down from the last row keeps it, selected again");
+        assert!(v.is_highlighted(2) && !v.is_outlined(2));
+        v.unselect();
+        v.select_row(0);
+        assert!(v.is_highlighted(0), "a click selects as usual");
+    }
+
+    #[test]
+    fn a_ctrl_click_after_unselecting_picks_only_the_clicked_row() {
+        let mut v = loaded_view(); // src, a.txt, b.txt
+        v.select_row(1);
+        v.unselect();
+        v.toggle_pick(2);
+        let paths: Vec<&Path> = v.selection().iter().map(|e| e.path.as_path()).collect();
+        assert_eq!(paths, [Path::new("/x/b.txt")], "not the outlined a.txt, which nobody picked");
+        assert!(!v.is_highlighted(1));
+    }
+
+    #[test]
+    fn with_nothing_selected_delete_rename_and_enter_do_nothing() {
+        let (ctx, mut app, dir) = app_in("app-unselected");
+        app.tab.view.select_row(1);
+        app.tab.view.unselect();
+        for action in [Action::Trash, Action::DeleteForever, Action::Rename, Action::Copy] {
+            app.handle_action(&ctx, action);
+        }
+        assert!(app.dialog.is_none() && app.rename.is_none() && app.clipboard.is_none());
+        app.handle_action(&ctx, Action::Activate);
+        assert_eq!(app.tab.view.current, dir, "Enter enters nothing");
+    }
+
+    fn depths(v: &View) -> Vec<usize> {
+        (0..v.rows.len()).map(|row| v.depth(row)).collect()
+    }
+
+    #[test]
+    fn unfolding_a_folder_shows_what_it_holds_under_it_one_step_deeper() {
+        let mut v = loaded_view();
+        v.toggle_open(0);
+        assert!(v.is_open(0) && v.tree.is_open(Path::new("/x/src")));
+        assert_eq!(row_names(&v), ["src", "a.txt", "b.txt"], "nothing under it while it is read");
+        assert_eq!(v.tree.take_wanted(), [p("/x/src")], "and its read is due");
+        v.apply_kids(inside("/x/src", &[("main.rs", false), ("deep", true), (".hidden", false)]));
+        assert_eq!(row_names(&v), ["src", "deep", "main.rs", "a.txt", "b.txt"], "folders first, hidden left out");
+        assert_eq!(depths(&v), [0, 1, 1, 0, 0]);
+        assert!(!v.is_open(1), "deep is folded");
+    }
+
+    #[test]
+    fn folding_a_folder_hides_its_children_and_a_cursor_inside_goes_to_the_folder() {
+        let mut v = unfolded_view();
+        v.select_row(2);
+        assert_eq!(v.selected_entry().unwrap().name, "main.rs");
+        v.toggle_open(0);
+        assert_eq!(row_names(&v), ["src", "a.txt", "b.txt"]);
+        assert_eq!(v.selected_entry().unwrap().name, "src");
+        assert!(!v.is_open(0));
+        v.select_row(2);
+        v.toggle_open(0);
+        assert_eq!(v.selected_entry().unwrap().name, "b.txt", "a cursor elsewhere stays on its entry");
+    }
+
+    #[test]
+    fn unfolding_above_the_cursor_keeps_it_on_its_entry() {
+        let mut v = loaded_view();
+        v.select_row(2);
+        v.toggle_open(0);
+        v.apply_kids(inside("/x/src", &[("main.rs", false), ("lib.rs", false)]));
+        assert_eq!(v.selected_entry().unwrap().name, "b.txt");
+        assert_eq!(v.selected, Some(4));
+    }
+
+    #[test]
+    fn children_follow_the_sort_and_the_hidden_rule_of_the_top_level() {
+        let mut v = loaded_view();
+        v.toggle_open(0);
+        v.apply_kids(inside("/x/src", &[("lib.rs", false), ("main.rs", false), ("deep", true), (".hidden", false)]));
+        assert_eq!(row_names(&v), ["src", "deep", "lib.rs", "main.rs", "a.txt", "b.txt"]);
+        v.sort_by(SortColumn::Name);
+        assert_eq!(row_names(&v), ["src", "deep", "main.rs", "lib.rs", "b.txt", "a.txt"], "descending inside too, folders first");
+        v.toggle_hidden();
+        assert_eq!(row_names(&v), ["src", "deep", "main.rs", "lib.rs", ".hidden", ".git", "b.txt", "a.txt", ".env"]);
+        assert_eq!(depths(&v), [0, 1, 1, 1, 1, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn the_filter_filters_the_top_rows_and_a_folder_it_hides_hides_its_children() {
+        let mut v = unfolded_view();
+        for c in "src".chars() {
+            v.push_filter(c);
+        }
+        assert_eq!(row_names(&v), ["src", "deep", "main.rs"], "the children are not filtered");
+        v.clear_filter();
+        for c in "a.t".chars() {
+            v.push_filter(c);
+        }
+        assert_eq!(row_names(&v), ["a.txt"], "src is filtered out, and what it holds with it");
+        v.clear_filter();
+        assert_eq!(row_names(&v), ["src", "deep", "main.rs", "a.txt", "b.txt"], "and back when the filter goes");
+    }
+
+    #[test]
+    fn an_unreadable_folder_shows_unfolded_with_no_children() {
+        let mut v = loaded_view();
+        v.toggle_open(0);
+        let denied = Listing {
+            id: 1,
+            path: p("/x/src"),
+            result: Err(ListError::PermissionDenied(p("/x/src"))),
+            elapsed: Duration::ZERO,
+        };
+        v.apply_kids(denied);
+        assert!(v.is_open(0));
+        assert_eq!(row_names(&v), ["src", "a.txt", "b.txt"]);
+        assert_eq!(v.error, None, "no error line for a folder only peeked into");
+        v.tree_side(1);
+        assert_eq!(v.selected, Some(0), "Right has no first child to go to");
+    }
+
+    #[test]
+    fn a_result_for_a_folder_folded_meanwhile_is_not_shown() {
+        let mut v = loaded_view();
+        v.toggle_open(0);
+        v.toggle_open(0);
+        v.apply_kids(inside("/x/src", &[("main.rs", false)]));
+        assert_eq!(row_names(&v), ["src", "a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn right_unfolds_then_goes_to_the_first_child_and_left_folds_then_goes_to_the_parent() {
+        let mut v = loaded_view();
+        v.select_row(0);
+        v.tree_side(1);
+        assert!(v.is_open(0), "Right on a folded folder unfolds it");
+        assert_eq!(v.selected, Some(0), "and stays on it");
+        v.apply_kids(inside("/x/src", &[("main.rs", false), ("deep", true)]));
+        v.tree_side(1);
+        assert_eq!(v.selected_entry().unwrap().name, "deep", "on an unfolded one, Right goes to its first child");
+        v.tree_side(1);
+        assert!(v.is_open(1), "a folder inside unfolds the same way");
+        v.tree_side(-1);
+        assert!(!v.is_open(1), "Left on an unfolded folder folds it");
+        assert_eq!(v.selected_entry().unwrap().name, "deep");
+        v.tree_side(-1);
+        assert_eq!(v.selected_entry().unwrap().name, "src", "Left on a child goes to its parent folder");
+        v.tree_side(-1);
+        assert!(!v.is_open(0));
+        v.tree_side(-1);
+        assert_eq!(v.selected, Some(0), "a folded folder at the top has nowhere to go");
+        v.select_row(1);
+        v.tree_side(1);
+        v.tree_side(-1);
+        assert_eq!(v.selected_entry().unwrap().name, "a.txt", "a file does nothing either way");
+    }
+
+    #[test]
+    fn two_unfolded_folders_can_hold_the_same_name_and_each_is_picked_by_its_path() {
+        let mut v = View::default();
+        v.apply_listing(ok_listing("/x", vec![entry("docs", true), entry("src", true), entry("a.txt", false)]), None);
+        for row in [1, 0] {
+            v.toggle_open(row);
+        }
+        v.apply_kids(inside("/x/docs", &[("notes.txt", false)]));
+        v.apply_kids(inside("/x/src", &[("notes.txt", false)]));
+        assert_eq!(row_names(&v), ["docs", "notes.txt", "src", "notes.txt", "a.txt"]);
+        v.select_row(1);
+        v.toggle_pick(3);
+        assert_eq!(v.picked_count(), 2);
+        assert!(v.is_picked(1) && v.is_picked(3) && !v.is_picked(2) && !v.is_picked(0));
+        let paths: Vec<&Path> = v.selection().iter().map(|e| e.path.as_path()).collect();
+        assert_eq!(paths, [Path::new("/x/docs/notes.txt"), Path::new("/x/src/notes.txt")]);
+        v.toggle_pick(1);
+        assert!(!v.is_picked(1) && v.is_picked(3), "one is let go without the other");
+        v.select_row(1);
+        v.extend_to(3);
+        assert_eq!(v.picked_count(), 3, "a range from the anchor crosses the folders");
+        v.select_all();
+        assert_eq!(v.picked_count(), 1, "Ctrl+A on src's notes.txt picks what src holds, not the rest");
+        assert!(v.is_picked(3));
+        v.select_band(1.2, 3.5);
+        assert_eq!(v.picked_count(), 3, "a band picks the children it touches");
+        assert!(v.is_picked(1) && v.is_picked(3) && !v.is_picked(4));
+    }
+
+    #[test]
+    fn picks_inside_a_folded_folder_are_not_acted_on() {
+        let mut v = unfolded_view();
+        v.select_row(1);
+        v.toggle_pick(2);
+        assert_eq!(v.picked_count(), 2);
+        v.toggle_open(0);
+        assert_eq!(v.picked_count(), 0, "the picked children are hidden");
+        assert_eq!(selection_names(&v), ["src"], "the cursor row is the selection again");
+    }
+
+    #[test]
+    fn a_counted_child_folder_has_its_own_total_and_the_picked_size_adds_it() {
+        let mut v = unfolded_view();
+        v.set_totals(p("/x/src/deep"), totals(700, 0, 3));
+        v.select_row(1);
+        assert_eq!(v.picked_size(), PickedSize { bytes: 0, uncounted: 0 }, "nothing picked");
+        v.toggle_pick(1);
+        v.toggle_pick(2);
+        assert_eq!(v.picked_size(), PickedSize { bytes: 700 + 1, uncounted: 0 });
+        assert_eq!(v.totals.get(&p("/x/deep")), None, "not under the folder on screen's name");
+    }
+
+    #[test]
+    fn unfolded_folders_are_forgotten_in_another_folder_and_kept_and_read_again_on_a_reload_or_refresh() {
+        let mut v = unfolded_view();
+        v.tree.take_wanted();
+        v.apply_refresh(ok_listing("/x", vec![entry("src", true), entry("a.txt", false)]));
+        assert_eq!(row_names(&v), ["src", "deep", "main.rs", "a.txt"], "still unfolded after a refresh");
+        assert_eq!(v.tree.take_wanted(), [p("/x/src")], "and read again");
+        v.apply_listing(ok_listing("/x", vec![entry("src", true), entry("a.txt", false)]), None);
+        assert!(v.is_open(0), "a reload of the same folder keeps it too");
+        assert_eq!(v.tree.take_wanted(), [p("/x/src")]);
+        v.apply_listing(ok_listing("/x", vec![entry("a.txt", false)]), None);
+        assert!(v.tree.is_empty(), "a folder that is gone is forgotten");
+        let mut v = unfolded_view();
+        v.apply_listing(ok_listing("/y", vec![entry("src", true)]), None);
+        assert!(v.tree.is_empty() && row_names(&v) == ["src"], "another folder starts folded");
+        assert!(!v.is_open(0));
+    }
+
+    #[test]
+    fn a_reload_with_folders_unfolded_keeps_the_cursor_on_its_child() {
+        let mut v = unfolded_view();
+        v.select_row(2);
+        v.apply_listing(ok_listing("/x", vec![entry("src", true), entry("a.txt", false), entry("b.txt", false)]), None);
+        assert_eq!(v.selected_entry().unwrap().name, "main.rs");
+    }
+
+    #[test]
+    fn folding_everything_goes_back_to_the_folders_own_rows() {
+        let mut v = unfolded_view();
+        v.select_row(2);
+        v.fold_all();
+        assert_eq!(row_names(&v), ["src", "a.txt", "b.txt"]);
+        assert!(v.tree.is_empty());
+        assert_eq!(v.depth(1), 0);
+    }
+
+    /// `sub` holds deeper/ and inner.txt; the view is Tree: rows sub, a.txt, b.txt.
+    fn tree_app(name: &str) -> (egui::Context, LumenApp, PathBuf) {
+        let (ctx, mut app, dir) = app_in(name);
+        std::fs::create_dir(dir.join("sub/deeper")).unwrap();
+        std::fs::write(dir.join("sub/inner.txt"), "i").unwrap();
+        app.view_size = ui::view_size::ViewSize::new(10);
+        (ctx, app, dir)
+    }
+
+    /// Lets the unfolded folders' readers finish, as the next frames would,
+    /// until `done` holds.
+    fn wait_kids(app: &mut LumenApp, done: impl Fn(&View) -> bool) {
+        for _ in 0..500 {
+            app.poll_kids();
+            if done(&app.tab.view) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the unfolded folder was not read: {:?}", row_names(&app.tab.view));
+    }
+
+    /// The Tree view with `sub` unfolded and read: sub, deeper, inner.txt, a.txt, b.txt.
+    fn unfolded_app(name: &str) -> (egui::Context, LumenApp, PathBuf) {
+        let (ctx, mut app, dir) = tree_app(name);
+        app.handle_action(&ctx, Action::Side(1));
+        wait_kids(&mut app, |v| v.rows.len() == 5);
+        (ctx, app, dir)
+    }
+
+    #[test]
+    fn in_the_tree_view_right_unfolds_a_folder_without_waiting_for_its_read() {
+        let (ctx, mut app, _dir) = tree_app("app-tree-unfold");
+        app.handle_action(&ctx, Action::Side(1));
+        assert!(app.tab.view.is_open(0), "unfolded at once");
+        assert_eq!(app.tab.view.rows.len(), 3, "the folder is read on another thread: nothing yet");
+        wait_kids(&mut app, |v| v.rows.len() == 5);
+        assert_eq!(row_names(&app.tab.view), ["sub", "deeper", "inner.txt", "a.txt", "b.txt"]);
+        assert_eq!(depths(&app.tab.view), [0, 1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn in_the_tree_view_the_arrows_walk_into_and_out_of_the_unfolded_folder() {
+        let (ctx, mut app, _dir) = unfolded_app("app-tree-keys");
+        let at = |app: &LumenApp| app.tab.view.selected_entry().map(|e| e.name.clone()).unwrap();
+        app.handle_action(&ctx, Action::Side(1));
+        assert_eq!(at(&app), "deeper", "Right on an unfolded folder: its first child");
+        app.handle_action(&ctx, Action::Move(1));
+        assert_eq!(at(&app), "inner.txt", "Down walks through the children");
+        app.handle_action(&ctx, Action::Move(1));
+        assert_eq!(at(&app), "a.txt", "and out of them");
+        app.handle_action(&ctx, Action::Move(-1));
+        app.handle_action(&ctx, Action::Side(-1));
+        assert_eq!(at(&app), "sub", "Left on a child: its parent folder");
+        app.handle_action(&ctx, Action::Side(-1));
+        assert_eq!(row_names(&app.tab.view), ["sub", "a.txt", "b.txt"], "Left on an unfolded folder folds it");
+        app.handle_action(&ctx, Action::ExtendSide(1));
+        assert_eq!(app.tab.view.picked_count(), 0, "Shift+Right does nothing in Tree");
+    }
+
+    #[test]
+    fn in_details_right_unfolds_nothing() {
+        let (ctx, mut app, _dir) = app_in("app-details-no-tree");
+        app.handle_action(&ctx, Action::Side(1));
+        assert!(app.tab.view.tree.is_empty());
+        assert_eq!(app.tab.view.rows.len(), 3);
+    }
+
+    #[test]
+    fn the_actions_on_a_child_act_on_its_full_path() {
+        let (ctx, mut app, dir) = unfolded_app("app-tree-actions");
+        let child = dir.join("sub/inner.txt");
+        app.tab.view.select_row(2);
+        app.handle_action(&ctx, Action::Trash);
+        let Some(Dialog::Trash { paths, .. }) = app.dialog.take() else { panic!("asks first") };
+        assert_eq!(paths, std::slice::from_ref(&child));
+        app.handle_action(&ctx, Action::DeleteForever);
+        let Some(Dialog::Delete { paths, .. }) = app.dialog.take() else { panic!("asks first") };
+        assert_eq!(paths, std::slice::from_ref(&child));
+        app.handle_action(&ctx, Action::Rename);
+        assert_eq!(app.rename.take().map(|r| r.path), Some(child.clone()));
+        app.handle_action(&ctx, Action::Copy);
+        assert_eq!(app.clipboard.as_ref().map(|c| (c.paths.clone(), c.mode)), Some((vec![child.clone()], Mode::Copy)));
+        app.handle_action(&ctx, Action::Cut);
+        assert_eq!(app.cut_paths(), std::slice::from_ref(&child));
+        app.open_entry_menu(1, egui::pos2(10.0, 10.0));
+        assert_eq!(selection_names(&app.tab.view), ["deeper"], "a right click on another child selects it");
+        app.handle_action(&ctx, Action::TypeChar(' '));
+        app.sync_preview(&ctx);
+        assert_eq!(app.preview.as_ref().map(|p| p.path.clone()), Some(dir.join("sub/deeper")), "Space previews the child");
+    }
+
+    #[test]
+    fn a_picked_folder_takes_its_picked_children_with_it_so_each_is_acted_on_once() {
+        let (ctx, mut app, dir) = unfolded_app("app-tree-nested-picks");
+        app.tab.view.select_row(0);
+        app.tab.view.extend_to(4);
+        assert_eq!(app.tab.view.picked_count(), 5, "a Shift range over every row");
+        let tops = vec![dir.join("sub"), dir.join("a.txt"), dir.join("b.txt")];
+        app.handle_action(&ctx, Action::Copy);
+        assert_eq!(app.clipboard.as_ref().map(|c| c.paths.clone()), Some(tops.clone()), "sub's children go with sub, not twice");
+        app.handle_action(&ctx, Action::DeleteForever);
+        let Some(Dialog::Delete { paths, .. }) = &app.dialog else { panic!("asks first") };
+        assert_eq!(paths, &tops);
+        app.answer_dialog(&ctx, Confirm::Yes);
+        land(&mut app);
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name()).filter(|n| n != "cfg").collect();
+        assert!(left.is_empty(), "everything picked is gone, nothing left behind by an error: {left:?}");
+        assert_eq!(app.tab.view.error, None);
+    }
+
+    #[test]
+    fn alt_r_counts_an_unfolded_folder_under_its_own_path() {
+        let (ctx, mut app, dir) = unfolded_app("app-tree-count");
+        std::fs::write(dir.join("sub/deeper/c.txt"), "12345").unwrap();
+        app.tab.view.select_row(1);
+        app.handle_action(&ctx, Action::Count);
+        assert_eq!(app.counting.as_ref().map(|c| c.path.clone()), Some(dir.join("sub/deeper")));
+        wait_count(&mut app);
+        let expected = Totals { folders: 0, files: 1, bytes: 5, unreadable: 0 };
+        assert_eq!(app.tab.view.totals.get(&dir.join("sub/deeper")), Some(&expected));
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_folder_unfolded_and_reads_it_again_and_entering_another_forgets_it() {
+        let (ctx, mut app, dir) = unfolded_app("app-tree-refresh");
+        std::fs::write(dir.join("sub/new.txt"), "n").unwrap();
+        app.navigate_as(&ctx, NavKind::Refresh, dir.clone(), None);
+        land(&mut app);
+        app.read_kids(&ctx);
+        wait_kids(&mut app, |v| v.rows.len() == 6);
+        assert_eq!(row_names(&app.tab.view), ["sub", "deeper", "inner.txt", "new.txt", "a.txt", "b.txt"]);
+        app.tab.view.select_row(0);
+        app.handle_action(&ctx, Action::Activate);
+        land(&mut app);
+        assert_eq!(app.tab.view.current, dir.join("sub"));
+        assert!(app.tab.view.tree.is_empty(), "another folder starts folded");
+    }
+
+    #[test]
+    fn each_tab_keeps_its_own_unfolded_folders() {
+        let (ctx, mut app, _dir) = unfolded_app("app-tree-tabs");
+        app.handle_action(&ctx, Action::NewTab);
+        land(&mut app);
+        assert!(app.tab.view.tree.is_empty(), "the new tab starts folded");
+        app.handle_action(&ctx, Action::PrevTab);
+        land(&mut app);
+        app.read_kids(&ctx);
+        wait_kids(&mut app, |v| v.rows.len() == 5);
+        assert!(app.tab.view.is_open(0), "and the first one kept its own");
+    }
+
+    #[test]
+    fn renaming_a_child_survives_a_refresh_of_the_folder() {
+        let (ctx, mut app, dir) = unfolded_app("app-tree-rename-refresh");
+        app.tab.view.select_row(2);
+        app.handle_action(&ctx, Action::Rename);
+        app.navigate_as(&ctx, NavKind::Refresh, dir, None);
+        land(&mut app);
+        assert!(app.rename.is_some(), "the child is still listed, so its edit goes on");
+    }
+
+    /// `dir` {sub, a.txt, b.txt, README.md} with sub {a.md, README.md}, as the Tree view,
+    /// `sub` unfolded and read: rows sub, a.md, README.md, a.txt, b.txt, README.md.
+    fn same_names_app(name: &str) -> (egui::Context, LumenApp, PathBuf) {
+        let (ctx, mut app, dir) = app_in(name);
+        std::fs::write(dir.join("README.md"), "top").unwrap();
+        std::fs::write(dir.join("sub/a.md"), "a").unwrap();
+        std::fs::write(dir.join("sub/README.md"), "child").unwrap();
+        app.view_size = ui::view_size::ViewSize::new(10);
+        let mut listing = listing_of(&dir);
+        listing.id = app.tab.lister.latest_id();
+        app.apply(listing);
+        app.handle_action(&ctx, Action::Side(1));
+        wait_kids(&mut app, |v| v.rows.len() == 6);
+        (ctx, app, dir)
+    }
+
+    fn selected_path(app: &LumenApp) -> PathBuf {
+        app.tab.view.selected_entry().expect("a selection").path.clone()
+    }
+
+    #[test]
+    fn removing_a_child_lands_on_the_next_child_not_a_same_named_top_entry() {
+        let (ctx, mut app, dir) = same_names_app("app-tree-remove-same-name");
+        app.tab.view.select_row(1);
+        assert_eq!(selected_path(&app), dir.join("sub/a.md"));
+        app.handle_action(&ctx, Action::DeleteForever);
+        app.answer_dialog(&ctx, Confirm::Yes);
+        land(&mut app);
+        assert_eq!(selected_path(&app), dir.join("sub/README.md"));
+        app.read_kids(&ctx);
+        wait_kids(&mut app, |v| v.rows.len() == 5);
+        assert_eq!(selected_path(&app), dir.join("sub/README.md"), "and it stays once the folder is read again");
+    }
+
+    #[test]
+    fn reloading_with_a_child_selected_keeps_that_child_not_a_same_named_top_entry() {
+        let (ctx, mut app, dir) = same_names_app("app-tree-refresh-same-name");
+        app.tab.view.select_row(2);
+        assert_eq!(selected_path(&app), dir.join("sub/README.md"));
+        app.run_command(&ctx, Command::Refresh);
+        land(&mut app);
+        assert_eq!(selected_path(&app), dir.join("sub/README.md"));
+    }
+
+    #[test]
+    fn removing_a_child_while_filtering_keeps_the_filter() {
+        let (ctx, mut app, dir) = same_names_app("app-tree-remove-filtering");
+        for c in "sub".chars() {
+            app.handle_action(&ctx, Action::TypeChar(c));
+        }
+        assert_eq!(row_names(&app.tab.view), ["sub", "a.md", "README.md"]);
+        app.tab.view.select_row(1);
+        app.handle_action(&ctx, Action::DeleteForever);
+        app.answer_dialog(&ctx, Confirm::Yes);
+        land(&mut app);
+        assert_eq!(app.tab.view.filter(), "sub", "a child is never a reason to clear the filter");
+        assert_eq!(selected_path(&app), dir.join("sub/README.md"));
+    }
+
+    #[test]
+    fn a_renamed_child_is_selected_under_its_new_name_even_when_the_row_numbers_shift() {
+        let (ctx, mut app, dir) = same_names_app("app-tree-rename-child");
+        // sub: a.md, README.md; the cursor on a.md, renamed to sort last.
+        app.tab.view.select_row(1);
+        app.handle_action(&ctx, Action::Rename);
+        let mut edit = app.rename.take().expect("renaming");
+        edit.text = "zzz.md".into();
+        app.finish_rename(&ctx, edit, false);
+        land(&mut app);
+        app.read_kids(&ctx);
+        wait_kids(&mut app, |v| v.lists(&dir.join("sub/zzz.md")));
+        assert_eq!(selected_path(&app), dir.join("sub/zzz.md"));
+    }
+
+    #[test]
+    fn leaving_the_tree_view_lets_go_of_picked_children_but_not_picked_folder_rows() {
+        let mut v = unfolded_view();
+        v.select_row(0);
+        v.toggle_pick(1);
+        v.toggle_pick(2);
+        assert_eq!(v.picked_count(), 3);
+        v.fold_all();
+        assert_eq!(v.picked_count(), 1);
+        assert_eq!(selection_names(&v), ["src"]);
+        v.toggle_open(0);
+        v.apply_kids(inside("/x/src", &[("main.rs", false), ("deep", true), (".hidden", false)]));
+        assert_eq!(v.picked_count(), 1, "the children are not picked when it comes back");
+    }
+
+    #[test]
+    fn an_older_read_arriving_after_a_newer_one_is_ignored() {
+        let mut v = loaded_view();
+        v.toggle_open(0);
+        v.tree.started(&p("/x/src"), 1);
+        v.tree.started(&p("/x/src"), 2);
+        let mut newer = inside("/x/src", &[("new.rs", false)]);
+        newer.id = 2;
+        let mut older = inside("/x/src", &[("old.rs", false)]);
+        older.id = 1;
+        v.apply_kids(newer);
+        v.apply_kids(older);
+        assert_eq!(row_names(&v), ["src", "new.rs", "a.txt", "b.txt"]);
+        let mut late = inside("/x/src", &[("old.rs", false)]);
+        late.id = 1;
+        v.tree.refresh();
+        v.tree.started(&p("/x/src"), 3);
+        v.apply_kids(late);
+        assert_eq!(row_names(&v), ["src", "new.rs", "a.txt", "b.txt"], "nor does one older than a read now under way replace it");
+    }
+
+    #[test]
+    fn only_entries_sharing_one_folder_go_to_the_shell_menu() {
+        let same = [p("/x/a/one"), p("/x/a/two")];
+        assert_eq!(shared_parent(&same), Some(Path::new("/x/a")));
+        assert_eq!(shared_parent(&[p("/x/a/one")]), Some(Path::new("/x/a")), "a single child: its own folder");
+        assert_eq!(shared_parent(&[p("/x/a/one"), p("/x/two")]), None, "a child and a top entry");
+        assert_eq!(shared_parent(&[p("/x/a/n"), p("/x/b/n")]), None, "same name, different folders");
+        assert_eq!(shared_parent(&[]), None);
     }
 }

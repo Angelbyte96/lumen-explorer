@@ -2,7 +2,10 @@ pub mod confirm;
 pub mod context_menu;
 pub mod file_icons;
 pub mod file_list;
+pub mod grid;
+pub mod icon_grid;
 pub mod icons;
+pub mod list_view;
 pub mod path_popup;
 pub mod preview;
 pub mod sidebar;
@@ -10,6 +13,9 @@ pub mod status_bar;
 pub mod tabs;
 pub mod theme;
 pub mod toolbar;
+pub mod tree;
+pub mod view_picker;
+pub mod view_size;
 
 use eframe::egui;
 

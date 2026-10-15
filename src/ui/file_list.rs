@@ -21,9 +21,14 @@ pub enum ListEvent {
     Extend(usize),
     /// Right click on the row: its menu.
     Menu(usize),
+    /// A click on the folder's chevron (Tree): unfold it, or fold it.
+    Unfold(usize),
     /// A band dragged from a row's empty part or below the rows, in row units
     /// (row `i` spans `[i, i + 1)`): sent on every frame the pointer drags it.
     Band { start: f32, end: f32 },
+    /// A band dragged from the space around the cards (List, Icons): the cells
+    /// it touches and the one under the pointer; sent on every frame it moves.
+    Cells { cells: Vec<usize>, cursor: Option<usize> },
     /// A click below the rows; `menu` for a right click.
     Empty { menu: bool },
     Activate(usize),
@@ -87,38 +92,31 @@ impl RenameEdit {
 }
 
 /// How opaque a cut entry's icon and name are until it is pasted.
-const CUT_OPACITY: f32 = 0.5;
+pub(crate) const CUT_OPACITY: f32 = 0.5;
 
-/// Highest list zoom level (Ctrl+wheel, Ctrl+Plus); 0 is the normal size.
-pub const MAX_ZOOM: u8 = 4;
-
-/// Icon side at each zoom level, in text heights: only icons and rows grow,
-/// the text keeps its size (like Dolphin's details view).
-const ZOOM_FACTORS: [f32; MAX_ZOOM as usize + 1] = [1.0, 1.5, 2.0, 3.0, 4.0];
-
-/// The icon side for `zoom` when a line of text is `text_height` tall.
-pub fn icon_side(zoom: u8, text_height: f32) -> f32 {
-    text_height * ZOOM_FACTORS[usize::from(zoom.min(MAX_ZOOM))]
+/// The icon's side in Details: one line of text.
+pub fn icon_side(text_height: f32) -> f32 {
+    text_height
 }
 
 /// A row is its icon plus a little air.
-pub fn row_height(zoom: u8, text_height: f32) -> f32 {
-    icon_side(zoom, text_height) + 4.0
+pub fn row_height(text_height: f32) -> f32 {
+    icon_side(text_height) + 4.0
 }
 
 /// How big the list is drawn.
 #[derive(Clone, Copy)]
 pub struct Sizes {
-    /// Icon and row size, 0 (normal) to `MAX_ZOOM`.
-    pub zoom: u8,
     pub widths: Widths,
     pub shown: Shown,
     pub order: Order,
+    /// The Tree view: a chevron before each folder, children indented under it.
+    pub tree: bool,
 }
 
 impl Default for Sizes {
     fn default() -> Self {
-        Self { zoom: 0, widths: DEFAULT_WIDTHS, shown: ALL_SHOWN, order: DEFAULT_ORDER }
+        Self { widths: DEFAULT_WIDTHS, shown: ALL_SHOWN, order: DEFAULT_ORDER, tree: false }
     }
 }
 
@@ -132,14 +130,11 @@ pub fn show(
     mut edit: Option<&mut RenameEdit>,
     file_icons: &FileIcons,
 ) -> Option<ListEvent> {
-    let zoom = sizes.zoom;
-    let View { entries, rows, totals, selected, sort, .. } = view;
+    let View { rows, totals, selected, sort, .. } = view;
     let (selected, sort) = (*selected, *sort);
     let text_height = ui.text_style_height(&egui::TextStyle::Body);
-    let header_height = row_height(0, text_height);
-    let (icon, row_height) = (icon_side(zoom, text_height), row_height(zoom, text_height));
-    // With rows picked, they are the highlight; the cursor row alone otherwise.
-    let multi = view.picked_count() > 0;
+    let header_height = row_height(text_height);
+    let (icon, row_height) = (icon_side(text_height), header_height);
     let mut event = None;
     // Set again below if the cursor row is drawn this frame.
     ui.ctx().data_mut(|d| d.remove::<egui::Rect>(cursor_row_id()));
@@ -166,7 +161,7 @@ pub fn show(
             .striped(true)
             // The vertical scroll bar at the list's right edge, not after the last column.
             .auto_shrink([false, true])
-            // Text sits in the middle of rows made taller by the zoom.
+            // Text sits in the middle of its row, beside the taller icon.
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .sense(egui::Sense::CLICK);
         // Every column has its own width, like File Pilot: the last one stretches
@@ -210,21 +205,34 @@ pub fn show(
                 band_scroll(body.ui_mut());
                 body.rows(row_height, rows.len(), |mut row| {
                     let i = row.index();
-                    let entry = &entries[rows[i]];
+                    let entry = view.entry(rows[i]);
                     let mut on_name = false;
-                    row.set_selected(if multi { view.is_picked(i) } else { selected == Some(i) });
-                    let counts = count_cells(entry, totals.get(&entry.name));
+                    // Where the folder's chevron is drawn (Tree).
+                    let mut chevron = None;
+                    row.set_selected(view.is_highlighted(i));
+                    let mut row_rect = egui::Rect::NOTHING;
+                    let counts = count_cells(entry, totals.get(&entry.path));
                     for &column in &shown {
                         let (cell, _) = row.col(|ui| match column {
                             0 => {
                                 // Icon and name on one line as tall as the row, centred in it:
-                                // a plain `horizontal` is one text line tall, so a zoomed icon
+                                // a plain `horizontal` is one text line tall, so a taller icon
                                 // would hang below the row and be clipped (and the name with it).
                                 let line = egui::vec2(ui.available_width(), row_height);
                                 ui.allocate_ui_with_layout(line, egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                     // Cut and not pasted yet: faded, like other explorers.
                                     if cut.contains(&entry.path) {
                                         ui.set_opacity(CUT_OPACITY);
+                                    }
+                                    if sizes.tree {
+                                        // A step per level; files keep the chevron's room so names line up.
+                                        ui.add_space(view.depth(i) as f32 * (icon + ui.spacing().item_spacing.x));
+                                        if entry.is_dir {
+                                            let response = icons::chevron(ui, icon, view.is_open(i));
+                                            chevron = Some(response.rect);
+                                        } else {
+                                            ui.allocate_space(egui::vec2(icon, icon));
+                                        }
                                     }
                                     icons::show(ui, entry, icon, file_icons.texture(entry));
                                     if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
@@ -249,6 +257,7 @@ pub fn show(
                         });
                         // Where the row is this frame: `row.response()` holds the last frame's place.
                         first_drawn.get_or_insert((i, cell.top()));
+                        row_rect = row_rect.union(cell);
                     }
                     let response = row.response();
                     if pressed && response.is_pointer_button_down_on() && !on_name {
@@ -257,8 +266,19 @@ pub fn show(
                     if selected == Some(i) {
                         response.ctx.data_mut(|d| d.insert_temp(cursor_row_id(), response.rect));
                     }
+                    if view.is_outlined(i) && row_rect.is_positive() {
+                        let painter = egui::Painter::new(response.ctx.clone(), response.layer_id, row_rect.expand(1.0));
+                        crate::ui::icon_grid::paint_dashed(&painter, row_rect.shrink(1.0), painter.ctx().global_style().visuals.weak_text_color());
+                    }
+                    // The chevron's column over the whole row's height.
+                    let on_chevron = chevron.is_some_and(|c| {
+                        let at = response.ctx.input(|input| input.pointer.interact_pos());
+                        at.is_some_and(|at| egui::Rect::from_x_y_ranges(c.x_range(), response.rect.y_range()).contains(at))
+                    });
                     if response.secondary_clicked() {
                         event = Some(ListEvent::Menu(i));
+                    } else if on_chevron && (response.clicked() || response.double_clicked()) {
+                        event = Some(ListEvent::Unfold(i));
                     } else if response.double_clicked() {
                         event = Some(ListEvent::Activate(i));
                     } else if response.clicked() {
@@ -324,7 +344,7 @@ const BAND_TOP_SPEED: f32 = 800.0;
 /// How fast a band at height `y` scrolls a list showing `view` on screen, in
 /// points per second: positive brings the rows above down. From nothing at
 /// the inner side of each edge's strip to the top speed at the edge.
-fn band_speed(y: f32, view: egui::Rangef) -> f32 {
+pub(crate) fn band_speed(y: f32, view: egui::Rangef) -> f32 {
     // The nearer edge decides, for lists too short for two strips.
     let (depth, sign) = if y < view.center() { (view.min + BAND_STRIP - y, 1.0) } else { (y - (view.max - BAND_STRIP), -1.0) };
     sign * BAND_TOP_SPEED * (depth / BAND_STRIP).clamp(0.0, 1.0)
@@ -375,25 +395,25 @@ fn band(ui: &egui::Ui, pressed: bool, may_start: bool, unit: impl Fn(f32) -> f32
 }
 
 /// The width that shows every cell of `column` and its header whole, for
-/// `view`'s rows at `zoom`.
-pub fn fit_width(ctx: &egui::Context, view: &View, zoom: u8, column: usize) -> f32 {
+/// `view`'s rows.
+pub fn fit_width(ctx: &egui::Context, view: &View, column: usize) -> f32 {
     let style = ctx.global_style();
     let font = egui::TextStyle::Body.resolve(&style);
     let measure = |text: String| ctx.fonts_mut(|f| f.layout_no_wrap(text, font.clone(), egui::Color32::WHITE).size().x);
     // The header with room for the sort arrow, which may show up later.
     let header = measure(format!("{} {SORT_DESCENDING}", COLUMNS[column].0)) + 2.0 * style.spacing.button_padding.x;
-    let icon = icon_side(zoom, ctx.fonts_mut(|f| f.row_height(&font))) + style.spacing.item_spacing.x;
+    let icon = icon_side(ctx.fonts_mut(|f| f.row_height(&font))) + style.spacing.item_spacing.x;
     let widest = view
         .rows
         .iter()
         .map(|&row| {
-            let entry = &view.entries[row];
+            let entry = view.entry(row);
             match column {
                 0 => icon + measure(entry.name.clone()),
                 1 => measure(entry.kind().to_string()),
                 2 => measure(entry.modified.map(format_time).unwrap_or_default()),
                 _ => {
-                    let cells = count_cells(entry, view.totals.get(&entry.name));
+                    let cells = count_cells(entry, view.totals.get(&entry.path));
                     measure(cells[column - 3].clone())
                 }
             }
@@ -466,7 +486,7 @@ fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths
     event
 }
 
-fn cursor_row_id() -> egui::Id {
+pub(crate) fn cursor_row_id() -> egui::Id {
     egui::Id::new("lumen_cursor_row")
 }
 
@@ -482,14 +502,25 @@ pub fn name_label(ui: &mut egui::Ui, entry: &Entry, typed: &str) {
     ranged_name_label(ui, entry, &ranges);
 }
 
-/// [`name_label`] with the letters to mark given, for names found by the
-/// quick jump, whose letters need not be whole words.
-pub fn ranged_name_label(ui: &mut egui::Ui, entry: &Entry, ranges: &[std::ops::Range<usize>]) {
+/// `name_label` without its own tooltip when cut: for a cell whose whole
+/// area already shows the name on hover, so it never shows twice.
+pub fn cell_name_label(ui: &mut egui::Ui, entry: &Entry, typed: &str) {
+    let ranges = word_ranges(&entry.name, typed).unwrap_or_default();
+    ui.add(name_widget(ui, entry, &ranges).show_tooltip_when_elided(false));
+}
+
+fn name_widget(ui: &egui::Ui, entry: &Entry, ranges: &[std::ops::Range<usize>]) -> egui::Label {
     let visuals = ui.visuals();
     let normal = if entry.hidden { visuals.weak_text_color() } else { visuals.text_color() };
     let font = egui::TextStyle::Body.resolve(ui.style());
     let job = marked_name(&entry.name, ranges, normal, visuals.hyperlink_color, font);
-    ui.add(egui::Label::new(job).selectable(false).truncate());
+    egui::Label::new(job).selectable(false).truncate()
+}
+
+/// [`name_label`] with the letters to mark given, for names found by the
+/// quick jump, whose letters need not be whole words.
+pub fn ranged_name_label(ui: &mut egui::Ui, entry: &Entry, ranges: &[std::ops::Range<usize>]) {
+    ui.add(name_widget(ui, entry, ranges));
 }
 
 /// Header labels and the column each one sorts, in display order.
@@ -583,7 +614,7 @@ pub fn rename_id() -> egui::Id {
 }
 
 /// The text field drawn in place of the name while renaming.
-fn rename_field(ui: &mut egui::Ui, edit: &mut RenameEdit) -> Option<bool> {
+pub(crate) fn rename_field(ui: &mut egui::Ui, edit: &mut RenameEdit) -> Option<bool> {
     let id = rename_id();
     // Characters a name cannot hold are dropped before the field reads them, as
     // File Pilot does: typing one does nothing, a pasted name keeps the rest.
@@ -707,26 +738,15 @@ mod tests {
         assert_eq!(count_cells(&dir, Some(&totals)), ["2", "9", "2.2 MB"]);
     }
 
-    #[test]
-    fn zoom_grows_icons_and_rows_from_the_normal_size_up_to_a_limit() {
-        let text = 16.0;
-        assert_eq!(icon_side(0, text), text, "level 0 looks as before");
-        assert_eq!(row_height(0, text), text + 4.0);
-        let sides: Vec<f32> = (0..=MAX_ZOOM).map(|z| icon_side(z, text)).collect();
-        assert!(sides.windows(2).all(|w| w[0] < w[1]), "each level is bigger: {sides:?}");
-        assert_eq!(icon_side(MAX_ZOOM, text), 4.0 * text);
-        assert_eq!(icon_side(MAX_ZOOM + 3, text), icon_side(MAX_ZOOM, text), "never past the limit");
-    }
-
-    /// Where each text and the icon of the first row were painted, at `zoom`.
-    fn painted(zoom: u8) -> Vec<egui::epaint::ClippedShape> {
+    /// Where each text and the icon of the first row were painted.
+    fn painted() -> Vec<egui::epaint::ClippedShape> {
         let ctx = egui::Context::default();
         let mut view = View::default();
         (view.entries, view.rows) = (vec![entry("a.txt")], vec![0]);
         let mut shapes = Vec::new();
         for _ in 0..3 {
             let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-                show(ui, &view, &[], Sizes { zoom, ..Sizes::default() }, None, None, &FileIcons::default());
+                show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default());
             });
             output.textures_delta.clear();
             shapes = output.shapes;
@@ -770,23 +790,21 @@ mod tests {
     }
 
     #[test]
-    fn zoomed_names_stay_level_with_the_other_columns_and_icons_are_whole() {
-        for zoom in 0..=MAX_ZOOM {
-            let shapes = painted(zoom);
-            let y = |text: &str| {
-                shapes.iter().find_map(|s| match &s.shape {
-                    egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos.y + t.galley.rect.center().y),
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("{text:?} painted"))
-            };
-            assert!((y("a.txt") - y("TXT file")).abs() < 1.5, "zoom {zoom}: name off its row");
-            // The icon: small shapes in the Name column, none cut by the row's clip.
-            for s in shapes.iter().filter(|s| !matches!(s.shape, egui::Shape::Text(_)) && s.clip_rect.min.x < 20.0) {
-                let b = s.shape.visual_bounding_rect();
-                if b.is_finite() && b.width() < 80.0 {
-                    assert!(b.max.y <= s.clip_rect.max.y + 0.5, "zoom {zoom}: icon clipped {b:?} by {:?}", s.clip_rect);
-                }
+    fn names_stay_level_with_the_other_columns_and_icons_are_whole() {
+        let shapes = painted();
+        let y = |text: &str| {
+            shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos.y + t.galley.rect.center().y),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{text:?} painted"))
+        };
+        assert!((y("a.txt") - y("TXT file")).abs() < 1.5, "name off its row");
+        // The icon: small shapes in the Name column, none cut by the row's clip.
+        for s in shapes.iter().filter(|s| !matches!(s.shape, egui::Shape::Text(_)) && s.clip_rect.min.x < 20.0) {
+            let b = s.shape.visual_bounding_rect();
+            if b.is_finite() && b.width() < 80.0 {
+                assert!(b.max.y <= s.clip_rect.max.y + 0.5, "icon clipped {b:?} by {:?}", s.clip_rect);
             }
         }
     }
@@ -1066,6 +1084,33 @@ mod tests {
         assert!(name_opacity("a.txt", &cut) < 0.7, "the cut one is faded");
         assert_eq!(name_opacity("b.txt", &cut), 1.0, "the others are not");
         assert_eq!(name_opacity("a.txt", &[]), 1.0);
+    }
+
+    #[test]
+    fn an_unselected_cursor_row_has_a_dashed_outline() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["a.txt", "b.txt"]);
+        view.select_row(1);
+        view.unselect();
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() }, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default());
+                });
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let y = |text: &str| shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos.y + t.galley.size().y / 2.0),
+            _ => None,
+        }).unwrap();
+        let (a, b) = (y("a.txt"), y("b.txt"));
+        let pitch = b - a;
+        let band = |mid: f32| egui::Rect::from_min_max(egui::pos2(0.0, mid - pitch / 2.0), egui::pos2(crate::ui::testing::SCREEN.max.x, mid + pitch / 2.0));
+        assert!(crate::ui::icon_grid::tests::dashes_in(&shapes, band(b)) >= 8, "dashes around b.txt's row");
+        assert_eq!(crate::ui::icon_grid::tests::dashes_in(&shapes, band(a)), 0);
     }
 
     #[test]
@@ -1410,15 +1455,14 @@ mod tests {
         let view = listed(&["a.txt", long]);
         let ctx = egui::Context::default();
         ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
-        let name = fit_width(&ctx, &view, 0, 0);
+        let name = fit_width(&ctx, &view, 0);
         assert_eq!(painted_name(&view, name, long), long, "whole at its fit width ({name})");
         assert_ne!(painted_name(&view, name - 20.0, long), long, "a little narrower cuts it");
         // Folders holds only "--": the header sets its width.
         let font = egui::TextStyle::Body.resolve(&ctx.global_style());
         let header = ctx.fonts_mut(|f| f.layout_no_wrap("Folders".into(), font, egui::Color32::WHITE).size().x);
-        let folders = fit_width(&ctx, &view, 0, 3);
+        let folders = fit_width(&ctx, &view, 3);
         assert!(folders >= header && folders < header + 40.0, "{folders} for a {header} header");
-        assert!(fit_width(&ctx, &view, MAX_ZOOM, 0) > name, "a bigger icon needs more room");
     }
 
     #[test]
@@ -1583,5 +1627,142 @@ mod tests {
         between_buttons(&ctx, &view, vec![key(egui::Key::Tab, true, shift)]);
         between_buttons(&ctx, &view, vec![]);
         assert_eq!(ctx.memory(|m| m.focused()), Some(before), "one Shift+Tab goes back");
+    }
+
+    /// `/x` in the Tree view: src (unfolded: deep/, main.rs) and a.txt.
+    fn tree_listed() -> View {
+        let folder = |path: &str| Entry { is_dir: true, size: None, ..entry(path) };
+        let mut view = View::default();
+        let top = vec![Entry { path: PathBuf::from("/x/src"), ..folder("src") }, entry("a.txt")];
+        view.apply_listing(crate::fs::Listing { id: 1, path: PathBuf::from("/x"), result: Ok(top), elapsed: std::time::Duration::ZERO }, None);
+        view.toggle_open(0);
+        let kids = vec![
+            Entry { path: PathBuf::from("/x/src/deep"), ..folder("deep") },
+            Entry { path: PathBuf::from("/x/src/main.rs"), ..entry("main.rs") },
+        ];
+        view.apply_kids(crate::fs::Listing { id: 2, path: PathBuf::from("/x/src"), result: Ok(kids), elapsed: std::time::Duration::ZERO });
+        view
+    }
+
+    /// One frame of the list, at `time`, with these events.
+    fn draw_tree(ctx: &egui::Context, view: &View, tree: bool, events: Vec<egui::Event>, time: Option<f64>) -> (Option<ListEvent>, Vec<egui::epaint::ClippedShape>) {
+        let mut event = None;
+        let input = egui::RawInput { events, time, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        let mut output = ctx.run_ui(input, |root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                event = show(ui, view, &[], Sizes { tree, ..Sizes::default() }, None, None, &FileIcons::default());
+            });
+        });
+        output.textures_delta.clear();
+        (event, output.shapes)
+    }
+
+    fn settled_tree(ctx: &egui::Context, view: &View, tree: bool) -> Vec<egui::epaint::ClippedShape> {
+        draw_tree(ctx, view, tree, vec![], None);
+        draw_tree(ctx, view, tree, vec![], None);
+        draw_tree(ctx, view, tree, vec![], None).1
+    }
+
+    /// The chevrons painted: the corners of each one's open line, in drawing order.
+    fn chevrons(shapes: &[egui::epaint::ClippedShape]) -> Vec<Vec<egui::Pos2>> {
+        shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Path(path) if !path.closed && path.points.len() == 3 => Some(path.points.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn text_rect(shapes: &[egui::epaint::ClippedShape], text: &str) -> egui::Rect {
+        shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == text => Some(t.galley.rect.translate(t.pos.to_vec2())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{text:?} painted"))
+    }
+
+    fn bounds(points: &[egui::Pos2]) -> egui::Rect {
+        egui::Rect::from_points(points)
+    }
+
+    #[test]
+    fn the_tree_view_paints_a_chevron_before_each_folders_icon_and_details_paints_none() {
+        let ctx = egui::Context::default();
+        let view = tree_listed();
+        let shapes = settled_tree(&ctx, &view, true);
+        let chevrons = chevrons(&shapes);
+        assert_eq!(chevrons.len(), 2, "src and deep are folders; main.rs and a.txt are not: {chevrons:?}");
+        let (src, deep) = (text_rect(&shapes, "src"), text_rect(&shapes, "deep"));
+        for (chevron, name) in [(&chevrons[0], src), (&chevrons[1], deep)] {
+            let at = bounds(chevron);
+            let icon = icon_side(14.0);
+            assert!(at.right() < name.left() - icon + 1.0, "before the icon: {at:?} {name:?}");
+            assert!((at.center().y - name.center().y).abs() < 2.0, "on the folder's row");
+        }
+        let plain = settled_tree(&ctx, &view, false);
+        assert!(self::chevrons(&plain).is_empty(), "the Details table has none");
+    }
+
+    #[test]
+    fn the_chevron_points_right_when_folded_and_down_when_unfolded() {
+        let ctx = egui::Context::default();
+        let chevrons = chevrons(&settled_tree(&ctx, &tree_listed(), true));
+        let (open, folded) = (&chevrons[0], &chevrons[1]);
+        assert!(open[1].y > open[0].y + 1.0 && (open[0].y - open[2].y).abs() < 0.5, "v: {open:?}");
+        assert!(open[0].x < open[1].x && open[1].x < open[2].x, "v: {open:?}");
+        assert!(folded[1].x > folded[0].x + 1.0 && (folded[0].x - folded[2].x).abs() < 0.5, ">: {folded:?}");
+        assert!(folded[0].y < folded[1].y && folded[1].y < folded[2].y, ">: {folded:?}");
+    }
+
+    #[test]
+    fn children_are_indented_one_step_under_their_folder_and_files_line_up_with_folders() {
+        let ctx = egui::Context::default();
+        let shapes = settled_tree(&ctx, &tree_listed(), true);
+        let x = |name: &str| text_rect(&shapes, name).left();
+        let step = x("deep") - x("src");
+        assert!(step >= icon_side(14.0) - 1.0, "a step is at least an icon wide: {step}");
+        assert!((x("main.rs") - x("deep")).abs() < 0.5, "a file under src lines up with a folder under src");
+        assert!((x("a.txt") - x("src")).abs() < 0.5, "and at the top too");
+    }
+
+    #[test]
+    fn a_click_on_the_chevron_unfolds_or_folds_and_a_click_elsewhere_selects() {
+        let ctx = egui::Context::default();
+        let view = tree_listed();
+        let shapes = settled_tree(&ctx, &view, true);
+        let chevron = |i: usize| bounds(&chevrons(&shapes)[i]).center();
+        let click = |at: egui::Pos2| {
+            draw_tree(&ctx, &view, true, vec![egui::Event::PointerMoved(at)], None);
+            let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+            let event = draw_tree(&ctx, &view, true, vec![press(true), press(false)], None).0;
+            settled_tree(&ctx, &view, true);
+            event
+        };
+        assert!(matches!(click(chevron(0)), Some(ListEvent::Unfold(0))), "src's chevron");
+        assert!(matches!(click(chevron(1)), Some(ListEvent::Unfold(1))), "deep's chevron");
+        assert!(matches!(click(text_rect(&shapes, "src").center()), Some(ListEvent::Select(0))), "the name selects");
+        assert!(matches!(click(text_rect(&shapes, "main.rs").center()), Some(ListEvent::Select(2))));
+        let blank = egui::pos2(chevron(1).x, text_rect(&shapes, "main.rs").center().y);
+        assert!(matches!(click(blank), Some(ListEvent::Select(2))), "where a file has no chevron, it is the row");
+        let date = egui::pos2(500.0, text_rect(&shapes, "src").center().y);
+        assert!(matches!(click(date), Some(ListEvent::Select(0))), "the rest of the row selects");
+    }
+
+    #[test]
+    fn a_double_click_on_a_folders_name_still_opens_it() {
+        let ctx = egui::Context::default();
+        let view = tree_listed();
+        let shapes = settled_tree(&ctx, &view, true);
+        let at = text_rect(&shapes, "src").center();
+        let events = || {
+            let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+            vec![egui::Event::PointerMoved(at), press(true), press(false)]
+        };
+        draw_tree(&ctx, &view, true, events(), Some(10.0));
+        let second = draw_tree(&ctx, &view, true, events(), Some(10.1)).0;
+        assert!(matches!(second, Some(ListEvent::Activate(0))), "opens, not unfolds");
     }
 }
