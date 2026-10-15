@@ -1264,6 +1264,7 @@ impl LumenApp {
             tabs: if with_window { self.session().0 } else { self.saved.tabs.clone() },
             active_tab: if with_window { self.session().1 } else { self.saved.active_tab },
             visited: if with_window { self.visits.list().to_vec() } else { self.saved.visited.clone() },
+            folder_views: self.saved.folder_views.clone(),
         }
     }
 
