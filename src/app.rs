@@ -2028,6 +2028,29 @@ impl LumenApp {
                 ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                 self.path_popup.open();
             }
+            ToolbarEvent::SaveView(Some(scope)) => {
+                let (folder, look) = (self.tab.view.current.clone(), self.shown_look());
+                self.folder_views.set(&folder, scope, look);
+                self.tab.look_for = Some((folder, look));
+            }
+            ToolbarEvent::SaveView(None) => self.folder_views.remove(&self.tab.view.current),
+            ToolbarEvent::SetDefaultView => self.default_look = self.shown_look(),
+        }
+    }
+
+    /// The view and order on screen.
+    fn shown_look(&self) -> Look {
+        Look { view: self.tab.view_size, sort: self.tab.view.sort }
+    }
+
+    /// What the lock's menu shows for the folder on screen.
+    fn saved_view(&self) -> ui::toolbar::SavedView {
+        let current = &self.tab.view.current;
+        let rule = self.folder_views.rule_for(current);
+        ui::toolbar::SavedView {
+            own: rule.filter(|rule| rule.folder == *current).map(|rule| rule.scope),
+            covered_by: rule.filter(|rule| rule.folder != *current).map(|rule| rule.folder.clone()),
+            is_default: self.shown_look() == self.default_look,
         }
     }
 
@@ -2130,8 +2153,8 @@ impl LumenApp {
     /// kept goes to the rule its folder opens with; without one it lasts
     /// only this visit.
     fn keep_rule(&mut self) {
+        let look = self.shown_look();
         let Some((folder, kept)) = &mut self.tab.look_for else { return };
-        let look = Look { view: self.tab.view_size, sort: self.tab.view.sort };
         if look != *kept {
             *kept = look;
             self.folder_views.update(folder, look);
@@ -2431,6 +2454,7 @@ impl eframe::App for LumenApp {
                 can_back: self.tab.history.back_target().is_some(),
                 can_forward: self.tab.history.forward_target().is_some(),
                 bookmarked: self.bookmarks.contains(&current),
+                saved_view: self.saved_view(),
             };
             if let Some(event) = ui::toolbar::show(ui, &nav) {
                 self.handle_toolbar(&ctx, event);
@@ -3819,6 +3843,45 @@ mod tests {
         assert_eq!(app.tab.view_size, ViewSize::new(100), "the first tab kept its own");
         app.select_tab(&ctx, 1);
         assert_eq!(app.tab.view_size, ViewSize::new(0));
+    }
+
+    #[test]
+    fn the_lock_saves_the_view_shown_forgets_it_and_sets_the_default() {
+        use crate::folder_views::Scope;
+        use ui::toolbar::SavedView;
+        use ui::view_size::ViewSize;
+        let (ctx, _, dir) = app_in("app-lock");
+        let path = dir.join("cfg/lumen/config");
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(path.clone())));
+        app.apply(listing_of(&dir));
+        assert_eq!(app.saved_view(), SavedView { is_default: true, ..SavedView::default() });
+        app.tab.view_size = ViewSize::new(65);
+        app.tab.view.sort_by(SortColumn::Size);
+        let shown = (65, Sort { column: SortColumn::Size, descending: false });
+        assert!(!app.saved_view().is_default);
+        app.handle_toolbar(&ctx, ToolbarEvent::SaveView(Some(Scope::Tree)));
+        assert_eq!(app.saved_view().own, Some(Scope::Tree));
+        app.save_settings(false);
+        let rules = |path: &Path| -> Vec<_> {
+            Config::load(path).unwrap().folder_views.rules().iter().map(|r| (r.folder.clone(), r.scope, r.look.view.percent(), r.look.sort)).collect()
+        };
+        assert_eq!(rules(&path), [(dir.clone(), Scope::Tree, shown.0, shown.1)], "written at once");
+        app.apply(listing_of(&dir.join("sub")));
+        assert_eq!(look_of(&app), shown, "its subfolders open with it");
+        assert_eq!(app.saved_view(), SavedView { own: None, covered_by: Some(dir.clone()), is_default: false });
+        app.apply(listing_of(&dir));
+        app.handle_toolbar(&ctx, ToolbarEvent::SaveView(None));
+        assert_eq!(app.saved_view().own, None);
+        app.save_settings(false);
+        assert!(rules(&path).is_empty(), "the rule is forgotten");
+        assert_eq!(look_of(&app), shown, "forgetting keeps what is on screen");
+        app.handle_toolbar(&ctx, ToolbarEvent::SetDefaultView);
+        assert!(app.saved_view().is_default);
+        app.save_settings(false);
+        let saved = Config::load(&path).unwrap();
+        assert_eq!((saved.view.percent(), saved.sort), shown, "the new default is written");
+        app.apply(listing_of(&dir.join("sub")));
+        assert_eq!(look_of(&app), shown, "a folder with no rule opens with the new default");
     }
 
     #[test]
