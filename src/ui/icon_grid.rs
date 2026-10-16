@@ -12,6 +12,7 @@ use crate::ui::file_icons::FileIcons;
 use crate::ui::file_list::{self, ListEvent, RenameEdit};
 use crate::ui::grid::GridShape;
 use crate::ui::icons;
+use crate::ui::thumbnails::{Held, Thumbnails};
 
 /// Icon side at M Icons and at XL Icons, in points.
 pub const M_ICON: f32 = 48.0;
@@ -35,6 +36,14 @@ pub fn per_row(width: f32, card: f32) -> usize {
     (((width + GAP) / (card + GAP)).floor() as usize).max(1)
 }
 
+/// What a card can draw for its icon: the type's or file's own icon, or an
+/// image file's picture.
+#[derive(Clone, Copy)]
+pub struct Art<'a> {
+    pub file_icons: &'a FileIcons,
+    pub thumbs: &'a Thumbnails,
+}
+
 /// What the grid did this frame and its shape, for the arrow keys.
 pub struct GridOut {
     pub event: Option<ListEvent>,
@@ -48,8 +57,9 @@ pub fn show(
     growth: f32,
     scroll: Option<Scroll>,
     mut edit: Option<&mut RenameEdit>,
-    file_icons: &FileIcons,
+    art: Art,
 ) -> GridOut {
+    let Art { file_icons, thumbs } = art;
     let text_height = ui.text_style_height(&egui::TextStyle::Body);
     let icon = icon_side(growth);
     let card = card_size(icon, text_height);
@@ -86,7 +96,20 @@ pub fn show(
                     if cut.contains(&entry.path) {
                         ui.set_opacity(file_list::CUT_OPACITY);
                     }
-                    icons::show(ui, entry, icon, file_icons.texture(entry));
+                    if entry.is_dir {
+                        // Drawn by Lumen, never with the theme's folder icon.
+                        let held = thumbs.held(entry);
+                        let own = match &held {
+                            Held::File(file) => file_icons.texture(file),
+                            _ => None,
+                        };
+                        icons::folder_with(ui, icon, &held, own);
+                    } else {
+                        match thumbs.picture(entry) {
+                            Some((texture, size)) => icons::picture(ui, icon, texture, size),
+                            None => icons::show(ui, entry, icon, file_icons.texture(entry)),
+                        };
+                    }
                     ui.add_space(6.0);
                     if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
                         if let Some(submit) = file_list::rename_field(ui, edit) {
@@ -253,7 +276,7 @@ pub(crate) mod tests {
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 480.0));
         let input = egui::RawInput { screen_rect: Some(screen), events, time, ..Default::default() };
         let mut out = None;
-        let mut output = ctx.run_ui(input, |ui| out = Some(show(ui, view, &[], growth, None, None, &FileIcons::default())));
+        let mut output = ctx.run_ui(input, |ui| out = Some(show(ui, view, &[], growth, None, None, Art { file_icons: &FileIcons::default(), thumbs: &Thumbnails::default() })));
         output.textures_delta.clear();
         let texts = output
             .shapes
@@ -333,7 +356,7 @@ pub(crate) mod tests {
             let mut shapes = Vec::new();
             for _ in 0..2 {
                 let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-                    show(ui, view, &[], 0.0, None, None, &FileIcons::default());
+                    show(ui, view, &[], 0.0, None, None, Art { file_icons: &FileIcons::default(), thumbs: &Thumbnails::default() });
                 });
                 output.textures_delta.clear();
                 shapes = output.shapes;
@@ -349,6 +372,59 @@ pub(crate) mod tests {
         let unselected = paint(&view);
         assert!(!filled(&unselected), "no highlight");
         assert!(dashes_in(&unselected, card) >= 8, "a dashed outline around the cursor card");
+    }
+
+    #[test]
+    fn an_image_card_shows_its_own_picture_fitted_with_its_shape() {
+        let ctx = egui::Context::default();
+        let view = listed(&[], &["photo.png", "notes.txt"]);
+        let photo = std::path::Path::new("/x/photo.png");
+        let thumbs = Thumbnails::default().with_picture(&ctx, photo, [400, 200]);
+        let (texture, _) = thumbs.picture(view.entry(0)).unwrap();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 480.0));
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                show(ui, &view, &[], 1.0, None, None, Art { file_icons: &FileIcons::default(), thumbs: &thumbs });
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let pictures: Vec<Rect> = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Mesh(mesh) if mesh.texture_id == texture => Some(s.shape.visual_bounding_rect()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pictures.len(), 1, "one card shows a picture");
+        let picture = pictures[0];
+        assert!((picture.width() - XL_ICON).abs() < 0.5 && (picture.height() - XL_ICON / 2.0).abs() < 0.5, "fitted, 2:1: {picture:?}");
+    }
+
+    #[test]
+    fn a_small_picture_is_not_blown_up_past_its_own_pixels() {
+        let ctx = egui::Context::default();
+        let view = listed(&[], &["icon.png"]);
+        let thumbs = Thumbnails::default().with_picture(&ctx, std::path::Path::new("/x/icon.png"), [16, 32]);
+        let (texture, _) = thumbs.picture(view.entry(0)).unwrap();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 480.0));
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                show(ui, &view, &[], 1.0, None, None, Art { file_icons: &FileIcons::default(), thumbs: &thumbs });
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let picture = shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Mesh(mesh) if mesh.texture_id == texture => Some(s.shape.visual_bounding_rect()),
+                _ => None,
+            })
+            .expect("drawn");
+        assert!((picture.width() - 16.0).abs() < 0.5 && (picture.height() - 32.0).abs() < 0.5, "its own size: {picture:?}");
     }
 
     fn click(pos: egui::Pos2, button: egui::PointerButton) -> Vec<egui::Event> {
@@ -414,5 +490,139 @@ pub(crate) mod tests {
         draw_at(&ctx, &view, 0.0, click(file, egui::PointerButton::Primary), Some(10.0));
         let second = draw_at(&ctx, &view, 0.0, click(file, egui::PointerButton::Primary), Some(10.1)).out.event;
         assert!(matches!(second, Some(ListEvent::Activate(1))), "a double click opens it");
+    }
+
+    /// Draws the grid twice (the second shows what the first asked for).
+    fn shapes_of(ctx: &egui::Context, view: &View, growth: f32, file_icons: &FileIcons, thumbs: &Thumbnails) -> Vec<egui::epaint::ClippedShape> {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 480.0));
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                show(ui, view, &[], growth, None, None, Art { file_icons, thumbs });
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        shapes
+    }
+
+    fn meshes_of(shapes: &[egui::epaint::ClippedShape], texture: egui::TextureId) -> Vec<Rect> {
+        shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Mesh(mesh) if mesh.texture_id == texture => Some(s.shape.visual_bounding_rect()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The sheets (page-coloured polygons) drawn.
+    fn sheets_of(shapes: &[egui::epaint::ClippedShape]) -> Vec<Rect> {
+        shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Path(path) if path.fill == icons::PAGE => Some(s.shape.visual_bounding_rect()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn texture(ctx: &egui::Context, name: &str) -> egui::TextureHandle {
+        ctx.load_texture(name, egui::ColorImage::new([4, 4], vec![egui::Color32::RED; 16]), egui::TextureOptions::LINEAR)
+    }
+
+    /// The first card's rect at `growth`, as the grid places it.
+    fn first_card(growth: f32) -> Rect {
+        Rect::from_min_size(pos2(GAP, GAP), card_size(icon_side(growth), 20.0)).expand2(vec2(0.0, 20.0))
+    }
+
+    /// A view with the folder `/x/test` and thumbnails where it holds `peek`.
+    fn peeking(peek: crate::fs::thumbs::Peek) -> (View, Thumbnails) {
+        (listed(&["test"], &[]), Thumbnails::default().with_peek(std::path::Path::new("/x/test"), peek))
+    }
+
+    #[test]
+    fn a_folder_whose_peek_is_a_picture_draws_it_inside_its_card() {
+        use crate::fs::thumbs::Peek;
+        let ctx = egui::Context::default();
+        let view = listed(&["test"], &[]);
+        let thumbs = Thumbnails::default()
+            .with_peek(std::path::Path::new("/x/test"), Peek::File(PathBuf::from("/x/test/photo.png"), None))
+            .with_picture(&ctx, std::path::Path::new("/x/test/photo.png"), [400, 200]);
+        let id = thumbs.picture_of(std::path::Path::new("/x/test/photo.png")).expect("loaded");
+        let shapes = shapes_of(&ctx, &view, 1.0, &FileIcons::default(), &thumbs);
+        let pictures = meshes_of(&shapes, id);
+        assert_eq!(pictures.len(), 1, "the picture is drawn once");
+        let card = first_card(1.0);
+        assert!(card.contains_rect(pictures[0]), "inside the card: {:?} in {card:?}", pictures[0]);
+        assert!((pictures[0].width() / pictures[0].height() - 2.0).abs() < 0.05, "keeps its shape: {:?}", pictures[0]);
+        assert!(pictures[0].width() <= XL_ICON, "fits the icon: {:?}", pictures[0]);
+        assert!(sheets_of(&shapes).is_empty(), "a picture, not a sheet");
+    }
+
+    #[test]
+    fn a_folder_holding_only_folders_draws_blank_sheets_and_an_empty_one_none() {
+        use crate::fs::thumbs::Peek;
+        let ctx = egui::Context::default();
+        let (view, thumbs) = peeking(Peek::OnlyFolders);
+        let sheets = sheets_of(&shapes_of(&ctx, &view, 1.0, &FileIcons::default(), &thumbs));
+        assert!(sheets.len() >= 2 && sheets.len() <= 3, "two or three blank sheets: {sheets:?}");
+        assert!(sheets.iter().all(|s| first_card(1.0).contains_rect(*s)));
+        assert!(sheets.windows(2).all(|w| w[0] != w[1]), "slightly offset: {sheets:?}");
+
+        let (view, thumbs) = peeking(Peek::Empty);
+        assert!(sheets_of(&shapes_of(&ctx, &view, 1.0, &FileIcons::default(), &thumbs)).is_empty(), "nothing sticks out of an empty folder");
+        let view = listed(&["test"], &[]);
+        let unread = Thumbnails::default();
+        assert!(sheets_of(&shapes_of(&ctx, &view, 1.0, &FileIcons::default(), &unread)).is_empty(), "nothing while the peek is not read");
+        assert_eq!(unread.asked(), vec![crate::fs::thumbs::Job::Peek(PathBuf::from("/x/test"), None); 2], "and it is asked for");
+    }
+
+    #[test]
+    fn a_folder_peeking_a_file_draws_one_sheet_with_its_type_icon() {
+        use crate::fs::thumbs::Peek;
+        let ctx = egui::Context::default();
+        let (view, thumbs) = peeking(Peek::File(PathBuf::from("/x/test/data.json"), None));
+        let painted = shapes_of(&ctx, &view, 1.0, &FileIcons::default(), &thumbs);
+        assert_eq!(sheets_of(&painted).len(), 1, "one sheet");
+
+        let mut file_icons = FileIcons::default();
+        let json = texture(&ctx, "json");
+        file_icons.insert(&entry("data.json", false), json.clone());
+        let shown = shapes_of(&ctx, &view, 1.0, &file_icons, &thumbs);
+        assert_eq!(sheets_of(&shown).len(), 1);
+        let marks = meshes_of(&shown, json.id());
+        assert_eq!(marks.len(), 1, "the file's type icon from the theme sits on the sheet");
+        assert!(first_card(1.0).contains_rect(marks[0]));
+        assert!(sheets_of(&shown)[0].contains_rect(marks[0].shrink(0.5)), "on the sheet: {marks:?} on {:?}", sheets_of(&shown));
+    }
+
+    #[test]
+    fn a_picture_that_cannot_be_decoded_falls_back_to_the_sheet() {
+        use crate::fs::thumbs::Peek;
+        let ctx = egui::Context::default();
+        let (view, mut thumbs) = peeking(Peek::File(PathBuf::from("/x/test/broken.png"), None));
+        thumbs = thumbs.without_picture(std::path::Path::new("/x/test/broken.png"));
+        assert_eq!(sheets_of(&shapes_of(&ctx, &view, 1.0, &FileIcons::default(), &thumbs)).len(), 1);
+        assert!(thumbs.asked().is_empty(), "not asked again");
+    }
+
+    #[test]
+    fn in_the_icons_grid_a_folder_never_draws_the_themes_folder_icon_but_files_keep_theirs() {
+        use crate::fs::thumbs::Peek;
+        let ctx = egui::Context::default();
+        let view = listed(&["test"], &["notes.txt"]);
+        let mut file_icons = FileIcons::default();
+        let (folder_icon, text_icon) = (texture(&ctx, "folder"), texture(&ctx, "text"));
+        file_icons.insert(view.entry(0), folder_icon.clone());
+        file_icons.insert(view.entry(1), text_icon.clone());
+        for peek in [Peek::Empty, Peek::OnlyFolders, Peek::File(PathBuf::from("/x/test/a.md"), None)] {
+            let thumbs = Thumbnails::default().with_peek(std::path::Path::new("/x/test"), peek.clone());
+            let shapes = shapes_of(&ctx, &view, 0.0, &file_icons, &thumbs);
+            assert!(meshes_of(&shapes, folder_icon.id()).is_empty(), "{peek:?}: drawn by Lumen");
+            assert_eq!(meshes_of(&shapes, text_icon.id()).len(), 1, "{peek:?}: the file keeps its icon");
+        }
+        let unread = shapes_of(&ctx, &view, 0.0, &file_icons, &Thumbnails::default());
+        assert!(meshes_of(&unread, folder_icon.id()).is_empty(), "also while the peek is not read");
     }
 }
