@@ -84,6 +84,29 @@ pub fn chevron(ui: &mut egui::Ui, side: f32, open: bool) -> egui::Response {
     response
 }
 
+/// Corner rounding of the lock's body; tests find the lock by it.
+pub const LOCK_ROUNDING: u8 = 2;
+
+/// A padlock filling `rect`: a body below and a shackle arching over it.
+/// Drawn, so it needs no glyph.
+pub fn paint_lock(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let side = rect.width().min(rect.height());
+    let c = rect.center();
+    let body = Rect::from_center_size(c + vec2(0.0, side * 0.15), vec2(side * 0.62, side * 0.45));
+    painter.rect_filled(body, LOCK_ROUNDING, color);
+    let (r, top) = (side * 0.2, body.top());
+    let arch: Vec<Pos2> = (0..=12)
+        .map(|i| {
+            let a = std::f32::consts::PI * i as f32 / 12.0;
+            pos2(c.x - r * a.cos(), top - side * 0.08 - r * a.sin())
+        })
+        .collect();
+    let mut shackle = vec![pos2(c.x - r, top)];
+    shackle.extend(arch);
+    shackle.push(pos2(c.x + r, top));
+    painter.add(Shape::line(shackle, Stroke::new((side * 0.1).max(1.0), color)));
+}
+
 /// A folder icon, for rows that are not entries (the side panel).
 pub fn folder(ui: &mut egui::Ui) -> egui::Response {
     let side = ui.text_style_height(&egui::TextStyle::Body);
