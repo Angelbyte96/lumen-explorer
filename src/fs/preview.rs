@@ -78,7 +78,7 @@ pub fn load(path: &Path) -> Content {
     }
 }
 
-fn is_image(path: &Path) -> bool {
+pub(crate) fn is_image(path: &Path) -> bool {
     has_extension(path, &["png", "jpg", "jpeg"])
 }
 
@@ -168,11 +168,20 @@ fn run_for(mut command: std::process::Command, timeout: std::time::Duration) -> 
 }
 
 fn decode_image(path: &Path) -> Result<Picture, image::ImageError> {
+    decode_fit(path, IMAGE_MAX_SIDE)
+}
+
+/// The image at `path`, scaled down so its longest side fits `side`.
+pub(crate) fn decode_fit(path: &Path, side: u32) -> Result<Picture, image::ImageError> {
     // The format comes from the bytes, so a PNG named .jpg still works.
-    decode_reader(image::ImageReader::open(path)?)
+    decode_reader_fit(image::ImageReader::open(path)?, side)
 }
 
 fn decode_reader<R: std::io::BufRead + std::io::Seek>(reader: image::ImageReader<R>) -> Result<Picture, image::ImageError> {
+    decode_reader_fit(reader, IMAGE_MAX_SIDE)
+}
+
+fn decode_reader_fit<R: std::io::BufRead + std::io::Seek>(reader: image::ImageReader<R>, side: u32) -> Result<Picture, image::ImageError> {
     // The size in the header is checked against the limit before any pixel is read.
     let mut reader = reader.with_guessed_format()?;
     let mut limits = image::Limits::default();
@@ -180,8 +189,8 @@ fn decode_reader<R: std::io::BufRead + std::io::Seek>(reader: image::ImageReader
     reader.limits(limits);
     let mut image = reader.decode()?;
     let original = [image.width(), image.height()];
-    if original.iter().any(|&side| side > IMAGE_MAX_SIDE) {
-        image = image.thumbnail(IMAGE_MAX_SIDE, IMAGE_MAX_SIDE);
+    if original.iter().any(|&length| length > side) {
+        image = image.thumbnail(side, side);
     }
     let rgba = image.into_rgba8();
     Ok(Picture {
