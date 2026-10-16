@@ -2699,6 +2699,9 @@ impl eframe::App for LumenApp {
             self.answer_dialog(&ctx, answer);
         }
 
+        // After every target: the label by the pointer while entries are dragged.
+        ui::dnd::finish(&ctx);
+
         if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
             self.window = Some([rect.width(), rect.height()]);
         }

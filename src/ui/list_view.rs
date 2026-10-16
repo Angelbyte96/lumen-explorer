@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use eframe::egui::{self, Rect, vec2};
 
 use crate::app::{Scroll, View};
+use crate::ui::dnd;
 use crate::ui::file_icons::FileIcons;
 use crate::ui::file_list::{self, ListEvent, RenameEdit};
 use crate::ui::grid::GridShape;
@@ -61,7 +62,10 @@ pub fn show(
             for i in shape.line(column) {
                 let entry = view.entry(view.rows[i]);
                 let rect = place(i);
-                let response = ui.interact(rect, egui::Id::new(("lumen_list_cell", i)), egui::Sense::click());
+                let response = ui.interact(rect, egui::Id::new(("lumen_list_cell", i)), egui::Sense::click_and_drag());
+                if !edit.as_deref().is_some_and(|e| e.path == entry.path) {
+                    dnd::start(&response, || dnd::carry(view, i));
+                }
                 paint_cell(ui, view, i, rect, &response);
                 let inner = rect.shrink2(vec2(6.0, 0.0));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
@@ -120,7 +124,10 @@ mod tests {
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 300.0));
         let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
         let mut out = None;
-        let mut output = ctx.run_ui(input, |ui| out = Some(show(ui, view, &[], None, None, &FileIcons::default())));
+        let mut output = ctx.run_ui(input, |ui| {
+            out = Some(show(ui, view, &[], None, None, &FileIcons::default()));
+            crate::ui::dnd::finish(ui.ctx());
+        });
         output.textures_delta.clear();
         let texts = output
             .shapes
@@ -200,6 +207,84 @@ mod tests {
         }
         draw(&ctx, &view, vec![button(to, false)]);
         assert!(matches!(last, Some(ListEvent::Cells { ref cells, cursor: Some(0) }) if cells == &[0, 1]), "a and b, cursor on a");
+    }
+
+    fn carried(ctx: &egui::Context) -> Option<Vec<PathBuf>> {
+        egui::DragAndDrop::payload::<crate::drag::Drag>(ctx).map(|drag| drag.paths.clone())
+    }
+
+    fn button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() }
+    }
+
+    /// Presses at `from` and drags to `to`, holding the button; what the last frame drew.
+    fn lift(ctx: &egui::Context, view: &View, from: egui::Pos2, to: egui::Pos2) -> (GridOut, Vec<(String, Rect)>) {
+        draw(ctx, view, vec![egui::Event::PointerMoved(from), button(from, true)]);
+        draw(ctx, view, vec![egui::Event::PointerMoved(from + (to - from) * 0.1)]);
+        draw(ctx, view, vec![egui::Event::PointerMoved(to)])
+    }
+
+    fn settled_texts(ctx: &egui::Context, view: &View) -> Vec<(String, Rect)> {
+        draw(ctx, view, vec![]);
+        draw(ctx, view, vec![]).1
+    }
+
+    #[test]
+    fn a_drag_from_a_cell_carries_the_entry_or_the_selection_it_is_in() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["test"], &["a.txt".into(), "b.txt".into(), "c.txt".into()]);
+        let texts = settled_texts(&ctx, &view);
+        let (a, c) = (find(&texts, "a.txt").center(), find(&texts, "c.txt").center());
+        let away = egui::pos2(700.0, 200.0);
+        let paths = |names: &[&str]| names.iter().map(|n| PathBuf::from("/x").join(n)).collect::<Vec<_>>();
+
+        lift(&ctx, &view, a, away);
+        assert_eq!(carried(&ctx), Some(paths(&["a.txt"])), "nothing selected: the cell under the pointer");
+        let (_, texts) = draw(&ctx, &view, vec![button(away, false)]);
+        assert_eq!(carried(&ctx), None, "let go: nothing is carried any more");
+        assert!(!texts.iter().any(|(t, _)| t.contains("item")), "and no label: {texts:?}");
+
+        view.select_row(3);
+        view.toggle_pick(1);
+        lift(&ctx, &view, c, away);
+        assert_eq!(carried(&ctx), Some(paths(&["a.txt", "c.txt"])), "picked: the selection in display order");
+        draw(&ctx, &view, vec![button(away, false)]);
+
+        view.select_row(2);
+        lift(&ctx, &view, a, away);
+        assert_eq!(carried(&ctx), Some(paths(&["a.txt"])), "not in the selection: alone");
+    }
+
+    #[test]
+    fn a_label_by_the_pointer_counts_what_is_carried() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["test"], &["a.txt".into(), "b.txt".into()]);
+        let texts = settled_texts(&ctx, &view);
+        let to = egui::pos2(700.0, 200.0);
+        let (_, one) = lift(&ctx, &view, find(&texts, "a.txt").center(), to);
+        let label = find(&one, "1 item");
+        assert!(label.min.x > to.x && label.min.x < to.x + 40.0 && label.min.y > to.y && label.min.y < to.y + 40.0, "by the pointer: {label:?}");
+        draw(&ctx, &view, vec![button(to, false)]);
+        view.select_row(1);
+        view.extend_to(2);
+        let (_, two) = lift(&ctx, &view, find(&texts, "a.txt").center(), to);
+        find(&two, "2 items");
+    }
+
+    #[test]
+    fn a_click_or_a_band_from_the_empty_column_carries_nothing_and_still_works() {
+        let ctx = egui::Context::default();
+        let view = listed(&[], &["a.txt".into(), "b.txt".into(), "c.txt".into()]);
+        let texts = settled_texts(&ctx, &view);
+        let (a, b) = (find(&texts, "a.txt"), find(&texts, "b.txt"));
+        let click = |pos| vec![egui::Event::PointerMoved(pos), button(pos, true), button(pos, false)];
+        let (out, _) = draw(&ctx, &view, click(a.center()));
+        assert!(matches!(out.event, Some(ListEvent::Select(0))), "a click on a cell selects it");
+        assert_eq!(carried(&ctx), None);
+        draw(&ctx, &view, vec![]);
+        let (out, _) = lift(&ctx, &view, egui::pos2(700.0, b.center().y), a.center());
+        assert!(matches!(out.event, Some(ListEvent::Cells { ref cells, .. }) if cells == &[0, 1]), "a band from the empty column still picks");
+        assert_eq!(carried(&ctx), None, "and carries nothing");
     }
 
     #[test]

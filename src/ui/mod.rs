@@ -1,5 +1,6 @@
 pub mod confirm;
 pub mod context_menu;
+pub mod dnd;
 pub mod file_icons;
 pub mod file_list;
 pub mod grid;
