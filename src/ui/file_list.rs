@@ -204,6 +204,7 @@ pub fn show(
             })
             .body(|mut body| {
                 band_scroll(body.ui_mut());
+                let clip = body.ui_mut().clip_rect();
                 body.rows(row_height, rows.len(), |mut row| {
                     let i = row.index();
                     let entry = view.entry(rows[i]);
@@ -212,55 +213,65 @@ pub fn show(
                     let mut chevron = None;
                     row.set_selected(view.is_highlighted(i));
                     let mut row_rect = egui::Rect::NOTHING;
+                    // Behind the row's content: where a folder taking a drop is lit.
+                    let mut lit_slot = None;
                     let counts = count_cells(entry, totals.get(&entry.path));
                     for &column in &shown {
-                        let (cell, _) = row.col(|ui| match column {
-                            0 => {
-                                // Icon and name on one line as tall as the row, centred in it:
-                                // a plain `horizontal` is one text line tall, so a taller icon
-                                // would hang below the row and be clipped (and the name with it).
-                                let line = egui::vec2(ui.available_width(), row_height);
-                                ui.allocate_ui_with_layout(line, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                    // Cut and not pasted yet: faded, like other explorers.
-                                    if cut.contains(&entry.path) {
-                                        ui.set_opacity(CUT_OPACITY);
-                                    }
-                                    if sizes.tree {
-                                        // A step per level; files keep the chevron's room so names line up.
-                                        ui.add_space(view.depth(i) as f32 * (icon + ui.spacing().item_spacing.x));
-                                        if entry.is_dir {
-                                            let response = icons::chevron(ui, icon, view.is_open(i));
-                                            chevron = Some(response.rect);
+                        let (cell, _) = row.col(|ui| {
+                            lit_slot.get_or_insert_with(|| ui.painter().add(egui::Shape::Noop));
+                            match column {
+                                0 => {
+                                    // Icon and name on one line as tall as the row, centred in it:
+                                    // a plain `horizontal` is one text line tall, so a taller icon
+                                    // would hang below the row and be clipped (and the name with it).
+                                    let line = egui::vec2(ui.available_width(), row_height);
+                                    ui.allocate_ui_with_layout(line, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                        // Cut and not pasted yet: faded, like other explorers.
+                                        if cut.contains(&entry.path) {
+                                            ui.set_opacity(CUT_OPACITY);
+                                        }
+                                        if sizes.tree {
+                                            // A step per level; files keep the chevron's room so names line up.
+                                            ui.add_space(view.depth(i) as f32 * (icon + ui.spacing().item_spacing.x));
+                                            if entry.is_dir {
+                                                let response = icons::chevron(ui, icon, view.is_open(i));
+                                                chevron = Some(response.rect);
+                                            } else {
+                                                ui.allocate_space(egui::vec2(icon, icon));
+                                            }
+                                        }
+                                        icons::show(ui, entry, icon, file_icons.texture(entry));
+                                        if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
+                                            if let Some(submit) = rename_field(ui, edit) {
+                                                event = Some(ListEvent::RenameEnded(submit));
+                                            }
                                         } else {
-                                            ui.allocate_space(egui::vec2(icon, icon));
+                                            name_label(ui, entry, view.filter());
                                         }
-                                    }
-                                    icons::show(ui, entry, icon, file_icons.texture(entry));
-                                    if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
-                                        if let Some(submit) = rename_field(ui, edit) {
-                                            event = Some(ListEvent::RenameEnded(submit));
-                                        }
-                                    } else {
-                                        name_label(ui, entry, view.filter());
-                                    }
-                                    // The icon and the name: kept for dragging the entry itself.
-                                    on_name = ui.input(|i| i.pointer.press_origin()).is_some_and(|p| ui.min_rect().contains(p));
-                                });
+                                        // The icon and the name: kept for dragging the entry itself.
+                                        on_name = ui.input(|i| i.pointer.press_origin()).is_some_and(|p| ui.min_rect().contains(p));
+                                    });
+                                }
+                                1 => {
+                                    ui.add(egui::Label::new(entry.kind()).selectable(false).truncate());
+                                }
+                                2 => {
+                                    let date = entry.modified.map(format_time).unwrap_or_default();
+                                    ui.add(egui::Label::new(date).selectable(false));
+                                }
+                                _ => count_cell(ui, column - 3, &counts[column - 3]),
                             }
-                            1 => {
-                                ui.add(egui::Label::new(entry.kind()).selectable(false).truncate());
-                            }
-                            2 => {
-                                let date = entry.modified.map(format_time).unwrap_or_default();
-                                ui.add(egui::Label::new(date).selectable(false));
-                            }
-                            _ => count_cell(ui, column - 3, &counts[column - 3]),
                         });
                         // Where the row is this frame: `row.response()` holds the last frame's place.
                         first_drawn.get_or_insert((i, cell.top()));
                         row_rect = row_rect.union(cell);
                     }
                     let response = row.response();
+                    let over = crate::ui::dnd::over(&response.ctx, clip, row_rect, entry.is_dir.then_some(entry.path.as_path()));
+                    if let (true, Some(slot)) = (over.lit, lit_slot) {
+                        let painter = egui::Painter::new(response.ctx.clone(), response.layer_id, row_rect);
+                        painter.set(slot, crate::ui::dnd::lit_shape(&response.ctx, row_rect));
+                    }
                     if pressed && response.is_pointer_button_down_on() && !on_name {
                         band_may_start = true;
                     }
@@ -302,6 +313,9 @@ pub fn show(
         }
         // Whatever space the rows leave below them.
         let rest = ui.available_rect_before_wrap();
+        if rest.height() > 0.0 {
+            crate::ui::dnd::background(ui, rest, &view.current);
+        }
         if event.is_none() && rest.height() > 0.0 {
             let response = ui.interact(rest, egui::Id::new("lumen_list_empty"), egui::Sense::CLICK);
             if pressed && response.is_pointer_button_down_on() {
@@ -357,6 +371,7 @@ pub(crate) fn band_speed(y: f32, view: egui::Rangef) -> f32 {
 /// While a band is dragged near or past the top or bottom of the rows on
 /// view, scrolls the table's `body` towards the pointer.
 fn band_scroll(body: &mut egui::Ui) {
+    crate::ui::dnd::edge_scroll(body, false);
     let (dragging, pointer, dt) = body.input(|i| (i.pointer.is_decidedly_dragging(), i.pointer.latest_pos(), i.stable_dt));
     let banding = body.ctx().data(|d| d.get_temp::<BandStart>(band_id())).is_some();
     let Some(pointer) = pointer.filter(|_| dragging && banding) else { return };
@@ -978,6 +993,8 @@ mod tests {
             vec![egui::Event::PointerMoved(from), button(from, true)],
             vec![egui::Event::PointerMoved(from + egui::vec2(0.0, 10.0 * (to.y - from.y).signum()))],
             vec![egui::Event::PointerMoved(to)],
+            // The label is laid out the frame it first shows.
+            vec![],
         ];
         let mut last = (None, Vec::new());
         for events in steps {
@@ -1060,7 +1077,8 @@ mod tests {
         let mut view = listed(&["a.txt", "b.txt", "c.txt"]);
         let rows: Vec<egui::Rect> = (0..3).map(|row| row_rect(&ctx, &mut view, row)).collect();
         let name = egui::pos2(rows[0].left() + 30.0, rows[0].center().y);
-        let to = egui::pos2(400.0, 500.0);
+        // Over a file row: it takes no drop, so the label only counts.
+        let to = egui::pos2(400.0, rows[2].center().y);
         let (_, shapes) = lift(&ctx, &view, name, to);
         assert!(texts_of(&shapes).iter().any(|t| t == "1 item"), "{:?}", texts_of(&shapes));
         let label = shapes
@@ -1084,6 +1102,150 @@ mod tests {
         let clicked = crate::ui::testing::frame(&ctx, press(at, egui::PointerButton::Primary), |ui| show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default()));
         assert!(matches!(clicked, Some(ListEvent::Select(1))));
         assert_eq!(carried(&ctx), None);
+    }
+
+    const SHIFT: egui::Modifiers = egui::Modifiers { shift: true, ..egui::Modifiers::NONE };
+
+    /// One frame of the list at `sizes`, holding `modifiers`, with the label drawn.
+    fn hold(ctx: &egui::Context, view: &View, sizes: Sizes, events: Vec<egui::Event>, modifiers: egui::Modifiers) -> Vec<egui::epaint::ClippedShape> {
+        // The keys held stay held until a frame says otherwise.
+        let events = std::iter::once(egui::Event::ModifiersChanged(modifiers)).chain(events).collect();
+        let mut output = ctx.run_ui(egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() }, |root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                show(ui, view, &[], sizes, None, None, &FileIcons::default());
+            });
+            crate::ui::dnd::finish(root.ctx());
+        });
+        output.textures_delta.clear();
+        output.shapes
+    }
+
+    /// Presses at `from` and moves a little, holding the button.
+    fn pick_up(ctx: &egui::Context, view: &View, sizes: Sizes, from: egui::Pos2) {
+        hold(ctx, view, sizes, vec![egui::Event::PointerMoved(from), button(from, true)], Default::default());
+        hold(ctx, view, sizes, vec![egui::Event::PointerMoved(from + egui::vec2(0.0, 10.0))], Default::default());
+    }
+
+    fn lit(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape], at: egui::Pos2) -> bool {
+        let fill = crate::ui::dnd::lit_fill(&ctx.global_style().visuals);
+        shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == fill && r.rect.contains(at)))
+    }
+
+    /// Lets go at `at` holding `modifiers`; the drop the list took.
+    fn release(ctx: &egui::Context, view: &View, sizes: Sizes, at: egui::Pos2, modifiers: egui::Modifiers) -> Option<(Vec<PathBuf>, PathBuf)> {
+        hold(ctx, view, sizes, vec![button(at, false)], modifiers);
+        crate::ui::dnd::take_drop(ctx).map(|d| (d.drag.paths, d.target))
+    }
+
+    fn folder_entry(name: &str) -> Entry {
+        Entry { is_dir: true, size: None, ..entry(name) }
+    }
+
+    #[test]
+    fn a_dragged_row_over_a_folder_row_lights_it_names_the_action_and_drops_on_it() {
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        view.entries = vec![folder_entry("dir"), entry("a.txt"), entry("b.txt")];
+        view.rows = vec![0, 1, 2];
+        let rows: Vec<egui::Rect> = (0..3).map(|row| row_rect(&ctx, &mut view, row)).collect();
+        let (name_a, dir, b) = (egui::pos2(rows[1].left() + 30.0, rows[1].center().y), egui::pos2(500.0, rows[0].center().y), egui::pos2(500.0, rows[2].center().y));
+        pick_up(&ctx, &view, Sizes::default(), name_a);
+        let shapes = hold(&ctx, &view, Sizes::default(), vec![egui::Event::PointerMoved(dir)], SHIFT);
+        assert!(lit(&ctx, &shapes, dir), "the folder row lights up");
+        assert!(!lit(&ctx, &shapes, name_a) && !lit(&ctx, &shapes, b), "and only it");
+        assert!(texts_of(&shapes).iter().any(|t| t == "Move 1 item to dir"), "{:?}", texts_of(&shapes));
+        let shapes = hold(&ctx, &view, Sizes::default(), vec![], Default::default());
+        assert!(texts_of(&shapes).iter().any(|t| t == "Copy 1 item to dir"), "{:?}", texts_of(&shapes));
+        assert_eq!(release(&ctx, &view, Sizes::default(), dir, SHIFT), Some((paths(&["a.txt"]), PathBuf::from("/x/dir"))));
+        assert!(crate::ui::dnd::take_drop(&ctx).is_none(), "taken once");
+        assert!(!lit(&ctx, &hold(&ctx, &view, Sizes::default(), vec![], Default::default()), dir), "dark again");
+
+        // A file row is no target.
+        pick_up(&ctx, &view, Sizes::default(), name_a);
+        let shapes = hold(&ctx, &view, Sizes::default(), vec![egui::Event::PointerMoved(b)], Default::default());
+        assert!(!lit(&ctx, &shapes, b));
+        assert!(texts_of(&shapes).iter().any(|t| t == "1 item"));
+        assert_eq!(release(&ctx, &view, Sizes::default(), b, Default::default()), None);
+    }
+
+    #[test]
+    fn a_folder_row_cannot_take_itself_and_a_folder_unfolded_in_the_tree_takes_a_drop() {
+        let ctx = egui::Context::default();
+        let view = tree_listed();
+        let tree = Sizes { tree: true, ..Sizes::default() };
+        settled_tree(&ctx, &view, true);
+        let shapes = settled_tree(&ctx, &view, true);
+        let (src, deep, a) = (text_rect(&shapes, "src").center(), text_rect(&shapes, "deep").center(), text_rect(&shapes, "a.txt").center());
+        // `src` onto `deep`, which is inside it: refused.
+        pick_up(&ctx, &view, tree, src);
+        let shapes = hold(&ctx, &view, tree, vec![egui::Event::PointerMoved(deep)], Default::default());
+        assert!(!lit(&ctx, &shapes, deep), "a folder is not dropped below itself");
+        assert!(texts_of(&shapes).iter().any(|t| t == "1 item"));
+        assert_eq!(release(&ctx, &view, tree, deep, Default::default()), None);
+        // `a.txt` onto `deep`.
+        pick_up(&ctx, &view, tree, a);
+        let shapes = hold(&ctx, &view, tree, vec![egui::Event::PointerMoved(deep)], Default::default());
+        assert!(lit(&ctx, &shapes, deep), "the unfolded folder lights up");
+        assert!(texts_of(&shapes).iter().any(|t| t == "Copy 1 item to deep"), "{:?}", texts_of(&shapes));
+        assert_eq!(release(&ctx, &view, tree, deep, Default::default()), Some((paths(&["a.txt"]), PathBuf::from("/x/src/deep"))));
+    }
+
+    #[test]
+    fn letting_go_below_the_rows_drops_into_the_folder_on_screen() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["a.txt", "b.txt"]);
+        view.current = PathBuf::from("/x");
+        let first = row_rect(&ctx, &mut view, 0);
+        let name = egui::pos2(first.left() + 30.0, first.center().y);
+        let below = egui::pos2(300.0, 500.0);
+        pick_up(&ctx, &view, Sizes::default(), name);
+        let shapes = hold(&ctx, &view, Sizes::default(), vec![egui::Event::PointerMoved(below)], Default::default());
+        assert!(texts_of(&shapes).iter().any(|t| t == "Copy 1 item to x"), "{:?}", texts_of(&shapes));
+        let ring = ctx.global_style().visuals.selection.stroke;
+        let ringed = shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.stroke == ring && r.fill == egui::Color32::TRANSPARENT && r.rect.contains(below)));
+        assert!(ringed, "the space below the rows is ringed");
+        assert_eq!(release(&ctx, &view, Sizes::default(), below, Default::default()), Some((paths(&["a.txt"]), PathBuf::from("/x"))));
+        // Over a row it is not the empty space.
+        pick_up(&ctx, &view, Sizes::default(), name);
+        let over_b = egui::pos2(500.0, row_rect(&ctx, &mut view, 1).center().y);
+        let shapes = hold(&ctx, &view, Sizes::default(), vec![egui::Event::PointerMoved(over_b)], Default::default());
+        assert!(texts_of(&shapes).iter().any(|t| t == "1 item"));
+        assert_eq!(release(&ctx, &view, Sizes::default(), over_b, Default::default()), None);
+    }
+
+    #[test]
+    fn held_near_the_top_or_bottom_edge_a_carried_drag_scrolls_the_rows() {
+        use crate::ui::testing::SCREEN;
+        let ctx = egui::Context::default();
+        let names: Vec<String> = (0..300).map(|i| format!("f{i}")).collect();
+        let mut view = listed(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let first = row_rect(&ctx, &mut view, 0);
+        let top_of = |shapes: &[egui::epaint::ClippedShape]| text_rect(shapes, "f10").top();
+        let sizes = Sizes::default();
+        let before = top_of(&hold(&ctx, &view, sizes, vec![], Default::default()));
+        pick_up(&ctx, &view, sizes, egui::pos2(first.left() + 30.0, first.center().y));
+        let middle = egui::pos2(500.0, SCREEN.center().y);
+        hold(&ctx, &view, sizes, vec![egui::Event::PointerMoved(middle)], Default::default());
+        for _ in 0..5 {
+            hold(&ctx, &view, sizes, vec![], Default::default());
+        }
+        assert_eq!(top_of(&hold(&ctx, &view, sizes, vec![], Default::default())), before, "held in the middle: no scroll");
+
+        let near = egui::pos2(500.0, SCREEN.bottom() - 12.0);
+        hold(&ctx, &view, sizes, vec![egui::Event::PointerMoved(near)], Default::default());
+        let tops: Vec<f32> = (0..5).map(|_| top_of(&hold(&ctx, &view, sizes, vec![], Default::default()))).collect();
+        assert!(tops.windows(2).all(|w| w[1] < w[0]) && tops[4] < before - 20.0, "the rows come up while held: {tops:?}");
+        let_go(&ctx, &view, near);
+
+        // Without a drag the pointer there does nothing (once the last scrolls have landed).
+        for _ in 0..3 {
+            hold(&ctx, &view, sizes, vec![], Default::default());
+        }
+        let settled_top = top_of(&hold(&ctx, &view, sizes, vec![], Default::default()));
+        for _ in 0..5 {
+            hold(&ctx, &view, sizes, vec![egui::Event::PointerMoved(near)], Default::default());
+        }
+        assert_eq!(top_of(&hold(&ctx, &view, sizes, vec![], Default::default())), settled_top, "no drag, no scroll");
     }
 
     #[test]
