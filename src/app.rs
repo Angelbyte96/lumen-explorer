@@ -1038,6 +1038,8 @@ pub struct LumenApp {
     path_popup: PathPopup,
     /// Files' own icons (an .exe's), loaded off the UI thread.
     file_icons: crate::ui::file_icons::FileIcons,
+    /// Image files' pictures for the Icons views, read off the UI thread.
+    thumbnails: crate::ui::thumbnails::Thumbnails,
     /// The right-click menu, while open.
     context_menu: Option<ContextMenu>,
     /// The open menu is a row's (not the folder's): its commands act on the selection.
@@ -1139,6 +1141,7 @@ impl LumenApp {
             window: None,
             path_popup: PathPopup::default(),
             file_icons: Default::default(),
+            thumbnails: Default::default(),
             context_menu: None,
             context_on_entry: false,
             #[cfg(windows)]
@@ -2528,7 +2531,7 @@ impl eframe::App for LumenApp {
             }
             let sizes = ui::file_list::Sizes { widths: self.columns, shown: self.shown_columns, order: self.column_order, tree };
             let lined = match (self.tab.view_size.layout(), self.tab.view_size.growth()) {
-                (_, Some(growth)) => Some(ui::icon_grid::show(ui, &self.tab.view, &cut, growth, scroll, self.rename.as_mut(), &self.file_icons)),
+                (_, Some(growth)) => Some(ui::icon_grid::show(ui, &self.tab.view, &cut, growth, scroll, self.rename.as_mut(), ui::icon_grid::Art { file_icons: &self.file_icons, thumbs: &self.thumbnails })),
                 (ui::view_size::Layout::List, _) => Some(ui::list_view::show(ui, &self.tab.view, &cut, scroll, self.rename.as_mut(), &self.file_icons)),
                 _ => None,
             };
@@ -2539,6 +2542,7 @@ impl eframe::App for LumenApp {
             };
             // After drawing: the icons the list just asked for go out this frame.
             self.file_icons.poll(&ctx);
+            self.thumbnails.poll(&ctx);
             match event {
                 Some(ListEvent::Select(i)) => self.tab.view.select_row(i),
                 Some(ListEvent::Toggle(i)) => self.tab.view.toggle_pick(i),

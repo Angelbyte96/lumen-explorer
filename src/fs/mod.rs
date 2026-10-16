@@ -9,6 +9,7 @@ pub mod preview;
 pub mod search;
 #[cfg(windows)]
 pub mod pdf;
+pub mod thumbs;
 pub mod transfer;
 pub mod watch;
 

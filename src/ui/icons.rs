@@ -4,6 +4,7 @@
 use eframe::egui::{self, Color32, Pos2, Rect, Shape, Stroke, pos2, vec2};
 
 use crate::fs::Entry;
+use crate::ui::thumbnails::Held;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconKind {
@@ -68,6 +69,76 @@ pub fn show(ui: &mut egui::Ui, entry: &Entry, side: f32, own: Option<egui::Textu
         }
     }
     response
+}
+
+/// A picture `size` pixels big in a square `side` points wide: fitted with
+/// its shape, never bigger than its own pixels.
+pub fn picture(ui: &mut egui::Ui, side: f32, texture: egui::TextureId, size: egui::Vec2) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
+    if ui.is_rect_visible(rect) && size.x > 0.0 && size.y > 0.0 {
+        paint_picture(ui.painter(), fitted(rect, size / ui.ctx().pixels_per_point()), texture);
+    }
+    response
+}
+
+/// `own` (a picture's size in points) scaled to fit `area`, centred, never
+/// bigger than itself.
+fn fitted(area: Rect, own: egui::Vec2) -> Rect {
+    let scale = (area.width() / own.x).min(area.height() / own.y).min(1.0);
+    Rect::from_center_size(area.center(), own * scale)
+}
+
+fn paint_picture(painter: &egui::Painter, rect: Rect, texture: egui::TextureId) {
+    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    painter.image(texture, rect, uv, Color32::WHITE);
+}
+
+/// A folder drawn by Lumen in a square `side` points wide, for the Icons
+/// views: its back, what it holds sticking out of it, then its front. `own`
+/// is the theme's icon for the file it holds, if loaded.
+pub fn folder_with(ui: &mut egui::Ui, side: f32, held: &Held, own: Option<egui::TextureId>) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        paint_held_folder(ui.painter(), rect.shrink(side * 0.08), held, own, ui.ctx().pixels_per_point());
+    }
+    response
+}
+
+fn paint_held_folder(painter: &egui::Painter, rect: Rect, held: &Held, own: Option<egui::TextureId>, pixels_per_point: f32) {
+    let (w, h) = (rect.width(), rect.height());
+    let at = |x: f32, y: f32| pos2(rect.left() + w * x, rect.top() + h * y);
+    let back_top = 0.22;
+    painter.rect_filled(Rect::from_min_max(at(0.0, back_top - 0.07), at(0.4, back_top + 0.05)), 1.5, FOLDER_TAB);
+    painter.rect_filled(Rect::from_min_max(at(0.0, back_top), at(1.0, 1.0)), 1.5, FOLDER_TAB);
+    let sheet = Rect::from_min_max(at(0.05, 0.0), at(0.95, 0.74));
+    match held {
+        Held::Nothing => {}
+        Held::Folders => {
+            // Three blank sheets, the back ones lower and to the sides.
+            for (dx, dy) in [(-0.08, 0.06), (0.08, 0.03), (0.0, 0.0)] {
+                page(painter, sheet.translate(vec2(w * dx, h * dy)).shrink2(vec2(0.0, h * 0.06)));
+            }
+        }
+        Held::Picture(texture, size) => {
+            // Standing in the folder: its bottom edge rests where the front starts.
+            let area = Rect::from_min_max(at(0.1, 0.0), at(0.9, 0.66));
+            let shown = fitted(area, *size / pixels_per_point);
+            paint_picture(painter, shown.translate(vec2(0.0, area.bottom() - shown.bottom())), *texture);
+        }
+        Held::File(file) => {
+            page(painter, sheet);
+            match own {
+                Some(texture) => {
+                    let side = sheet.width() * 0.78 * 0.6;
+                    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                    let icon = Rect::from_center_size(pos2(sheet.center().x, sheet.top() + sheet.height() * 0.5), vec2(side, side));
+                    painter.image(texture, icon, uv, Color32::WHITE);
+                }
+                None => marker(painter, sheet, kind_of(file)),
+            }
+        }
+    }
+    painter.rect_filled(Rect::from_min_max(at(0.0, 0.62), at(1.0, 1.0)), 2.0, FOLDER);
 }
 
 /// The Tree view's chevron in a square `side` points wide: `>` for a folded
@@ -275,7 +346,7 @@ pub fn menu_icon(painter: &egui::Painter, rect: Rect, icon: crate::menu::MenuIco
 
 const FOLDER: Color32 = Color32::from_rgb(0xF2, 0xC1, 0x4E);
 const FOLDER_TAB: Color32 = Color32::from_rgb(0xD9, 0xA2, 0x2E);
-const PAGE: Color32 = Color32::from_rgb(0xE8, 0xEA, 0xED);
+pub(crate) const PAGE: Color32 = Color32::from_rgb(0xE8, 0xEA, 0xED);
 const FOLD: Color32 = Color32::from_rgb(0xB8, 0xBC, 0xC2);
 
 pub fn paint(painter: &egui::Painter, rect: Rect, kind: IconKind) {
@@ -285,6 +356,11 @@ pub fn paint(painter: &egui::Painter, rect: Rect, kind: IconKind) {
         return;
     }
     page(painter, rect);
+    marker(painter, rect, kind);
+}
+
+/// The type's mark on a page whose rect is `rect` (nothing for a plain file).
+fn marker(painter: &egui::Painter, rect: Rect, kind: IconKind) {
     let accent = match kind {
         IconKind::Image => Color32::from_rgb(0x3D, 0x9B, 0xE9),
         IconKind::Pdf => Color32::from_rgb(0xE0, 0x3E, 0x36),
