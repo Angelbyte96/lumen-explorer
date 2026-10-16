@@ -1765,6 +1765,15 @@ impl LumenApp {
         self.clipboard = Some(Clip { paths, mode });
     }
 
+    /// Copies or moves `paths` into `dest` as a paste does (the same
+    /// questions, progress and cancel), leaving the clipboard alone.
+    fn drop_into(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, dest: PathBuf, mode: Mode) {
+        if self.busy() {
+            return;
+        }
+        self.start_batch(ctx, paths, dest, mode);
+    }
+
     fn paste(&mut self, ctx: &egui::Context) {
         self.paste_into(ctx, self.tab.view.current.clone());
     }
@@ -1772,14 +1781,27 @@ impl LumenApp {
     /// Pastes the clipboard into `dest`: the folder on screen, or a folder's
     /// own Paste in the Windows menu.
     fn paste_into(&mut self, ctx: &egui::Context, dest: PathBuf) {
-        if self.job.is_some() || self.batch.is_some() {
-            self.tab.view.error = Some("Another operation is still running".into());
+        if self.busy() {
             return;
         }
         let Some(Clip { paths, mode }) = self.clipboard.clone() else {
             self.notice = Some("Nothing to paste: Ctrl+C or Ctrl+X first".into());
             return;
         };
+        self.start_batch(ctx, paths, dest, mode);
+    }
+
+    /// A copy or move is already running: says so.
+    fn busy(&mut self) -> bool {
+        let busy = self.job.is_some() || self.batch.is_some();
+        if busy {
+            self.tab.view.error = Some("Another operation is still running".into());
+        }
+        busy
+    }
+
+    /// Copies or moves `paths` into `dest`, one entry at a time.
+    fn start_batch(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, dest: PathBuf, mode: Mode) {
         self.notice = None;
         self.tab.view.error = None;
         let total = paths.len();
@@ -3562,6 +3584,47 @@ mod tests {
         wait_paste(&ctx, &mut app);
         assert_eq!(names_in(&dir.join("sub")), ["a.txt"]);
         assert_eq!(names_in(&dir), ["a.txt", "b.txt", "sub"], "no copy here");
+    }
+
+    #[test]
+    fn a_drop_moves_into_the_folder_and_leaves_the_clipboard_alone() {
+        let (ctx, mut app, dir) = app_in("app-drop-move");
+        pick(&mut app, &["b.txt"]);
+        app.handle_action(&ctx, Action::Copy);
+        app.drop_into(&ctx, vec![dir.join("a.txt")], dir.join("sub"), Mode::Move);
+        wait_paste(&ctx, &mut app);
+        assert_eq!(names_in(&dir.join("sub")), ["a.txt"]);
+        assert_eq!(names_in(&dir), ["b.txt", "sub"]);
+        assert_eq!(app.clipboard.as_ref().map(|c| (c.paths.clone(), c.mode)), Some((vec![dir.join("b.txt")], Mode::Copy)));
+        assert!(app.tab.view.error.is_none());
+    }
+
+    #[test]
+    fn a_drop_with_a_taken_name_asks_like_a_paste() {
+        let (ctx, mut app, dir) = app_in("app-drop-taken");
+        std::fs::write(dir.join("sub").join("a.txt"), "old").unwrap();
+        app.drop_into(&ctx, vec![dir.join("a.txt")], dir.join("sub"), Mode::Copy);
+        wait_paste(&ctx, &mut app);
+        assert!(matches!(&app.dialog, Some(Dialog::Paste { mode: Mode::Copy, .. })), "the replace question");
+        assert_eq!(std::fs::read_to_string(dir.join("sub").join("a.txt")).unwrap(), "old", "nothing replaced yet");
+    }
+
+    #[test]
+    fn a_drop_while_a_paste_runs_is_refused() {
+        let (ctx, mut app, dir) = app_in("app-drop-busy");
+        app.batch = Some(Batch {
+            mode: Mode::Copy,
+            dest: dir.join("sub"),
+            sources: Vec::new(),
+            parked: None,
+            queue: VecDeque::new(),
+            total: 0,
+            landed: None,
+            in_place: Vec::new(),
+        });
+        app.drop_into(&ctx, vec![dir.join("a.txt")], dir.join("sub"), Mode::Move);
+        assert_eq!(app.tab.view.error.as_deref(), Some("Another operation is still running"));
+        assert_eq!(names_in(&dir), ["a.txt", "b.txt", "sub"]);
     }
 
     #[test]
