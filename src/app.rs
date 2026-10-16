@@ -1960,13 +1960,12 @@ impl LumenApp {
 
     /// Titles of every tab, in bar order.
     fn tab_labels(&self) -> Vec<String> {
-        self.tabs
-            .iter()
-            .map(|slot| {
-                let tab = slot.as_ref().unwrap_or(&self.tab);
-                ui::tabs::tab_label(&tab.view.current)
-            })
-            .collect()
+        self.tab_folders().iter().map(|folder| ui::tabs::tab_label(folder)).collect()
+    }
+
+    /// The folder each tab shows (the active tab's is in `self.tab`).
+    fn tab_folders(&self) -> Vec<PathBuf> {
+        self.tabs.iter().map(|slot| slot.as_ref().unwrap_or(&self.tab).view.current.clone()).collect()
     }
 
     /// Ctrl+T or +: opens the current folder in a new tab after this one.
@@ -2469,6 +2468,7 @@ impl eframe::App for LumenApp {
                 Some(TabEvent::New) => self.new_tab(&ctx),
                 None => {}
             }
+            ui::tabs::drop_targets(ui, &self.tab_folders());
         });
 
         egui::Panel::top("toolbar").show(ui, |ui| {

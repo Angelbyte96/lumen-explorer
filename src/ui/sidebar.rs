@@ -86,7 +86,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
                 ui.weak("Ctrl+D or ☆ adds the folder you are in");
             }
             for path in sidebar.bookmarks {
-                let response = item(ui, ItemIcon::Folder, "folder", &label_of(path), &path.display().to_string(), path, sidebar.current, sidebar.icons);
+                let response = drop_target(ui, Some(path), |ui| item(ui, ItemIcon::Folder, "folder", &label_of(path), &path.display().to_string(), path, sidebar.current, sidebar.icons));
                 rows.push(Row { rect: response.rect, kind: RowKind::Item(path.clone()) });
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(path.clone()));
@@ -104,7 +104,9 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
         let title = section(ui, "Places", true, |ui| {
             for place in sidebar.places {
                 let icon = if place.trash { ItemIcon::Glyph(TRASH) } else { ItemIcon::Folder };
-                let response = item(ui, icon, place.icon, &place.label, &place.path.display().to_string(), &place.path, sidebar.current, sidebar.icons);
+                // Not the trash: a drop there would skip its bookkeeping (what it held, and where from).
+                let folder = (!place.trash).then_some(&place.path);
+                let response = drop_target(ui, folder, |ui| item(ui, icon, place.icon, &place.label, &place.path.display().to_string(), &place.path, sidebar.current, sidebar.icons));
                 rows.push(Row { rect: response.rect, kind: RowKind::Item(place.path.clone()) });
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(place.path.clone()));
@@ -117,7 +119,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
             for (mount, usage) in sidebar.disks {
                 // The bar is only 4 px tall: the whole row tells the free space too.
                 let hint = disk_hint(&mount.path, usage.as_ref());
-                let response = item(ui, ItemIcon::Glyph(DISK), "drive-harddisk", &mount.label, &hint, &mount.path, sidebar.current, sidebar.icons);
+                let response = drop_target(ui, Some(&mount.path), |ui| item(ui, ItemIcon::Glyph(DISK), "drive-harddisk", &mount.label, &hint, &mount.path, sidebar.current, sidebar.icons));
                 rows.push(Row { rect: response.rect, kind: RowKind::Item(mount.path.clone()) });
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(mount.path.clone()));
@@ -240,6 +242,20 @@ fn section(ui: &mut egui::Ui, title: &str, open: bool, body: impl FnOnce(&mut eg
     let open = state.is_open();
     state.show_body_indented(&header, ui, body);
     Row { rect, kind: RowKind::Title { id, open } }
+}
+
+/// Draws one item with `draw` and, while entries are dragged, lights it up
+/// behind its content when `folder` takes the drop (it is a folder that
+/// exists and the drag is accepted there). `None` is an item that takes none.
+fn drop_target(ui: &mut egui::Ui, folder: Option<&PathBuf>, draw: impl FnOnce(&mut egui::Ui) -> egui::Response) -> egui::Response {
+    let lit = ui.painter().add(egui::Shape::Noop);
+    let response = draw(ui);
+    if let Some(folder) = folder
+        && crate::ui::dnd::over_dir(ui.ctx(), ui.clip_rect(), response.rect, folder)
+    {
+        ui.painter().set(lit, crate::ui::dnd::lit_shape(ui.ctx(), response.rect));
+    }
+    response
 }
 
 enum ItemIcon {
@@ -670,5 +686,158 @@ mod tests {
         focused_panel(&ctx, &panel);
         assert_eq!(tap(&ctx, &panel, egui::Key::Escape).event, None);
         assert_eq!(ctx.memory(|m| m.focused()), None);
+    }
+
+    use crate::drag::Keys;
+    use crate::fs::ops::tests::fresh_fixture;
+    use crate::ui::testing::{label, let_go, lift, lit, run};
+
+    const NONE: egui::Modifiers = egui::Modifiers::NONE;
+    const CTRL: egui::Modifiers = egui::Modifiers { ctrl: true, command: true, ..egui::Modifiers::NONE };
+
+    /// A panel over real folders: a bookmark `bm`, the places `home` and
+    /// `trash` (the trash) and `gone` (no folder), the disks `disk` and
+    /// `unmounted` (no folder), and a recent `rec`; `f.txt` is beside them.
+    struct Drop {
+        dir: PathBuf,
+        bookmarks: [PathBuf; 1],
+        places: [Place; 3],
+        disks: [(Mount, Option<Usage>); 2],
+        recents: [PathBuf; 1],
+        icons: FileIcons,
+    }
+
+    fn drop_panel(name: &str) -> Drop {
+        let dir = fresh_fixture(name);
+        for sub in ["bm", "home", "trash", "disk", "rec"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::fs::write(dir.join("f.txt"), "f").unwrap();
+        let place = |label: &str, sub: &str, trash| Place { label: label.into(), path: dir.join(sub), trash, icon: "folder" };
+        let mount = |label: &str, sub: &str| (Mount { label: label.into(), path: dir.join(sub) }, None);
+        Drop {
+            bookmarks: [dir.join("bm")],
+            places: [place("Home", "home", false), place("Trash", "trash", true), place("Gone", "gone", false)],
+            disks: [mount("Disk", "disk"), mount("Unmounted", "unmounted")],
+            recents: [dir.join("rec")],
+            icons: FileIcons::default(),
+            dir,
+        }
+    }
+
+    /// The panel as the app draws it, with the label by the pointer.
+    fn side(panel: &Drop) -> impl FnMut(&mut egui::Ui) -> Option<SidebarEvent> + '_ {
+        move |ui| {
+            let sidebar = Sidebar { current: &panel.dir, bookmarks: &panel.bookmarks, places: &panel.places, disks: &panel.disks, recents: &panel.recents, icons: &panel.icons };
+            let event = show(ui, &sidebar);
+            crate::ui::dnd::finish(ui.ctx());
+            event
+        }
+    }
+
+    /// The middle of the row showing `text`, found where it was drawn.
+    fn row_of(ctx: &egui::Context, panel: &Drop, text: &str) -> egui::Pos2 {
+        run(ctx, vec![], side(panel));
+        let (_, shapes) = run(ctx, vec![], side(panel));
+        shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos + t.galley.size() / 2.0),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{text:?} is drawn"))
+    }
+
+    fn taken(ctx: &egui::Context) -> Option<(Vec<PathBuf>, PathBuf, Keys)> {
+        crate::ui::dnd::take_drop(ctx).map(|d| (d.drag.paths, d.target, d.keys))
+    }
+
+    #[test]
+    fn a_bookmark_a_place_and_a_disk_under_dragged_entries_light_up_name_the_action_and_take_the_drop() {
+        let panel = drop_panel("dnd-side-drop");
+        let ctx = egui::Context::default();
+        let file = panel.dir.join("f.txt");
+        for (text, sub) in [("bm", "bm"), ("Home", "home"), ("Disk", "disk")] {
+            let at = row_of(&ctx, &panel, text);
+            let shapes = lift(&ctx, std::slice::from_ref(&file), at, NONE, side(&panel));
+            let lit_rects = lit(&ctx, &shapes);
+            assert!(lit_rects.iter().any(|r| r.contains(at) && r.width() > 100.0), "{text}: its row lights up: {lit_rects:?}");
+            assert_eq!(lit_rects.len(), 1, "{text}: and only it");
+            assert_eq!(label(&shapes), Some(format!("Move 1 item to {sub}")), "{text}: same disk, a move");
+            let (event, _) = let_go(&ctx, at, NONE, side(&panel));
+            assert_eq!(event, None, "{text}: letting go does not open it");
+            assert_eq!(taken(&ctx), Some((vec![file.clone()], panel.dir.join(sub), Keys::default())), "{text}");
+            assert!(taken(&ctx).is_none(), "{text}: taken once");
+        }
+        // Ctrl copies.
+        let at = row_of(&ctx, &panel, "Home");
+        let shapes = lift(&ctx, std::slice::from_ref(&file), at, CTRL, side(&panel));
+        assert_eq!(label(&shapes).as_deref(), Some("Copy 1 item to home"));
+        let_go(&ctx, at, CTRL, side(&panel));
+        assert_eq!(taken(&ctx), Some((vec![file], panel.dir.join("home"), Keys { ctrl: true, shift: false })));
+        let _ = std::fs::remove_dir_all(&panel.dir);
+    }
+
+    #[test]
+    fn rows_that_are_no_folder_that_takes_it_stay_dark_and_take_nothing() {
+        let panel = drop_panel("dnd-side-refused");
+        let ctx = egui::Context::default();
+        let file = panel.dir.join("f.txt");
+        // Recents starts closed.
+        let header = row_of(&ctx, &panel, "Recents");
+        crate::ui::testing::click(&ctx, header, side(&panel));
+        for _ in 0..20 {
+            run(&ctx, vec![], side(&panel));
+        }
+        // The trash (a drop there would skip its bookkeeping), a place whose
+        // folder is gone, a disk that is not mounted, and Recents.
+        for text in ["Trash", "Gone", "Unmounted", "rec"] {
+            let at = row_of(&ctx, &panel, text);
+            let shapes = lift(&ctx, std::slice::from_ref(&file), at, NONE, side(&panel));
+            assert!(lit(&ctx, &shapes).is_empty(), "{text}: nothing lights up");
+            assert_eq!(label(&shapes).as_deref(), Some("1 item"), "{text}: no folder named");
+            let (event, _) = let_go(&ctx, at, NONE, side(&panel));
+            assert_eq!((event, taken(&ctx)), (None, None), "{text}: nothing dropped");
+        }
+        // The entry's own row, and a move into the folder it is in (the panel's rows
+        // are under the fixture folder, `f.txt` is in): refused; Ctrl copies there.
+        let at = row_of(&ctx, &panel, "bm");
+        let shapes = lift(&ctx, &[panel.dir.join("bm")], at, NONE, side(&panel));
+        assert!(lit(&ctx, &shapes).is_empty(), "a folder is not dropped on itself");
+        let_go(&ctx, at, NONE, side(&panel));
+        assert_eq!(taken(&ctx), None);
+        let inside = panel.dir.join("home/g.txt");
+        std::fs::write(&inside, "g").unwrap();
+        let at = row_of(&ctx, &panel, "Home");
+        let shapes = lift(&ctx, std::slice::from_ref(&inside), at, NONE, side(&panel));
+        assert!(lit(&ctx, &shapes).is_empty(), "a move where it already is");
+        let_go(&ctx, at, NONE, side(&panel));
+        assert_eq!(taken(&ctx), None);
+        let shapes = lift(&ctx, std::slice::from_ref(&inside), at, CTRL, side(&panel));
+        assert_eq!(label(&shapes).as_deref(), Some("Copy 1 item to home"));
+        let_go(&ctx, at, CTRL, side(&panel));
+        assert_eq!(taken(&ctx), Some((vec![inside], panel.dir.join("home"), Keys { ctrl: true, shift: false })));
+        let _ = std::fs::remove_dir_all(&panel.dir);
+    }
+
+    #[test]
+    fn without_a_drag_a_click_still_opens_the_item_and_a_right_click_its_menu_and_nothing_lights() {
+        let panel = drop_panel("dnd-side-plain");
+        let ctx = egui::Context::default();
+        let home = row_of(&ctx, &panel, "Home");
+        assert_eq!(crate::ui::testing::click(&ctx, home, side(&panel)), Some(SidebarEvent::Open(panel.dir.join("home"))));
+        let disk = row_of(&ctx, &panel, "Disk");
+        assert_eq!(crate::ui::testing::click(&ctx, disk, side(&panel)), Some(SidebarEvent::Open(panel.dir.join("disk"))));
+        let (_, shapes) = run(&ctx, vec![egui::Event::PointerMoved(home)], side(&panel));
+        assert!(lit(&ctx, &shapes).is_empty(), "hovering a row lights nothing");
+        assert_eq!(taken(&ctx), None, "and nothing was dropped");
+
+        let bookmark = row_of(&ctx, &panel, "bm");
+        let secondary = |pressed| egui::Event::PointerButton { pos: bookmark, button: egui::PointerButton::Secondary, pressed, modifiers: NONE };
+        run(&ctx, vec![egui::Event::PointerMoved(bookmark), secondary(true), secondary(false)], side(&panel));
+        let (_, menu) = run(&ctx, vec![], side(&panel));
+        let drawn = menu.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "Remove bookmark"));
+        assert!(drawn, "the bookmark's menu opens");
+        let _ = std::fs::remove_dir_all(&panel.dir);
     }
 }
