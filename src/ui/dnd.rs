@@ -81,6 +81,14 @@ pub fn over(ctx: &egui::Context, clip: Rect, rect: Rect, folder: Option<&Path>) 
     over
 }
 
+/// The row at `rect` for the folder `path` in a panel, under a carried drag:
+/// whether it is lit and takes the drop. A `path` that is no folder (a disk
+/// not mounted, a folder gone) takes nothing; it is only looked at when the
+/// pointer is over `rect`.
+pub fn over_dir(ctx: &egui::Context, clip: Rect, rect: Rect, path: &Path) -> bool {
+    over(ctx, clip, rect, None).inside && path.is_dir() && over(ctx, clip, rect, Some(path)).lit
+}
+
 /// Remembers where the drag would drop for the label, and takes the drop when
 /// the button is let go.
 fn aim(ctx: &egui::Context, drag: &Arc<Drag>, target: &Path, mode: Mode, keys: Keys) {

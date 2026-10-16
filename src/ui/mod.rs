@@ -86,6 +86,58 @@ pub mod testing {
         frame(ctx, vec![button(true)], &mut ui);
         frame(ctx, vec![button(false)], &mut ui)
     }
+
+    /// Like `frame`, with the shapes it drew too.
+    pub fn run<R>(ctx: &egui::Context, events: Vec<Event>, mut draw: impl FnMut(&mut egui::Ui) -> R) -> (R, Vec<egui::epaint::ClippedShape>) {
+        let mut out = None;
+        let input = RawInput { events, screen_rect: Some(SCREEN), ..RawInput::default() };
+        let mut output = ctx.run_ui(input, |root| {
+            egui::CentralPanel::default().show(root, |ui| out = Some(draw(ui)));
+        });
+        output.textures_delta.clear();
+        (out.expect("the frame ran"), output.shapes)
+    }
+
+    fn button(at: Pos2, pressed: bool, modifiers: egui::Modifiers) -> Event {
+        Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers }
+    }
+
+    /// Carries `paths` as a drag from the corner of the screen (a list's empty
+    /// space) and holds it at `to` with `modifiers` down, long enough for the
+    /// label by the pointer to show; the shapes of the last frame.
+    pub fn lift<R>(ctx: &egui::Context, paths: &[std::path::PathBuf], to: Pos2, modifiers: egui::Modifiers, mut draw: impl FnMut(&mut egui::Ui) -> R) -> Vec<egui::epaint::ClippedShape> {
+        let from = egui::pos2(790.0, 590.0);
+        run(ctx, vec![Event::ModifiersChanged(modifiers), Event::PointerMoved(from), button(from, true, modifiers)], &mut draw);
+        egui::DragAndDrop::set_payload(ctx, crate::drag::Drag { paths: paths.to_vec() });
+        run(ctx, vec![Event::PointerMoved(to)], &mut draw);
+        // The label is laid out the frame it first shows.
+        run(ctx, vec![], &mut draw).1
+    }
+
+    /// Lets the button go at `at`; what `draw` returned that frame and the shapes.
+    pub fn let_go<R>(ctx: &egui::Context, at: Pos2, modifiers: egui::Modifiers, draw: impl FnMut(&mut egui::Ui) -> R) -> (R, Vec<egui::epaint::ClippedShape>) {
+        run(ctx, vec![Event::ModifiersChanged(modifiers), Event::PointerMoved(at), button(at, false, modifiers)], draw)
+    }
+
+    /// The rects filled the colour a folder that takes the drop is.
+    pub fn lit(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape]) -> Vec<egui::Rect> {
+        let fill = crate::ui::dnd::lit_fill(&ctx.global_style().visuals);
+        shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Rect(r) if r.fill == fill => Some(r.rect),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The text of the label by the pointer, if one is drawn.
+    pub fn label(shapes: &[egui::epaint::ClippedShape]) -> Option<String> {
+        shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.text().contains(" item") => Some(t.galley.text().to_owned()),
+            _ => None,
+        })
+    }
 }
 
 #[cfg(test)]
