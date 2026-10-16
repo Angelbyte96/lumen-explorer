@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::SystemTime;
 
 use super::entry::is_hidden_name;
 use super::preview::{self, IMAGE_LIMIT, Picture};
@@ -75,11 +76,12 @@ pub fn peek(folder: &Path) -> Peek {
     }
 }
 
-/// One thing to read for the Icons views.
+/// One thing to read for the Icons views, with the modified time it was
+/// asked for, so its result is filed under it even if the file changes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Job {
-    Picture(PathBuf),
-    Peek(PathBuf),
+    Picture(PathBuf, Option<SystemTime>),
+    Peek(PathBuf, Option<SystemTime>),
 }
 
 pub enum Done {
@@ -87,7 +89,8 @@ pub enum Done {
     Peek(Peek),
 }
 
-/// The jobs waiting, most wanted first, and the ones being read.
+/// The jobs waiting, most wanted first, and the ones being read or read and
+/// not yet taken by the UI (which keeps asking for them until then).
 #[derive(Default)]
 struct Queue {
     waiting: Vec<Job>,
@@ -147,7 +150,14 @@ impl Pool {
 
     /// The results read since the last call.
     pub fn done(&self) -> Vec<(Job, Done)> {
-        self.results.try_iter().collect()
+        let done: Vec<(Job, Done)> = self.results.try_iter().collect();
+        if !done.is_empty() {
+            let mut queue = self.queue.0.lock().unwrap_or_else(|e| e.into_inner());
+            for (job, _) in &done {
+                queue.finish(job);
+            }
+        }
+        done
     }
 }
 
@@ -175,10 +185,9 @@ fn work(queue: &Shared, outbox: &Sender<(Job, Done)>, wake: &(dyn Fn() + Send + 
             }
         };
         let done = match &job {
-            Job::Picture(path) => Done::Picture(thumbnail(path)),
-            Job::Peek(path) => Done::Peek(peek(path)),
+            Job::Picture(path, _) => Done::Picture(thumbnail(path)),
+            Job::Peek(path, _) => Done::Peek(peek(path)),
         };
-        lock.lock().unwrap_or_else(|e| e.into_inner()).finish(&job);
         if outbox.send((job, done)).is_err() {
             return;
         }
@@ -244,7 +253,7 @@ mod tests {
     }
 
     fn job(name: &str) -> Job {
-        Job::Peek(PathBuf::from(name))
+        Job::Peek(PathBuf::from(name), None)
     }
 
     #[test]
@@ -270,7 +279,7 @@ mod tests {
         let pool = Pool::start(2, move || {
             counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         });
-        pool.want(vec![Job::Picture(dir.join("a.png")), Job::Peek(dir.clone())]);
+        pool.want(vec![Job::Picture(dir.join("a.png"), None), Job::Peek(dir.clone(), None)]);
         let mut done = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(10);
         while done.len() < 2 && Instant::now() < deadline {
@@ -280,11 +289,28 @@ mod tests {
         assert_eq!(done.len(), 2);
         for (job, result) in done {
             match (job, result) {
-                (Job::Picture(_), Done::Picture(picture)) => assert_eq!(picture.map(|p| p.size), Some([4, 2])),
-                (Job::Peek(_), Done::Peek(peek)) => assert_eq!(peek, Peek::File(dir.join("a.png"))),
+                (Job::Picture(..), Done::Picture(picture)) => assert_eq!(picture.map(|p| p.size), Some([4, 2])),
+                (Job::Peek(..), Done::Peek(peek)) => assert_eq!(peek, Peek::File(dir.join("a.png"))),
                 _ => panic!("a result of the wrong kind"),
             }
         }
         assert_eq!(woken.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_job_read_but_not_yet_taken_is_not_read_again() {
+        let dir = fresh_fixture("thumbs-taken");
+        image::RgbImage::new(4, 2).save(dir.join("a.png")).unwrap();
+        let pool = Pool::start(1, || {});
+        let job = Job::Picture(dir.join("a.png"), None);
+        pool.want(vec![job.clone()]);
+        // Read, its result waiting: the UI still asks for it.
+        thread::sleep(Duration::from_millis(200));
+        pool.want(vec![job.clone()]);
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(pool.done().len(), 1, "read once");
+        pool.want(vec![job.clone()]);
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(pool.done().len(), 1, "asked again once taken, read again");
     }
 }
