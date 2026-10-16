@@ -86,15 +86,21 @@ pub fn show(
         }
         let first = ((viewport.min.y - GAP) / pitch).floor().max(0.0) as usize;
         let last = ((viewport.max.y / pitch).ceil() as usize).min(shape.lines());
+        let (clip, mut covered) = (ui.clip_rect(), false);
         for line in first..last {
             for i in shape.line(line) {
                 let entry = view.entry(view.rows[i]);
                 let rect = place(i);
+                let over = dnd::over(ui.ctx(), clip, rect, entry.is_dir.then_some(entry.path.as_path()));
+                covered |= over.inside;
                 let response = ui.interact(rect, egui::Id::new(("lumen_card", i)), egui::Sense::click_and_drag());
                 if !edit.as_deref().is_some_and(|e| e.path == entry.path) {
                     dnd::start(&response, || dnd::carry(view, i));
                 }
                 paint_cell(ui, view, i, rect, &response);
+                if over.lit {
+                    ui.painter().add(dnd::lit_shape(ui.ctx(), rect));
+                }
                 let inner = rect.shrink2(vec2(PAD / 2.0, PAD));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
                     if cut.contains(&entry.path) {
@@ -130,6 +136,10 @@ pub fn show(
                 }
             }
         }
+        if !covered {
+            dnd::background(ui, content, &view.current);
+        }
+        dnd::edge_scroll(ui, false);
         let may_start = ui.input(|i| i.pointer.primary_pressed()) && background.is_pointer_button_down_on();
         if let Some(band) = cell_band(ui, content, may_start, &shape, place, false) {
             event = Some(band);
@@ -270,6 +280,9 @@ pub(crate) mod tests {
     struct Drawn {
         out: GridOut,
         texts: Vec<(String, Rect, bool)>,
+        /// Filled rectangles, and the stroked ones with no fill.
+        fills: Vec<(Rect, egui::Color32)>,
+        rings: Vec<(Rect, egui::Stroke)>,
     }
 
     fn draw(ctx: &egui::Context, view: &View, growth: f32, events: Vec<egui::Event>) -> Drawn {
@@ -277,7 +290,13 @@ pub(crate) mod tests {
     }
 
     fn draw_at(ctx: &egui::Context, view: &View, growth: f32, events: Vec<egui::Event>, time: Option<f64>) -> Drawn {
+        draw_keys(ctx, view, growth, events, time, Default::default())
+    }
+
+    fn draw_keys(ctx: &egui::Context, view: &View, growth: f32, events: Vec<egui::Event>, time: Option<f64>, modifiers: egui::Modifiers) -> Drawn {
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 480.0));
+        // The keys held stay held until a frame says otherwise.
+        let events = std::iter::once(egui::Event::ModifiersChanged(modifiers)).chain(events).collect();
         let input = egui::RawInput { screen_rect: Some(screen), events, time, ..Default::default() };
         let mut out = None;
         let mut output = ctx.run_ui(input, |ui| {
@@ -293,7 +312,13 @@ pub(crate) mod tests {
                 _ => None,
             })
             .collect();
-        Drawn { out: out.unwrap(), texts }
+        let rects = output.shapes.iter().filter_map(|s| match &s.shape {
+            egui::Shape::Rect(r) => Some(r.clone()),
+            _ => None,
+        });
+        let fills = rects.clone().filter(|r| r.fill != egui::Color32::TRANSPARENT).map(|r| (r.rect, r.fill)).collect();
+        let rings = rects.filter(|r| r.fill == egui::Color32::TRANSPARENT && !r.stroke.is_empty()).map(|r| (r.rect, r.stroke)).collect();
+        Drawn { out: out.unwrap(), texts, fills, rings }
     }
 
     fn settled(ctx: &egui::Context, view: &View, growth: f32) -> Drawn {
@@ -486,7 +511,9 @@ pub(crate) mod tests {
     fn lift(ctx: &egui::Context, view: &View, from: egui::Pos2, to: egui::Pos2) -> Drawn {
         draw(ctx, view, 0.0, vec![egui::Event::PointerMoved(from), button(from, true)]);
         draw(ctx, view, 0.0, vec![egui::Event::PointerMoved(from + (to - from) * 0.1)]);
-        draw(ctx, view, 0.0, vec![egui::Event::PointerMoved(to)])
+        draw(ctx, view, 0.0, vec![egui::Event::PointerMoved(to)]);
+        // The label is laid out the frame it first shows.
+        draw(ctx, view, 0.0, vec![])
     }
 
     fn paths(names: &[&str]) -> Vec<PathBuf> {
@@ -529,12 +556,13 @@ pub(crate) mod tests {
         let mut view = listed(&["test"], &["a.txt", "b.txt", "c.txt"]);
         let drawn = settled(&ctx, &view, 0.0);
         let a = at(&drawn, "a.txt").1.center();
-        let first = egui::pos2(500.0, 400.0);
+        // Over file cards: they take no drop, so the label only counts.
+        let first = at(&drawn, "b.txt").1.center();
         let one = lift(&ctx, &view, a, first);
         let label = at(&one, "1 item").1;
         assert!(one.texts.iter().all(|(t, ..)| t != "1 items"), "singular: {:?}", one.texts);
         assert!(label.min.x > first.x && label.min.y > first.y && label.min.x < first.x + 40.0 && label.min.y < first.y + 40.0, "by the pointer: {label:?}");
-        let second = egui::pos2(300.0, 300.0);
+        let second = at(&drawn, "c.txt").1.center();
         let moved = draw(&ctx, &view, 0.0, vec![egui::Event::PointerMoved(second)]);
         let label = at(&moved, "1 item").1;
         assert!(label.min.x > second.x && label.min.x < second.x + 40.0 && label.min.y > second.y && label.min.y < second.y + 40.0, "follows it: {label:?}");
@@ -544,7 +572,7 @@ pub(crate) mod tests {
 
         view.select_row(1);
         view.extend_to(3);
-        let three = lift(&ctx, &view, at(&settled(&ctx, &view, 0.0), "b.txt").1.center(), first);
+        let three = lift(&ctx, &view, at(&settled(&ctx, &view, 0.0), "b.txt").1.center(), second);
         at(&three, "3 items");
     }
 
@@ -577,6 +605,173 @@ pub(crate) mod tests {
         let band = lift(&ctx, &view, egui::pos2(a.left() - 30.0, a.top() - 70.0).max(egui::pos2(2.0, 2.0)), b.center());
         assert_eq!(banded(&band.out.event), Some(vec![1, 2]), "a band from the space around the cards still picks");
         assert_eq!(carried(&ctx), None, "and carries nothing");
+    }
+
+    const SHIFT: egui::Modifiers = egui::Modifiers { shift: true, ..egui::Modifiers::NONE };
+    const CTRL: egui::Modifiers = egui::Modifiers { ctrl: true, ..egui::Modifiers::NONE };
+
+    /// Whether a drop-target fill was painted over `at`.
+    fn lit(ctx: &egui::Context, drawn: &Drawn, at: egui::Pos2) -> bool {
+        let fill = crate::ui::dnd::lit_fill(&ctx.global_style().visuals);
+        drawn.fills.iter().any(|(rect, f)| *f == fill && rect.contains(at))
+    }
+
+    /// Lets go at `at` holding `modifiers`; the drop the grid took.
+    fn let_go(ctx: &egui::Context, view: &View, at: egui::Pos2, modifiers: egui::Modifiers) -> Option<(Vec<PathBuf>, PathBuf, crate::drag::Keys)> {
+        draw_keys(ctx, view, 0.0, vec![button(at, false)], None, modifiers);
+        crate::ui::dnd::take_drop(ctx).map(|d| (d.drag.paths, d.target, d.keys))
+    }
+
+    #[test]
+    fn a_dragged_card_over_a_folder_card_lights_it_names_the_action_and_drops_on_it() {
+        let ctx = egui::Context::default();
+        let view = listed(&["test"], &["a.txt", "b.txt"]);
+        let drawn = settled(&ctx, &view, 0.0);
+        let (folder, a) = (at(&drawn, "test").1.center(), at(&drawn, "a.txt").1.center());
+        let held = lift(&ctx, &view, a, folder);
+        assert!(lit(&ctx, &held, folder), "the folder lights up: {:?}", held.fills);
+        assert!(!lit(&ctx, &held, a), "and only it");
+        // /x is not a disk to compare with: a copy, until Shift forces a move.
+        at(&held, "Copy 1 item to test");
+        let shift = draw_keys(&ctx, &view, 0.0, vec![], None, SHIFT);
+        at(&shift, "Move 1 item to test");
+        let ctrl = draw_keys(&ctx, &view, 0.0, vec![], None, CTRL);
+        at(&ctrl, "Copy 1 item to test");
+        let dropped = let_go(&ctx, &view, folder, SHIFT);
+        assert_eq!(dropped, Some((paths(&["a.txt"]), PathBuf::from("/x/test"), crate::drag::Keys { ctrl: false, shift: true })));
+        assert!(crate::ui::dnd::take_drop(&ctx).is_none(), "taken once");
+        assert_eq!(carried(&ctx), None);
+        let after = draw(&ctx, &view, 0.0, vec![]);
+        assert!(!lit(&ctx, &after, folder) && !after.texts.iter().any(|(t, ..)| t.contains("item")), "nothing lit, no label");
+    }
+
+    #[test]
+    fn a_folder_card_is_only_lit_when_a_drag_is_carried() {
+        let ctx = egui::Context::default();
+        let view = listed(&["test"], &["a.txt"]);
+        let folder = at(&settled(&ctx, &view, 0.0), "test").1.center();
+        let hovered = draw(&ctx, &view, 0.0, vec![egui::Event::PointerMoved(folder)]);
+        assert!(!lit(&ctx, &hovered, folder), "hover alone is not a drop target");
+    }
+
+    #[test]
+    fn a_folder_that_cannot_take_the_drop_stays_dark_and_takes_nothing() {
+        let ctx = egui::Context::default();
+        let view = listed(&["one", "two"], &["a.txt"]);
+        let drawn = settled(&ctx, &view, 0.0);
+        let (one, two) = (at(&drawn, "one").1.center(), at(&drawn, "two").1.center());
+        // One folder onto itself.
+        let held = lift(&ctx, &view, one, one + vec2(0.0, -25.0));
+        assert!(!lit(&ctx, &held, one), "not lit: {:?}", held.fills);
+        at(&held, "1 item");
+        assert_eq!(let_go(&ctx, &view, one + vec2(0.0, -25.0), Default::default()), None, "no drop");
+        // And onto the other one.
+        let held = lift(&ctx, &view, one, two);
+        assert!(lit(&ctx, &held, two));
+        at(&held, "Copy 1 item to two");
+        assert!(let_go(&ctx, &view, two, Default::default()).is_some());
+    }
+
+    #[test]
+    fn a_file_card_takes_no_drop() {
+        let ctx = egui::Context::default();
+        let view = listed(&[], &["a.txt", "b.txt"]);
+        let drawn = settled(&ctx, &view, 0.0);
+        let (a, b) = (at(&drawn, "a.txt").1.center(), at(&drawn, "b.txt").1.center());
+        let held = lift(&ctx, &view, a, b);
+        assert!(!lit(&ctx, &held, b));
+        at(&held, "1 item");
+        assert_eq!(let_go(&ctx, &view, b, Default::default()), None);
+    }
+
+    #[test]
+    fn letting_go_on_the_empty_space_drops_into_the_folder_on_screen() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["test"], &["a.txt"]);
+        view.current = PathBuf::from("/x");
+        let a = at(&settled(&ctx, &view, 0.0), "a.txt").1.center();
+        let space = egui::pos2(500.0, 400.0);
+        let held = lift(&ctx, &view, a, space);
+        at(&held, "Copy 1 item to x");
+        let ring = ctx.global_style().visuals.selection.stroke;
+        assert!(held.rings.iter().any(|(rect, stroke)| *stroke == ring && rect.contains(space) && rect.width() > 400.0), "the list is ringed: {:?}", held.rings);
+        assert!(!lit(&ctx, &held, a), "no card lights up");
+        let dropped = let_go(&ctx, &view, space, CTRL);
+        assert_eq!(dropped, Some((paths(&["a.txt"]), PathBuf::from("/x"), crate::drag::Keys { ctrl: true, shift: false })));
+    }
+
+    #[test]
+    fn the_empty_space_refuses_a_move_into_the_folder_the_entries_are_in_but_not_a_copy() {
+        use crate::fs::ops::tests::fresh_fixture;
+        let dir = fresh_fixture("dnd-grid-in-place");
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        let mut view = View::default();
+        view.entries = vec![Entry { name: "a.txt".into(), path: dir.join("a.txt"), is_dir: false, size: Some(1), modified: None, hidden: false }];
+        view.rows = vec![0];
+        view.current = dir.clone();
+        let ctx = egui::Context::default();
+        let a = at(&settled(&ctx, &view, 0.0), "a.txt").1.center();
+        let space = egui::pos2(500.0, 400.0);
+        let held = lift(&ctx, &view, a, space);
+        at(&held, "1 item");
+        assert!(held.rings.is_empty(), "nothing ringed: {:?}", held.rings);
+        assert_eq!(let_go(&ctx, &view, space, Default::default()), None, "a move there does nothing");
+
+        lift(&ctx, &view, a, space);
+        let ctrl = draw_keys(&ctx, &view, 0.0, vec![], None, CTRL);
+        at(&ctrl, &format!("Copy 1 item to {}", dir.file_name().unwrap().to_string_lossy()));
+        let dropped = let_go(&ctx, &view, space, CTRL);
+        assert_eq!(dropped.map(|d| d.1), Some(dir.clone()), "Ctrl copies there, as Paste makes duplicates");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn escape_then_letting_go_over_a_folder_drops_nothing() {
+        let ctx = egui::Context::default();
+        let view = listed(&["test"], &["a.txt"]);
+        let drawn = settled(&ctx, &view, 0.0);
+        let (folder, a) = (at(&drawn, "test").1.center(), at(&drawn, "a.txt").1.center());
+        let held = lift(&ctx, &view, a, folder);
+        assert!(lit(&ctx, &held, folder));
+        let key = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+        let after = draw(&ctx, &view, 0.0, vec![key]);
+        assert!(!lit(&ctx, &after, folder), "no longer lit");
+        assert_eq!(let_go(&ctx, &view, folder, Default::default()), None);
+    }
+
+    #[test]
+    fn held_near_the_top_or_bottom_edge_a_carried_drag_scrolls_the_grid() {
+        let ctx = egui::Context::default();
+        let files: Vec<String> = (0..200).map(|n| format!("f{n:03}.txt")).collect();
+        let view = listed(&[], &files.iter().map(String::as_str).collect::<Vec<_>>());
+        let drawn = settled(&ctx, &view, 0.0);
+        let row_two = at(&drawn, "f010.txt").1.top();
+        let from = at(&drawn, "f000.txt").1.center();
+        let middle = egui::pos2(300.0, 240.0);
+        lift(&ctx, &view, from, middle);
+        for _ in 0..5 {
+            draw(&ctx, &view, 0.0, vec![]);
+        }
+        assert_eq!(at(&draw(&ctx, &view, 0.0, vec![]), "f010.txt").1.top(), row_two, "held in the middle: no scroll");
+
+        let bottom = egui::pos2(300.0, 470.0);
+        draw(&ctx, &view, 0.0, vec![egui::Event::PointerMoved(bottom)]);
+        let mut tops = Vec::new();
+        for _ in 0..5 {
+            tops.push(at(&draw(&ctx, &view, 0.0, vec![]), "f010.txt").1.top());
+        }
+        assert!(tops.windows(2).all(|w| w[1] < w[0]) && tops[4] < row_two - 20.0, "the rows come up while held: {tops:?}");
+        draw(&ctx, &view, 0.0, vec![button(bottom, false)]);
+
+        // Without a drag the pointer there does nothing (once the last scrolls have landed).
+        for _ in 0..3 {
+            draw(&ctx, &view, 0.0, vec![]);
+        }
+        let settled_top = at(&draw(&ctx, &view, 0.0, vec![]), "f010.txt").1.top();
+        for _ in 0..5 {
+            draw(&ctx, &view, 0.0, vec![egui::Event::PointerMoved(bottom)]);
+        }
+        assert_eq!(at(&draw(&ctx, &view, 0.0, vec![]), "f010.txt").1.top(), settled_top, "no drag, no scroll");
     }
 
     #[test]

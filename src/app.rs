@@ -2699,6 +2699,12 @@ impl eframe::App for LumenApp {
             self.answer_dialog(&ctx, answer);
         }
 
+        // A drop the list took: run as a paste into the folder it landed on.
+        if let Some(drop) = ui::dnd::take_drop(&ctx)
+            && let Some(mode) = drop.drag.mode_for(&drop.target, drop.keys)
+        {
+            self.drop_into(&ctx, drop.drag.paths, drop.target, mode);
+        }
         // After every target: the label by the pointer while entries are dragged.
         ui::dnd::finish(&ctx);
 
