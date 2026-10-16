@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::app::{Sort, SortColumn};
+use crate::folder_views::{FolderViews, Look, Rule, Scope};
 use crate::places::{VISIT_LIMIT, Visit};
 use crate::ui::file_list::{ALL_SHOWN, DEFAULT_ORDER, DEFAULT_WIDTHS, MIN_WIDTH, Order, Shown, Widths};
 use crate::ui::view_size::ViewSize;
@@ -33,6 +34,8 @@ pub struct Config {
     pub column_order: Order,
     /// Folders visited, for the quick jump. Written when Lumen closes.
     pub visited: Vec<Visit>,
+    /// Saved view settings per folder; `view` and `sort` are the default.
+    pub folder_views: FolderViews,
 }
 
 impl Default for Config {
@@ -51,6 +54,7 @@ impl Default for Config {
             shown_columns: ALL_SHOWN,
             column_order: DEFAULT_ORDER,
             visited: Vec::new(),
+            folder_views: FolderViews::default(),
         }
     }
 }
@@ -62,6 +66,7 @@ impl Config {
     /// Reads settings from `text`; anything missing or invalid keeps its default.
     pub fn parse(text: &str) -> Self {
         let mut config = Self::default();
+        let mut rules = Vec::new();
         // Some editors start a UTF-8 file with a byte order mark.
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         for line in text.lines() {
@@ -81,9 +86,11 @@ impl Config {
                 "hidden_columns" => config.shown_columns = parse_hidden(value),
                 "column_order" => config.column_order = parse_order(value).unwrap_or(config.column_order),
                 "visited" => config.visited.extend(parse_visit(value)),
+                "folder_view" => rules.extend(parse_folder_view(value)),
                 _ => {}
             }
         }
+        config.folder_views = FolderViews::from_rules(rules);
         config
     }
 
@@ -122,6 +129,17 @@ impl Config {
         for visit in &self.visited {
             if let Some(path) = one_line(&visit.path) {
                 text += &format!("visited = {} {} {path}\n", visit.score, visit.at);
+            }
+        }
+        for rule in self.folder_views.rules() {
+            if let Some(path) = one_line(&rule.folder) {
+                let scope = match rule.scope {
+                    Scope::Folder => "folder",
+                    Scope::Tree => "tree",
+                };
+                let sort = rule.look.sort;
+                let direction = if sort.descending { "desc" } else { "asc" };
+                text += &format!("folder_view = {scope} {} {} {direction} {path}\n", rule.look.view.percent(), column_name(sort.column));
             }
         }
         text
@@ -175,6 +193,7 @@ impl Config {
         if before.visited != after.visited {
             merged.visited = merge_visits(&disk.visited, &after.visited);
         }
+        merged.folder_views = FolderViews::merge(&disk.folder_views, &before.folder_views, &after.folder_views);
         merged.bookmarks.retain(|p| !before.bookmarks.contains(p) || after.bookmarks.contains(p));
         for path in &after.bookmarks {
             if !before.bookmarks.contains(path) && !merged.bookmarks.contains(path) {
@@ -216,6 +235,25 @@ fn merge_visits(disk: &[Visit], here: &[Visit]) -> Vec<Visit> {
     merged.truncate(VISIT_LIMIT);
     merged.sort_by_key(|v| std::cmp::Reverse(v.at));
     merged
+}
+
+/// `folder_view = <folder|tree> <view percent> <sort column> <asc|desc> <path>`.
+fn parse_folder_view(value: &str) -> Option<Rule> {
+    let mut rest = value;
+    let mut word = || {
+        let (word, after) = rest.trim_start().split_once(char::is_whitespace)?;
+        rest = after;
+        Some(word)
+    };
+    let scope = match word()? {
+        "folder" => Scope::Folder,
+        "tree" => Scope::Tree,
+        _ => return None,
+    };
+    let view = ViewSize::new(word()?.parse::<u16>().ok()?.min(100) as u8);
+    let sort = parse_sort(&format!("{} {}", word()?, word()?))?;
+    let folder = rest.trim();
+    (!folder.is_empty()).then(|| Rule { folder: PathBuf::from(folder), scope, look: Look { view, sort } })
 }
 
 /// `visited = <score> <when, Unix seconds> <path>`.
@@ -411,6 +449,7 @@ mod tests {
                 Visit { path: PathBuf::from("/home/u/Descargas"), score: 2.5, at: 1_760_000_000 },
                 Visit { path: PathBuf::from("/srv/my files"), score: 0.1, at: 1 },
             ],
+            folder_views: FolderViews::default(),
         }
     }
 
@@ -486,6 +525,49 @@ bookmark =
         let c = Config::parse("sort = size desc\nsidebar = false\nlist_zoom = 3\nbookmark = /srv\n");
         assert_eq!((c.view, c.sidebar, c.bookmarks.len()), (ViewSize::default(), false, 1));
         assert!(!c.to_text().contains("list_zoom"), "the old key is dropped on the next save");
+    }
+
+    #[test]
+    fn folder_views_are_written_one_per_line_and_read_back() {
+        let size_desc = Sort { column: SortColumn::Size, descending: true };
+        let config = Config {
+            folder_views: FolderViews::from_rules(vec![
+                Rule { folder: PathBuf::from("/home/me/My Photos"), scope: Scope::Tree, look: Look { view: ViewSize::new(100), sort: size_desc } },
+                Rule { folder: PathBuf::from("/srv"), scope: Scope::Folder, look: Look { view: ViewSize::new(20), sort: Sort::default() } },
+            ]),
+            ..Config::default()
+        };
+        let text = config.to_text();
+        assert!(text.contains("folder_view = tree 100 size desc /home/me/My Photos\n"), "{text}");
+        assert!(text.contains("folder_view = folder 20 name asc /srv\n"), "{text}");
+        assert_eq!(Config::parse(&text).folder_views, config.folder_views);
+        assert!(!Config::default().to_text().contains("folder_view"), "no rules, no lines");
+    }
+
+    #[test]
+    fn a_broken_folder_view_line_is_skipped_and_the_others_are_kept() {
+        let text = "folder_view = tree 100 size desc /ok\n\
+                    folder_view = forever 100 size desc /bad-scope\n\
+                    folder_view = folder big name asc /bad-view\n\
+                    folder_view = folder 20 colour asc /bad-column\n\
+                    folder_view = folder 20 name up /bad-direction\n\
+                    folder_view = folder 20 name asc\n\
+                    folder_view = folder 250 name asc /capped\n";
+        let views = Config::parse(text).folder_views;
+        let folders: Vec<_> = views.rules().iter().map(|r| (r.folder.to_string_lossy().into_owned(), r.look.view.percent())).collect();
+        assert_eq!(folders, [("/ok".to_string(), 100), ("/capped".to_string(), 100)]);
+    }
+
+    #[test]
+    fn merging_settings_keeps_the_other_windows_folder_views() {
+        let rule = |folder: &str, percent| Rule { folder: PathBuf::from(folder), scope: Scope::Folder, look: Look { view: ViewSize::new(percent), sort: Sort::default() } };
+        let before = Config::default();
+        let after = Config { folder_views: FolderViews::from_rules(vec![rule("/mine", 30)]), ..before.clone() };
+        let disk = Config { folder_views: FolderViews::from_rules(vec![rule("/theirs", 65)]), ..before.clone() };
+        let merged = Config::merge(&disk, &before, &after);
+        assert_eq!(merged.folder_views.rules(), [rule("/theirs", 65), rule("/mine", 30)]);
+        let untouched = Config::merge(&disk, &before, &before);
+        assert_eq!(untouched.folder_views, disk.folder_views, "no edits here: the file's rules stay");
     }
 
     #[test]

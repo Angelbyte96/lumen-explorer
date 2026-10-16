@@ -6,6 +6,7 @@ mod app;
 #[cfg(not(windows))]
 mod apps;
 mod config;
+mod folder_views;
 mod format;
 #[cfg(not(windows))]
 mod icon_names;
