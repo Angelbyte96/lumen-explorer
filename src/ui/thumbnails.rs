@@ -1,7 +1,7 @@
 //! The pictures the Icons views draw in their cards: read by the pool in
 //! `fs::thumbs` and kept as textures, by path and modified time so a changed
-//! file is read again. At most `MAX_PICTURES` are kept; the ones drawn
-//! longest ago go first.
+//! file is read again. At most `MAX_PICTURES` are kept (more only while on
+//! screen); the ones drawn longest ago go first.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -170,28 +170,29 @@ impl Thumbnails {
     }
 
     /// Drops the pictures drawn longest ago while more than `cap` are kept.
+    /// The ones on screen stay even past it: dropping them would ask for
+    /// them again at once, forever.
     fn evict(&mut self) {
-        let mut loaded: Vec<(u64, Key)> =
+        let loaded: Vec<(u64, Key)> =
             self.pictures.iter().filter_map(|(key, loaded)| Some((loaded.as_ref()?.drawn.get(), key.clone()))).collect();
-        if loaded.len() <= self.cap {
-            return;
-        }
-        loaded.sort_unstable_by_key(|(drawn, _)| *drawn);
-        let extra = loaded.len() - self.cap;
-        for (_, key) in loaded.into_iter().take(extra) {
+        for key in self.stale(loaded, self.cap) {
             self.pictures.remove(&key);
         }
     }
 
+    /// Of `kept` (when each was drawn, its key), the ones to drop to get down
+    /// to `cap`, drawn longest ago first; never one drawn in the last frame
+    /// or just read.
+    fn stale(&self, mut kept: Vec<(u64, Key)>, cap: usize) -> Vec<Key> {
+        let extra = kept.len().saturating_sub(cap);
+        kept.sort_unstable_by_key(|(drawn, _)| *drawn);
+        kept.into_iter().take(extra).filter(|(drawn, _)| drawn + 1 < self.polls).map(|(_, key)| key).collect()
+    }
+
     /// Drops the peeks drawn longest ago while more than `peek_cap` are kept.
     fn evict_peeks(&mut self) {
-        if self.peeks.len() <= self.peek_cap {
-            return;
-        }
-        let mut kept: Vec<(u64, Key)> = self.peeks.iter().map(|(key, (_, drawn))| (drawn.get(), key.clone())).collect();
-        kept.sort_unstable_by_key(|(drawn, _)| *drawn);
-        let extra = kept.len() - self.peek_cap;
-        for (_, key) in kept.into_iter().take(extra) {
+        let kept: Vec<(u64, Key)> = self.peeks.iter().map(|(key, (_, drawn))| (drawn.get(), key.clone())).collect();
+        for key in self.stale(kept, self.peek_cap) {
             self.peeks.remove(&key);
         }
     }
@@ -328,6 +329,31 @@ mod tests {
         thumbs.evict();
         let kept: HashSet<_> = thumbs.pictures.keys().map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(kept, HashSet::from(["a.png".to_owned(), "c.png".to_owned()]));
+    }
+
+    #[test]
+    fn pictures_on_screen_are_kept_past_the_cap_so_they_never_flicker() {
+        let ctx = egui::Context::default();
+        let mut thumbs = Thumbnails { cap: 2, ..Default::default() };
+        let names = ["a.png", "b.png", "c.png"];
+        for name in names {
+            thumbs = thumbs.with_picture(&ctx, &Path::new("/x").join(name), [2, 2]);
+        }
+        // A frame draws all three, then the poll after it evicts.
+        thumbs.polls = 5;
+        for name in names {
+            assert!(thumbs.picture(&file(&Path::new("/x").join(name), None)).is_some());
+        }
+        thumbs.polls = 6;
+        thumbs.evict();
+        assert_eq!(thumbs.pictures.len(), 3, "every picture drawn in the last frame stays");
+        // Scrolled away: the next frames draw only c.
+        thumbs.polls = 8;
+        thumbs.picture(&file(Path::new("/x/c.png"), None));
+        thumbs.polls = 9;
+        thumbs.evict();
+        assert_eq!(thumbs.pictures.len(), 2, "back to the cap once they leave the screen");
+        assert!(thumbs.pictures.contains_key(&(PathBuf::from("/x/c.png"), None)));
     }
 
     fn folder(path: &Path, modified: Option<SystemTime>) -> Entry {
