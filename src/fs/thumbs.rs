@@ -26,8 +26,9 @@ pub enum Peek {
     Empty,
     /// Only folders inside.
     OnlyFolders,
-    /// The first file inside, by name.
-    File(PathBuf),
+    /// The first file inside, by name, and when it was modified (the key its
+    /// picture is filed under).
+    File(PathBuf, Option<SystemTime>),
 }
 
 /// An image file's picture scaled to fit `THUMB_SIDE`; `None` for a file that
@@ -41,8 +42,8 @@ pub fn thumbnail(path: &Path) -> Option<Picture> {
     preview::decode_fit(path, THUMB_SIDE).ok()
 }
 
-/// What `folder` holds: its first file by name (ignoring case), else whether
-/// it holds folders. Hidden entries are left out.
+/// What `folder` holds: its first file by name (ignoring case) and when it
+/// was modified, else whether it holds folders. Hidden entries are left out.
 pub fn peek(folder: &Path) -> Peek {
     let Ok(items) = std::fs::read_dir(folder) else { return Peek::Empty };
     let mut first: Option<(String, PathBuf)> = None;
@@ -70,7 +71,10 @@ pub fn peek(folder: &Path) -> Peek {
         }
     }
     match first {
-        Some((_, path)) => Peek::File(path),
+        Some((_, path)) => {
+            let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            Peek::File(path, modified)
+        }
         None if folders => Peek::OnlyFolders,
         None => Peek::Empty,
     }
@@ -234,7 +238,9 @@ mod tests {
         std::fs::write(files.join("B.png"), "").unwrap();
         std::fs::write(files.join(".a-hidden"), "").unwrap();
         std::fs::write(files.join("a.md"), "").unwrap();
-        assert_eq!(peek(&files), Peek::File(files.join("a.md")), "by name ignoring case, folders and hidden files left out");
+        let modified = std::fs::metadata(files.join("a.md")).unwrap().modified().ok();
+        assert!(modified.is_some());
+        assert_eq!(peek(&files), Peek::File(files.join("a.md"), modified), "by name ignoring case, folders and hidden files left out, with its modified time");
 
         let folders = dir.join("folders");
         std::fs::create_dir_all(folders.join("one")).unwrap();
@@ -290,7 +296,7 @@ mod tests {
         for (job, result) in done {
             match (job, result) {
                 (Job::Picture(..), Done::Picture(picture)) => assert_eq!(picture.map(|p| p.size), Some([4, 2])),
-                (Job::Peek(..), Done::Peek(peek)) => assert_eq!(peek, Peek::File(dir.join("a.png"))),
+                (Job::Peek(..), Done::Peek(peek)) => assert!(matches!(peek, Peek::File(path, _) if path == dir.join("a.png"))),
                 _ => panic!("a result of the wrong kind"),
             }
         }
