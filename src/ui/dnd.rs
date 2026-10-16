@@ -54,6 +54,25 @@ pub fn start(response: &egui::Response, drag: impl FnOnce() -> Drag) {
     }
 }
 
+fn trash_id() -> egui::Id {
+    egui::Id::new("lumen_drag_trash")
+}
+
+/// The trash's folder: no folder in it takes a drop, which would skip its
+/// bookkeeping (what it held, and where from). Set by the app every frame.
+pub fn set_trash(ctx: &egui::Context, trash: Option<&Path>) {
+    ctx.data_mut(|d| match trash {
+        Some(trash) => {
+            d.insert_temp(trash_id(), Arc::new(trash.to_path_buf()));
+        }
+        None => d.remove::<Arc<PathBuf>>(trash_id()),
+    });
+}
+
+fn in_trash(ctx: &egui::Context, folder: &Path) -> bool {
+    ctx.data(|d| d.get_temp::<Arc<PathBuf>>(trash_id())).is_some_and(|trash| crate::places::in_trash(folder, &trash))
+}
+
 /// Whether a carried drag is over a row, card or cell, and whether that one
 /// is a folder that takes the drop.
 #[derive(Clone, Copy, Default)]
@@ -71,7 +90,7 @@ pub fn over(ctx: &egui::Context, clip: Rect, rect: Rect, folder: Option<&Path>) 
         return Over::default();
     }
     let mut over = Over { inside: true, lit: false };
-    if let Some(folder) = folder {
+    if let Some(folder) = folder.filter(|folder| !in_trash(ctx, folder)) {
         let keys = ctx.input(|i| Keys { ctrl: i.modifiers.ctrl, shift: i.modifiers.shift });
         if let Some(mode) = drag.mode_for(folder, keys) {
             over.lit = true;
