@@ -8,6 +8,7 @@ use eframe::egui::{self, Rect, vec2};
 
 use crate::app::{Scroll, View};
 use crate::format::format_size;
+use crate::ui::dnd;
 use crate::ui::file_icons::FileIcons;
 use crate::ui::file_list::{self, ListEvent, RenameEdit};
 use crate::ui::grid::GridShape;
@@ -89,7 +90,10 @@ pub fn show(
             for i in shape.line(line) {
                 let entry = view.entry(view.rows[i]);
                 let rect = place(i);
-                let response = ui.interact(rect, egui::Id::new(("lumen_card", i)), egui::Sense::click());
+                let response = ui.interact(rect, egui::Id::new(("lumen_card", i)), egui::Sense::click_and_drag());
+                if !edit.as_deref().is_some_and(|e| e.path == entry.path) {
+                    dnd::start(&response, || dnd::carry(view, i));
+                }
                 paint_cell(ui, view, i, rect, &response);
                 let inner = rect.shrink2(vec2(PAD / 2.0, PAD));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
@@ -276,7 +280,10 @@ pub(crate) mod tests {
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 480.0));
         let input = egui::RawInput { screen_rect: Some(screen), events, time, ..Default::default() };
         let mut out = None;
-        let mut output = ctx.run_ui(input, |ui| out = Some(show(ui, view, &[], growth, None, None, Art { file_icons: &FileIcons::default(), thumbs: &Thumbnails::default() })));
+        let mut output = ctx.run_ui(input, |ui| {
+            out = Some(show(ui, view, &[], growth, None, None, Art { file_icons: &FileIcons::default(), thumbs: &Thumbnails::default() }));
+            crate::ui::dnd::finish(ui.ctx());
+        });
         output.textures_delta.clear();
         let texts = output
             .shapes
@@ -464,6 +471,112 @@ pub(crate) mod tests {
         assert!(matches!(&events[2], Some(ListEvent::Cells { cursor: Some(2), .. })), "the cursor goes to the card under the pointer");
         let events = drag(&ctx, &view, egui::pos2(630.0, 470.0), egui::pos2(2.0, 2.0));
         assert_eq!(banded(&events[2]), Some(vec![0, 1, 2, 3]), "a band over everything picks everything");
+    }
+
+    /// What the drag in progress carries, as paths.
+    fn carried(ctx: &egui::Context) -> Option<Vec<PathBuf>> {
+        egui::DragAndDrop::payload::<crate::drag::Drag>(ctx).map(|drag| drag.paths.clone())
+    }
+
+    fn button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() }
+    }
+
+    /// Presses at `from` and drags to `to`, holding the button; what the last frame drew.
+    fn lift(ctx: &egui::Context, view: &View, from: egui::Pos2, to: egui::Pos2) -> Drawn {
+        draw(ctx, view, 0.0, vec![egui::Event::PointerMoved(from), button(from, true)]);
+        draw(ctx, view, 0.0, vec![egui::Event::PointerMoved(from + (to - from) * 0.1)]);
+        draw(ctx, view, 0.0, vec![egui::Event::PointerMoved(to)])
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(|n| PathBuf::from("/x").join(n)).collect()
+    }
+
+    #[test]
+    fn a_drag_from_a_card_carries_that_entry_when_it_is_not_selected() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["test"], &["a.txt", "b.txt"]);
+        let drawn = settled(&ctx, &view, 0.0);
+        let a = at(&drawn, "a.txt").1.center();
+        let away = egui::pos2(630.0, 470.0);
+        lift(&ctx, &view, a, away);
+        assert_eq!(carried(&ctx), Some(paths(&["a.txt"])), "nothing selected: the card under the pointer");
+        draw(&ctx, &view, 0.0, vec![button(away, false)]);
+        assert_eq!(carried(&ctx), None, "let go: nothing is carried any more");
+
+        // Another entry is the selection: the dragged card is not part of it, so it goes alone.
+        view.select_row(2);
+        lift(&ctx, &view, a, away);
+        assert_eq!(carried(&ctx), Some(paths(&["a.txt"])), "the selection stays where it was");
+    }
+
+    #[test]
+    fn a_drag_from_a_picked_card_carries_the_whole_selection_in_display_order() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["test"], &["a.txt", "b.txt", "c.txt"]);
+        view.select_row(3);
+        view.toggle_pick(1);
+        let drawn = settled(&ctx, &view, 0.0);
+        let c = at(&drawn, "c.txt").1.center();
+        lift(&ctx, &view, c, egui::pos2(630.0, 470.0));
+        assert_eq!(carried(&ctx), Some(paths(&["a.txt", "c.txt"])), "both picked entries, not the folder or b");
+    }
+
+    #[test]
+    fn a_label_by_the_pointer_counts_what_is_carried_and_goes_with_it() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["test"], &["a.txt", "b.txt", "c.txt"]);
+        let drawn = settled(&ctx, &view, 0.0);
+        let a = at(&drawn, "a.txt").1.center();
+        let first = egui::pos2(500.0, 400.0);
+        let one = lift(&ctx, &view, a, first);
+        let label = at(&one, "1 item").1;
+        assert!(one.texts.iter().all(|(t, ..)| t != "1 items"), "singular: {:?}", one.texts);
+        assert!(label.min.x > first.x && label.min.y > first.y && label.min.x < first.x + 40.0 && label.min.y < first.y + 40.0, "by the pointer: {label:?}");
+        let second = egui::pos2(300.0, 300.0);
+        let moved = draw(&ctx, &view, 0.0, vec![egui::Event::PointerMoved(second)]);
+        let label = at(&moved, "1 item").1;
+        assert!(label.min.x > second.x && label.min.x < second.x + 40.0 && label.min.y > second.y && label.min.y < second.y + 40.0, "follows it: {label:?}");
+
+        draw(&ctx, &view, 0.0, vec![button(second, false)]);
+        assert!(!draw(&ctx, &view, 0.0, vec![]).texts.iter().any(|(t, ..)| t.contains("item")), "gone once let go");
+
+        view.select_row(1);
+        view.extend_to(3);
+        let three = lift(&ctx, &view, at(&settled(&ctx, &view, 0.0), "b.txt").1.center(), first);
+        at(&three, "3 items");
+    }
+
+    #[test]
+    fn escape_cancels_the_drag_and_its_label() {
+        let ctx = egui::Context::default();
+        let view = listed(&[], &["a.txt", "b.txt"]);
+        let a = at(&settled(&ctx, &view, 0.0), "a.txt").1.center();
+        let away = egui::pos2(500.0, 400.0);
+        lift(&ctx, &view, a, away);
+        assert!(carried(&ctx).is_some());
+        let key = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+        let after = draw(&ctx, &view, 0.0, vec![key]);
+        assert_eq!(carried(&ctx), None, "nothing is carried");
+        assert!(!after.texts.iter().any(|(t, ..)| t.contains("item")), "no label: {:?}", after.texts);
+        let released = draw(&ctx, &view, 0.0, vec![button(away, false)]);
+        assert!(released.out.event.is_none(), "letting go afterwards is not a click");
+    }
+
+    #[test]
+    fn a_click_or_a_band_from_the_empty_space_carries_nothing_and_still_works() {
+        let ctx = egui::Context::default();
+        let view = listed(&["test"], &["a.txt", "b.txt"]);
+        let drawn = settled(&ctx, &view, 0.0);
+        let (a, b) = (at(&drawn, "a.txt").1, at(&drawn, "b.txt").1);
+        let selected = draw(&ctx, &view, 0.0, click(a.center(), egui::PointerButton::Primary)).out.event;
+        assert!(matches!(selected, Some(ListEvent::Select(1))), "a click on a card selects it");
+        assert_eq!(carried(&ctx), None);
+        settled(&ctx, &view, 0.0);
+        let band = lift(&ctx, &view, egui::pos2(a.left() - 30.0, a.top() - 70.0).max(egui::pos2(2.0, 2.0)), b.center());
+        assert_eq!(banded(&band.out.event), Some(vec![1, 2]), "a band from the space around the cards still picks");
+        assert_eq!(carried(&ctx), None, "and carries nothing");
     }
 
     #[test]

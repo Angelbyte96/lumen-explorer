@@ -163,7 +163,8 @@ pub fn show(
             .auto_shrink([false, true])
             // Text sits in the middle of its row, beside the taller icon.
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .sense(egui::Sense::CLICK);
+            // Not focusable: the list is one Tab stop.
+            .sense(egui::Sense::CLICK | egui::Sense::DRAG);
         // Every column has its own width, like File Pilot: the last one stretches
         // over whatever room the others leave, and columns wider than the list
         // scroll sideways.
@@ -262,6 +263,9 @@ pub fn show(
                     let response = row.response();
                     if pressed && response.is_pointer_button_down_on() && !on_name {
                         band_may_start = true;
+                    }
+                    if on_name && !edit.as_deref().is_some_and(|e| e.path == entry.path) {
+                        crate::ui::dnd::start(&response, || crate::ui::dnd::carry(view, i));
                     }
                     if selected == Some(i) {
                         response.ctx.data_mut(|d| d.insert_temp(cursor_row_id(), response.rect));
@@ -961,6 +965,125 @@ mod tests {
             let (events, _) = drag(&ctx, &view, egui::pos2(x, first.center().y), egui::pos2(x, third.center().y));
             assert!(events.iter().all(|e| band_rows(e).is_none()), "x = {x}");
         }
+    }
+
+    fn carried(ctx: &egui::Context) -> Option<Vec<PathBuf>> {
+        egui::DragAndDrop::payload::<crate::drag::Drag>(ctx).map(|drag| drag.paths.clone())
+    }
+
+    /// Presses at `from` and drags to `to`, holding the button; the list's
+    /// event and what was painted on the last frame.
+    fn lift(ctx: &egui::Context, view: &View, from: egui::Pos2, to: egui::Pos2) -> (Option<ListEvent>, Vec<egui::epaint::ClippedShape>) {
+        let steps = [
+            vec![egui::Event::PointerMoved(from), button(from, true)],
+            vec![egui::Event::PointerMoved(from + egui::vec2(0.0, 10.0 * (to.y - from.y).signum()))],
+            vec![egui::Event::PointerMoved(to)],
+        ];
+        let mut last = (None, Vec::new());
+        for events in steps {
+            let mut event = None;
+            let mut output = ctx.run_ui(egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() }, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    event = show(ui, view, &[], Sizes::default(), None, None, &FileIcons::default());
+                });
+                crate::ui::dnd::finish(root.ctx());
+            });
+            output.textures_delta.clear();
+            last = (event, output.shapes);
+        }
+        last
+    }
+
+    fn let_go(ctx: &egui::Context, view: &View, at: egui::Pos2) -> Vec<egui::epaint::ClippedShape> {
+        let mut output = ctx.run_ui(egui::RawInput { events: vec![button(at, false)], screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() }, |root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                show(ui, view, &[], Sizes::default(), None, None, &FileIcons::default());
+            });
+            crate::ui::dnd::finish(root.ctx());
+        });
+        output.textures_delta.clear();
+        output.shapes
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(|n| PathBuf::from("/x").join(n)).collect()
+    }
+
+    #[test]
+    fn a_drag_from_a_rows_icon_or_name_carries_the_entry_or_the_selection_it_is_in() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["a.txt", "b.txt", "c.txt", "d.txt"]);
+        let rows: Vec<egui::Rect> = (0..4).map(|row| row_rect(&ctx, &mut view, row)).collect();
+        let on_name = |row: usize| egui::pos2(rows[row].left() + 30.0, rows[row].center().y);
+        let below = egui::pos2(300.0, 500.0);
+
+        let (event, _) = lift(&ctx, &view, on_name(1), below);
+        assert_eq!(carried(&ctx), Some(paths(&["b.txt"])), "nothing selected: the row under the pointer");
+        assert!(band_rows(&event).is_none(), "not a band");
+        let shapes = let_go(&ctx, &view, below);
+        assert_eq!(carried(&ctx), None, "let go: nothing is carried any more");
+        assert!(!texts_of(&shapes).iter().any(|t| t.contains("item")), "and no label");
+
+        view.select_row(0);
+        view.toggle_pick(2);
+        lift(&ctx, &view, on_name(2), below);
+        assert_eq!(carried(&ctx), Some(paths(&["a.txt", "c.txt"])), "picked: the selection in display order");
+        let_go(&ctx, &view, below);
+
+        lift(&ctx, &view, on_name(3), below);
+        assert_eq!(carried(&ctx), Some(paths(&["d.txt"])), "not in the selection: alone");
+    }
+
+    fn texts_of(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_drag_from_a_rows_empty_part_carries_nothing() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["a.txt", "b.txt", "c.txt"]);
+        let (first, third) = (row_rect(&ctx, &mut view, 0), row_rect(&ctx, &mut view, 2));
+        let (event, _) = lift(&ctx, &view, egui::pos2(500.0, first.center().y), egui::pos2(520.0, third.center().y));
+        assert!(band_rows(&event).is_some(), "it is a band");
+        assert_eq!(carried(&ctx), None);
+    }
+
+    #[test]
+    fn a_label_by_the_pointer_counts_what_is_carried_and_a_click_on_a_name_still_selects() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["a.txt", "b.txt", "c.txt"]);
+        let rows: Vec<egui::Rect> = (0..3).map(|row| row_rect(&ctx, &mut view, row)).collect();
+        let name = egui::pos2(rows[0].left() + 30.0, rows[0].center().y);
+        let to = egui::pos2(400.0, 500.0);
+        let (_, shapes) = lift(&ctx, &view, name, to);
+        assert!(texts_of(&shapes).iter().any(|t| t == "1 item"), "{:?}", texts_of(&shapes));
+        let label = shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == "1 item" => Some(t.pos),
+                _ => None,
+            })
+            .unwrap();
+        assert!(label.x > to.x && label.x < to.x + 40.0 && label.y > to.y && label.y < to.y + 40.0, "by the pointer: {label:?}");
+        let_go(&ctx, &view, to);
+        view.select_row(0);
+        view.extend_to(2);
+        let (_, shapes) = lift(&ctx, &view, name, to);
+        assert!(texts_of(&shapes).iter().any(|t| t == "3 items"), "{:?}", texts_of(&shapes));
+        let_go(&ctx, &view, to);
+
+        // A click on the name is a click, not a drag.
+        let at = egui::pos2(rows[1].left() + 30.0, rows[1].center().y);
+        crate::ui::testing::frame(&ctx, vec![egui::Event::PointerMoved(at)], |ui| show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default()));
+        let clicked = crate::ui::testing::frame(&ctx, press(at, egui::PointerButton::Primary), |ui| show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default()));
+        assert!(matches!(clicked, Some(ListEvent::Select(1))));
+        assert_eq!(carried(&ctx), None);
     }
 
     #[test]
