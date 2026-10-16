@@ -12,6 +12,7 @@ use crate::ui::file_icons::FileIcons;
 use crate::ui::file_list::{self, ListEvent, RenameEdit};
 use crate::ui::grid::GridShape;
 use crate::ui::icons;
+use crate::ui::thumbnails::Thumbnails;
 
 /// Icon side at M Icons and at XL Icons, in points.
 pub const M_ICON: f32 = 48.0;
@@ -35,6 +36,14 @@ pub fn per_row(width: f32, card: f32) -> usize {
     (((width + GAP) / (card + GAP)).floor() as usize).max(1)
 }
 
+/// What a card can draw for its icon: the type's or file's own icon, or an
+/// image file's picture.
+#[derive(Clone, Copy)]
+pub struct Art<'a> {
+    pub file_icons: &'a FileIcons,
+    pub thumbs: &'a Thumbnails,
+}
+
 /// What the grid did this frame and its shape, for the arrow keys.
 pub struct GridOut {
     pub event: Option<ListEvent>,
@@ -48,8 +57,9 @@ pub fn show(
     growth: f32,
     scroll: Option<Scroll>,
     mut edit: Option<&mut RenameEdit>,
-    file_icons: &FileIcons,
+    art: Art,
 ) -> GridOut {
+    let Art { file_icons, thumbs } = art;
     let text_height = ui.text_style_height(&egui::TextStyle::Body);
     let icon = icon_side(growth);
     let card = card_size(icon, text_height);
@@ -86,7 +96,10 @@ pub fn show(
                     if cut.contains(&entry.path) {
                         ui.set_opacity(file_list::CUT_OPACITY);
                     }
-                    icons::show(ui, entry, icon, file_icons.texture(entry));
+                    match thumbs.picture(entry) {
+                        Some((texture, size)) => icons::picture(ui, icon, texture, size),
+                        None => icons::show(ui, entry, icon, file_icons.texture(entry)),
+                    };
                     ui.add_space(6.0);
                     if let Some(edit) = edit.as_deref_mut().filter(|e| e.path == entry.path) {
                         if let Some(submit) = file_list::rename_field(ui, edit) {
@@ -253,7 +266,7 @@ pub(crate) mod tests {
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 480.0));
         let input = egui::RawInput { screen_rect: Some(screen), events, time, ..Default::default() };
         let mut out = None;
-        let mut output = ctx.run_ui(input, |ui| out = Some(show(ui, view, &[], growth, None, None, &FileIcons::default())));
+        let mut output = ctx.run_ui(input, |ui| out = Some(show(ui, view, &[], growth, None, None, Art { file_icons: &FileIcons::default(), thumbs: &Thumbnails::default() })));
         output.textures_delta.clear();
         let texts = output
             .shapes
@@ -333,7 +346,7 @@ pub(crate) mod tests {
             let mut shapes = Vec::new();
             for _ in 0..2 {
                 let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-                    show(ui, view, &[], 0.0, None, None, &FileIcons::default());
+                    show(ui, view, &[], 0.0, None, None, Art { file_icons: &FileIcons::default(), thumbs: &Thumbnails::default() });
                 });
                 output.textures_delta.clear();
                 shapes = output.shapes;
@@ -349,6 +362,59 @@ pub(crate) mod tests {
         let unselected = paint(&view);
         assert!(!filled(&unselected), "no highlight");
         assert!(dashes_in(&unselected, card) >= 8, "a dashed outline around the cursor card");
+    }
+
+    #[test]
+    fn an_image_card_shows_its_own_picture_fitted_with_its_shape() {
+        let ctx = egui::Context::default();
+        let view = listed(&[], &["photo.png", "notes.txt"]);
+        let photo = std::path::Path::new("/x/photo.png");
+        let thumbs = Thumbnails::default().with_picture(&ctx, photo, [400, 200]);
+        let (texture, _) = thumbs.picture(view.entry(0)).unwrap();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 480.0));
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                show(ui, &view, &[], 1.0, None, None, Art { file_icons: &FileIcons::default(), thumbs: &thumbs });
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let pictures: Vec<Rect> = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Mesh(mesh) if mesh.texture_id == texture => Some(s.shape.visual_bounding_rect()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pictures.len(), 1, "one card shows a picture");
+        let picture = pictures[0];
+        assert!((picture.width() - XL_ICON).abs() < 0.5 && (picture.height() - XL_ICON / 2.0).abs() < 0.5, "fitted, 2:1: {picture:?}");
+    }
+
+    #[test]
+    fn a_small_picture_is_not_blown_up_past_its_own_pixels() {
+        let ctx = egui::Context::default();
+        let view = listed(&[], &["icon.png"]);
+        let thumbs = Thumbnails::default().with_picture(&ctx, std::path::Path::new("/x/icon.png"), [16, 32]);
+        let (texture, _) = thumbs.picture(view.entry(0)).unwrap();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 480.0));
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                show(ui, &view, &[], 1.0, None, None, Art { file_icons: &FileIcons::default(), thumbs: &thumbs });
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let picture = shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Mesh(mesh) if mesh.texture_id == texture => Some(s.shape.visual_bounding_rect()),
+                _ => None,
+            })
+            .expect("drawn");
+        assert!((picture.width() - 16.0).abs() < 0.5 && (picture.height() - 32.0).abs() < 0.5, "its own size: {picture:?}");
     }
 
     fn click(pos: egui::Pos2, button: egui::PointerButton) -> Vec<egui::Event> {

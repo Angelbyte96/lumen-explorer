@@ -70,6 +70,20 @@ pub fn show(ui: &mut egui::Ui, entry: &Entry, side: f32, own: Option<egui::Textu
     response
 }
 
+/// A picture `size` pixels big in a square `side` points wide: fitted with
+/// its shape, never bigger than its own pixels.
+pub fn picture(ui: &mut egui::Ui, side: f32, texture: egui::TextureId, size: egui::Vec2) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
+    if ui.is_rect_visible(rect) && size.x > 0.0 && size.y > 0.0 {
+        let own = size / ui.ctx().pixels_per_point();
+        let scale = (side / own.x).min(side / own.y).min(1.0);
+        let shown = Rect::from_center_size(rect.center(), own * scale);
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        ui.painter().image(texture, shown, uv, Color32::WHITE);
+    }
+    response
+}
+
 /// The Tree view's chevron in a square `side` points wide: `>` for a folded
 /// folder, `v` for an unfolded one. Drawn, so it needs no glyph.
 pub fn chevron(ui: &mut egui::Ui, side: f32, open: bool) -> egui::Response {
