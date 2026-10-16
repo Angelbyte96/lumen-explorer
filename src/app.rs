@@ -1768,6 +1768,11 @@ impl LumenApp {
     /// Copies or moves `paths` into `dest` as a paste does (the same
     /// questions, progress and cancel), leaving the clipboard alone.
     fn drop_into(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, dest: PathBuf, mode: Mode) {
+        // Moved in by hand it would have no record to be restored from.
+        if self.trash.as_deref().is_some_and(|trash| places::in_trash(&dest, trash)) {
+            self.tab.view.error = Some("Nothing can be dropped into the trash".into());
+            return;
+        }
         if self.busy() {
             return;
         }
@@ -2423,6 +2428,8 @@ impl eframe::App for LumenApp {
         #[cfg(not(windows))]
         let _ = frame;
         let ctx = ui.ctx().clone();
+        // Before any drop target is drawn: none in the trash takes a drop.
+        ui::dnd::set_trash(&ctx, self.trash.as_deref());
 
         if let Some(listing) = self.tab.lister.poll() {
             self.apply(listing);
@@ -3616,6 +3623,22 @@ mod tests {
         wait_paste(&ctx, &mut app);
         assert!(matches!(&app.dialog, Some(Dialog::Paste { mode: Mode::Copy, .. })), "the replace question");
         assert_eq!(std::fs::read_to_string(dir.join("sub").join("a.txt")).unwrap(), "old", "nothing replaced yet");
+    }
+
+    #[test]
+    fn a_drop_into_the_trash_is_refused() {
+        let (ctx, mut app, dir) = app_in("app-drop-trash");
+        let trash = dir.join("sub");
+        app.trash = Some(trash.clone());
+        std::fs::create_dir(trash.join("old")).unwrap();
+        for dest in [trash.clone(), trash.join("old")] {
+            app.drop_into(&ctx, vec![dir.join("a.txt")], dest, Mode::Move);
+            assert!(app.batch.is_none() && app.job.is_none(), "nothing started");
+            assert_eq!(app.tab.view.error.as_deref(), Some("Nothing can be dropped into the trash"));
+            app.tab.view.error = None;
+        }
+        assert_eq!(names_in(&dir), ["a.txt", "b.txt", "sub"]);
+        assert_eq!(names_in(&trash), ["old"]);
     }
 
     #[test]

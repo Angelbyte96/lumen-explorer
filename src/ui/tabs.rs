@@ -200,6 +200,34 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_showing_the_trash_or_a_folder_in_it_takes_nothing() {
+        let (dir, _) = two_tabs("dnd-tabs-trash");
+        let trash = dir.join("Trash/files");
+        std::fs::create_dir_all(trash.join("old")).unwrap();
+        let folders = vec![trash.clone(), trash.join("old"), dir.join("a")];
+        let ctx = egui::Context::default();
+        crate::ui::dnd::set_trash(&ctx, Some(&trash));
+        run(&ctx, vec![], bar(&folders));
+        let file = vec![dir.join("f.txt")];
+        for i in 0..2 {
+            let at = tab_rect(&ctx, i).center();
+            for keys in [NONE, CTRL] {
+                let shapes = lift(&ctx, &file, at, keys, bar(&folders));
+                assert!(lit(&ctx, &shapes).is_empty(), "tab {i} stays dark");
+                assert_eq!(label(&shapes).as_deref(), Some("1 item"), "no folder named");
+                let (event, _) = let_go(&ctx, at, keys, bar(&folders));
+                assert_eq!((event, taken(&ctx)), (None, None), "nothing dropped on tab {i}");
+            }
+        }
+        // A folder outside the trash still takes it.
+        let at = tab_rect(&ctx, 2).center();
+        lift(&ctx, &file, at, NONE, bar(&folders));
+        let_go(&ctx, at, NONE, bar(&folders));
+        assert_eq!(taken(&ctx), Some((file, dir.join("a"), Keys::default())));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_tab_that_would_refuse_the_drop_stays_dark_and_takes_nothing() {
         let (dir, mut folders) = two_tabs("dnd-tabs-refused");
         folders.push(dir.join("gone"));
