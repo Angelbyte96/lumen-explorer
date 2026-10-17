@@ -1063,6 +1063,9 @@ pub struct LumenApp {
     /// Lumen's window, for what the shell runs on its behalf.
     #[cfg(windows)]
     hwnd: Option<isize>,
+    /// Files dropped from other apps (Wayland only; the other platforms deliver them through winit).
+    #[cfg(target_os = "linux")]
+    wayland_dnd: crate::wayland_dnd::Receiver,
     /// Where New ▸ finds templates (~/Templates or its translation).
     templates: Option<PathBuf>,
     dialog: Option<Dialog>,
@@ -1156,6 +1159,8 @@ impl LumenApp {
             repaint: ctx.clone(),
             #[cfg(windows)]
             hwnd: None,
+            #[cfg(target_os = "linux")]
+            wayland_dnd: Default::default(),
             templates: None,
             dialog: None,
             rename: None,
@@ -1784,6 +1789,16 @@ impl LumenApp {
             return;
         }
         self.start_batch(ctx, paths, dest, mode);
+    }
+
+    /// Files dropped on the window from another app land in the folder on
+    /// screen, as an internal drop does (the disks decide copy or move).
+    #[cfg(target_os = "linux")]
+    fn drop_from_outside(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
+        let folder = self.tab.view.current.clone();
+        if let Some(mode) = (crate::drag::Drag { paths: paths.clone() }).mode_for(&folder, crate::drag::Keys::default()) {
+            self.drop_into(ctx, paths, folder, mode);
+        }
     }
 
     fn paste(&mut self, ctx: &egui::Context) {
@@ -2433,9 +2448,13 @@ impl eframe::App for LumenApp {
                 self.hwnd = Some(win32.hwnd.get());
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         let _ = frame;
         let ctx = ui.ctx().clone();
+        #[cfg(target_os = "linux")]
+        for paths in self.wayland_dnd.poll(frame, &ctx) {
+            self.drop_from_outside(&ctx, paths);
+        }
         // Before any drop target is drawn: none in the trash takes a drop.
         ui::dnd::set_trash(&ctx, self.trash.as_deref());
 
@@ -2730,6 +2749,8 @@ impl eframe::App for LumenApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        #[cfg(target_os = "linux")]
+        self.wayland_dnd.stop();
         self.save_settings(true);
     }
 }
@@ -3621,6 +3642,43 @@ mod tests {
         assert_eq!(names_in(&dir), ["b.txt", "sub"]);
         assert_eq!(app.clipboard.as_ref().map(|c| (c.paths.clone(), c.mode)), Some((vec![dir.join("b.txt")], Mode::Copy)));
         assert!(app.tab.view.error.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn files_dropped_from_another_app_land_in_the_folder_on_screen() {
+        let (ctx, mut app, dir) = app_in("app-drop-outside");
+        let other = crate::fs::ops::tests::fresh_fixture("app-drop-outside-source");
+        std::fs::write(other.join("n.txt"), "N").unwrap();
+        std::fs::write(other.join("m.txt"), "M").unwrap();
+        app.clipboard = Some(Clip { paths: vec![dir.join("b.txt")], mode: Mode::Copy });
+        app.drop_from_outside(&ctx, vec![other.join("n.txt"), other.join("m.txt")]);
+        wait_paste(&ctx, &mut app);
+        assert_eq!(names_in(&dir), ["a.txt", "b.txt", "m.txt", "n.txt", "sub"]);
+        assert!(names_in(&other).is_empty(), "same disk: moved");
+        assert!(app.clipboard.is_some(), "the clipboard is left alone");
+        assert!(app.tab.view.error.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn files_dropped_from_another_app_into_the_trash_view_are_refused() {
+        let (ctx, mut app, dir) = app_in("app-drop-outside-trash");
+        let other = crate::fs::ops::tests::fresh_fixture("app-drop-outside-trash-source");
+        std::fs::write(other.join("n.txt"), "N").unwrap();
+        app.trash = Some(dir.clone());
+        app.drop_from_outside(&ctx, vec![other.join("n.txt")]);
+        assert_eq!(app.tab.view.error.as_deref(), Some("Nothing can be dropped into the trash"));
+        assert_eq!(names_in(&other), ["n.txt"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_dropped_from_another_app_onto_itself_does_nothing() {
+        let (ctx, mut app, dir) = app_in("app-drop-outside-self");
+        app.drop_from_outside(&ctx, vec![dir.clone()]);
+        assert!(app.batch.is_none() && app.job.is_none(), "nothing started");
+        assert_eq!(names_in(&dir), ["a.txt", "b.txt", "sub"]);
     }
 
     #[test]
