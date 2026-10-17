@@ -17,6 +17,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use eframe::egui;
+
+use crate::fs::transfer::Mode;
 use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use wayland_client::backend::{Backend, WaylandError};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
@@ -88,7 +90,7 @@ fn read_list(source: impl Read) -> std::io::Result<Vec<PathBuf>> {
 struct Shared {
     ctx: egui::Context,
     /// One entry per drop, in order, until a frame takes them.
-    drops: Mutex<Vec<Vec<PathBuf>>>,
+    drops: Mutex<Vec<(Vec<PathBuf>, Mode)>>,
 }
 
 /// The Wayland side of drag and drop in: nothing until the first frame shows
@@ -116,8 +118,9 @@ struct Worker {
 
 impl Receiver {
     /// Starts listening on the first frame whose window is a Wayland one, and
-    /// returns the file lists dropped since the last call.
-    pub fn poll(&mut self, frame: &eframe::Frame, ctx: &egui::Context) -> Vec<Vec<PathBuf>> {
+    /// returns the file lists dropped since the last call, each with the
+    /// action agreed with the app they came from.
+    pub fn poll(&mut self, frame: &eframe::Frame, ctx: &egui::Context) -> Vec<(Vec<PathBuf>, Mode)> {
         if matches!(self.state, Setup::Waiting) {
             match frame.display_handle().map(|handle| handle.as_raw()) {
                 Ok(RawDisplayHandle::Wayland(wayland)) => self.state = Worker::start(wayland.display.as_ptr() as usize, ctx),
@@ -238,8 +241,8 @@ impl State {
         }
         offer.accept(serial, Some(URI_LIST.into()));
         if offer.version() >= 3 {
-            // Copy is preferred: it asks the dragging app to keep its files.
-            // Whether Lumen copies or moves is decided at the drop, by the disks.
+            // Copy is preferred: without keys the dragging app keeps its files.
+            // Shift there (a move) is honoured at the drop.
             offer.set_actions(DndAction::Copy | DndAction::Move, DndAction::Copy);
         }
         self.entered = Some(offer);
@@ -252,6 +255,7 @@ impl State {
             offer.destroy();
             return;
         }
+        let mode = mode_of(offer.data::<OfferData>().and_then(|data| data.action.lock().ok().and_then(|action| *action)));
         let Some((read, write)) = pipe() else {
             offer.destroy();
             return;
@@ -268,7 +272,7 @@ impl State {
                     Ok(paths) => {
                         if !paths.is_empty() {
                             if let Ok(mut drops) = shared.drops.lock() {
-                                drops.push(paths);
+                                drops.push((paths, mode));
                             }
                             shared.ctx.request_repaint();
                         }
@@ -287,6 +291,16 @@ impl State {
             eprintln!("[lumen] reading the dropped files failed: {err}");
             offer.destroy();
         }
+    }
+}
+
+/// What Lumen does with dropped files: a move only when the compositor
+/// settled on one (Shift in the dragging app), else a copy, which leaves the
+/// dragging app's files where they are.
+fn mode_of(action: Option<DndAction>) -> Mode {
+    match action {
+        Some(action) if action == DndAction::Move => Mode::Move,
+        _ => Mode::Copy,
     }
 }
 
@@ -357,6 +371,14 @@ delegate_noop!(State: WlDataDeviceManager);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_settled_move_moves() {
+        assert_eq!(mode_of(Some(DndAction::Move)), Mode::Move);
+        assert_eq!(mode_of(Some(DndAction::Copy)), Mode::Copy);
+        assert_eq!(mode_of(Some(DndAction::Ask)), Mode::Copy);
+        assert_eq!(mode_of(None), Mode::Copy, "a version 1 or 2 offer agrees on nothing");
+    }
 
     fn paths(text: &str) -> Vec<PathBuf> {
         parse_uri_list(text.as_bytes())
