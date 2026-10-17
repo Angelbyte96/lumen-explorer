@@ -1312,6 +1312,7 @@ dependencies = [
  "raw-window-handle",
  "resvg",
  "trash",
+ "wayland-client",
  "windows",
  "windows-sys 0.61.2",
  "winit",
