@@ -109,6 +109,7 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 | F2 | Rename the selected entry in place (Enter to apply, Esc to cancel); does nothing with several selected. Characters a name cannot hold are not typed (`/` on Linux; `\ / : * ? " < > |` on Windows), and a pasted name keeps the rest |
 | Ctrl+Shift+N | Create "New Folder" here and rename it |
 | Ctrl+C / Ctrl+X | Copy / cut the selected entries (cut ones are faded until pasted) |
+| Ctrl+Shift+C | Copy the selected entries' paths as text, one per line (Copy Path) |
 | Ctrl+V | Paste into the current folder, one entry after another in the background; a name already there asks to Replace (Enter, the old one goes to the trash) or Skip (Esc) |
 | Alt+R | Count the selected folder: its size and how many folders and files it holds, all the way down (runs in the background; symlinks are not followed and other disks are not entered). Folders show `--` until counted; the result stays while you are in this folder |
 | Ctrl+Plus / Ctrl+Minus, Ctrl+wheel | Move the view slider: Details, Tree, List, then icons that grow from M to L to XL (and back) |
