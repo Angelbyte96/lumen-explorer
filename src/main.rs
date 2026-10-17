@@ -6,6 +6,7 @@ mod app;
 #[cfg(not(windows))]
 mod apps;
 mod config;
+mod drag;
 mod folder_views;
 mod format;
 #[cfg(not(windows))]
