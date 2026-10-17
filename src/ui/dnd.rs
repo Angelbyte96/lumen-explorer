@@ -202,6 +202,8 @@ pub fn finish(ctx: &egui::Context) {
         .interactable(false)
         .fixed_pos(at + egui::vec2(16.0, 16.0))
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| ui.add(egui::Label::new(text).selectable(false)));
+            // One line as wide as the text: the area keeps the width it first
+            // had ("1 item"), which would wrap a folder's name.
+            egui::Frame::popup(ui.style()).show(ui, |ui| ui.add(egui::Label::new(text).selectable(false).extend()));
         });
 }
