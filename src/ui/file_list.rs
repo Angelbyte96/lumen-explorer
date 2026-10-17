@@ -272,10 +272,13 @@ pub fn show(
                         let painter = egui::Painter::new(response.ctx.clone(), response.layer_id, row_rect);
                         painter.set(slot, crate::ui::dnd::lit_shape(&response.ctx, row_rect));
                     }
-                    if pressed && response.is_pointer_button_down_on() && !on_name {
+                    // A selected row drags from anywhere on it; another one only
+                    // from its icon and name, its empty part starts the band.
+                    let grab = on_name || view.is_highlighted(i);
+                    if pressed && response.is_pointer_button_down_on() && !grab {
                         band_may_start = true;
                     }
-                    if on_name && !edit.as_deref().is_some_and(|e| e.path == entry.path) {
+                    if grab && !edit.as_deref().is_some_and(|e| e.path == entry.path) {
                         crate::ui::dnd::start(&response, || crate::ui::dnd::carry(view, i));
                     }
                     if selected == Some(i) {
@@ -1067,6 +1070,26 @@ mod tests {
         let mut view = listed(&["a.txt", "b.txt", "c.txt"]);
         let (first, third) = (row_rect(&ctx, &mut view, 0), row_rect(&ctx, &mut view, 2));
         let (event, _) = lift(&ctx, &view, egui::pos2(500.0, first.center().y), egui::pos2(520.0, third.center().y));
+        assert!(band_rows(&event).is_some(), "it is a band");
+        assert_eq!(carried(&ctx), None);
+    }
+
+    #[test]
+    fn a_drag_from_anywhere_on_a_selected_row_carries_the_selection_and_elsewhere_bands() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["a.txt", "b.txt", "c.txt", "d.txt"]);
+        let rows: Vec<egui::Rect> = (0..4).map(|row| row_rect(&ctx, &mut view, row)).collect();
+        let empty_part = |row: usize| egui::pos2(500.0, rows[row].center().y);
+        let below = egui::pos2(300.0, 500.0);
+        view.select_row(0);
+        view.toggle_pick(1);
+        // The Date column of a picked row: the selection goes.
+        let (event, _) = lift(&ctx, &view, empty_part(1), below);
+        assert_eq!(carried(&ctx), Some(paths(&["a.txt", "b.txt"])));
+        assert!(band_rows(&event).is_none(), "not a band");
+        let_go(&ctx, &view, below);
+        // The same column of a row that is not selected: a band, as before.
+        let (event, _) = lift(&ctx, &view, empty_part(2), egui::pos2(520.0, rows[3].center().y));
         assert!(band_rows(&event).is_some(), "it is a band");
         assert_eq!(carried(&ctx), None);
     }
