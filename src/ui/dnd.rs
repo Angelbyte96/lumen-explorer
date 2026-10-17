@@ -98,6 +98,69 @@ fn keys(ctx: &egui::Context) -> Keys {
     }
 }
 
+/// Whether the pointer at `pos` (`None`: it is gone) is outside `screen`, the
+/// window's own surface: the right and bottom edges are outside, as a pixel
+/// is.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn outside_window(pos: Option<egui::Pos2>, screen: Rect) -> bool {
+    let Some(pos) = pos else { return true };
+    pos.x < screen.min.x || pos.y < screen.min.y || pos.x >= screen.max.x || pos.y >= screen.max.y
+}
+
+/// Whether the pointer is outside the window. During the implicit grab of a
+/// held button the compositor keeps sending motion past the edge, which is
+/// how a drag in progress is seen leaving.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn left_window(ctx: &egui::Context) -> bool {
+    outside_window(ctx.input(|i| i.pointer.latest_pos()), ctx.content_rect())
+}
+
+/// The drag carried inside Lumen (egui's payload), not one from another app.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn carried_inside(ctx: &egui::Context) -> Option<Drag> {
+    if outside(ctx).is_some() {
+        return None;
+    }
+    DragAndDrop::payload::<Drag>(ctx).map(|drag| Drag::clone(&drag))
+}
+
+/// What the pointer was doing when the drag left to the compositor.
+#[derive(Clone, Copy)]
+struct HandedOff {
+    at: egui::Pos2,
+    modifiers: egui::Modifiers,
+}
+
+fn handed_off_id() -> egui::Id {
+    egui::Id::new("lumen_drag_handed_off")
+}
+
+/// The compositor has the drag now (a Wayland drag out): the pointer is its
+/// and egui will never see the button let go. Drops the payload, so nothing is
+/// carried, and has the next frame see the release (`end_hand_off`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn hand_off(ctx: &egui::Context) {
+    DragAndDrop::clear_payload(ctx);
+    let (at, modifiers) = ctx.input(|i| (i.pointer.latest_pos().or(i.pointer.interact_pos()), i.modifiers));
+    ctx.data_mut(|d| d.insert_temp(handed_off_id(), HandedOff { at: at.unwrap_or_default(), modifiers }));
+    ctx.request_repaint();
+}
+
+/// First thing of a frame: if the drag was handed off, the release and the
+/// pointer gone that egui missed.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn end_hand_off(ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    let Some(HandedOff { at, modifiers }) = ctx.data_mut(|d| {
+        let handed = d.get_temp::<HandedOff>(handed_off_id());
+        d.remove::<HandedOff>(handed_off_id());
+        handed
+    }) else {
+        return;
+    };
+    raw_input.events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers });
+    raw_input.events.push(egui::Event::PointerGone);
+}
+
 fn aim_id() -> egui::Id {
     egui::Id::new("lumen_drag_aim")
 }
@@ -440,6 +503,93 @@ mod tests {
         run(&ctx, vec![], row(&sub));
         assert!(take_drop(&ctx).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const WINDOW: Rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(800.0, 600.0));
+
+    #[test]
+    fn the_pointer_is_out_of_the_window_past_any_edge_or_when_gone() {
+        let at = |x, y| outside_window(Some(pos2(x, y)), WINDOW);
+        assert!(!at(0.0, 0.0) && !at(400.0, 300.0) && !at(799.5, 599.5), "inside, corners included");
+        assert!(at(-0.5, 300.0), "left");
+        assert!(at(400.0, -1.0), "above");
+        assert!(at(800.0, 300.0), "the right edge is the first pixel outside");
+        assert!(at(400.0, 600.0), "the bottom edge too");
+        assert!(at(900.0, 700.0), "far");
+        assert!(outside_window(None, WINDOW), "gone");
+    }
+
+    #[test]
+    fn the_window_is_left_when_egui_gets_motion_past_its_edge() {
+        let ctx = egui::Context::default();
+        run(&ctx, vec![egui::Event::PointerMoved(pos2(400.0, 300.0))], |_| ());
+        assert!(!left_window(&ctx));
+        run(&ctx, vec![egui::Event::PointerMoved(pos2(850.0, 300.0))], |_| ());
+        assert!(left_window(&ctx), "motion goes on past the edge during the implicit grab");
+        run(&ctx, vec![egui::Event::PointerGone], |_| ());
+        assert!(left_window(&ctx));
+    }
+
+    #[test]
+    fn only_a_drag_carried_inside_lumen_is_carried_inside() {
+        let dir = fixture("dnd-carried-inside");
+        let ctx = egui::Context::default();
+        let file = dir.join("a.txt");
+        assert!(carried_inside(&ctx).is_none());
+        egui::DragAndDrop::set_payload(&ctx, Drag { paths: vec![file.clone()] });
+        assert_eq!(carried_inside(&ctx).map(|drag| drag.paths), Some(vec![file.clone()]));
+        // Files from another app are the compositor's, not Lumen's to hand back.
+        set_outside(&ctx, outside(&[file], ROW.center(), NONE, false));
+        assert!(carried_inside(&ctx).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A drag that began on a row at `ROW` and went out past the right edge, held.
+    fn dragged_out(ctx: &egui::Context, paths: &[PathBuf]) {
+        let frame = |events: Vec<egui::Event>| {
+            run(ctx, events, |ui| {
+                let response = ui.allocate_rect(ROW, egui::Sense::click_and_drag());
+                start(&response, || Drag { paths: paths.to_vec() });
+            });
+        };
+        let press = |pressed| egui::Event::PointerButton { pos: ROW.center(), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(vec![egui::Event::PointerMoved(ROW.center())]);
+        frame(vec![press(true)]);
+        frame(vec![egui::Event::PointerMoved(pos2(500.0, 300.0))]);
+        frame(vec![egui::Event::PointerMoved(pos2(850.0, 300.0))]);
+    }
+
+    #[test]
+    fn a_drag_handed_off_leaves_nothing_carried_and_no_button_held_the_next_frame() {
+        let dir = fixture("dnd-hand-off");
+        let ctx = egui::Context::default();
+        let file = dir.join("a.txt");
+        dragged_out(&ctx, std::slice::from_ref(&file));
+        assert!(carried_inside(&ctx).is_some() && left_window(&ctx), "out of the window, still carried");
+        assert!(ctx.input(|i| i.pointer.primary_down()) && ctx.dragged_id().is_some());
+
+        hand_off(&ctx);
+        assert!(carried_inside(&ctx).is_none() && !egui::DragAndDrop::has_any_payload(&ctx), "no payload is carried");
+        // The next frame: the release that the compositor kept from egui.
+        let mut raw = egui::RawInput::default();
+        end_hand_off(&ctx, &mut raw);
+        let (_, shapes) = run(&ctx, raw.events, row(&dir.join("sub")));
+        assert!(!ctx.input(|i| i.pointer.any_down()), "egui does not think a button is held");
+        assert!(ctx.dragged_id().is_none(), "no widget is still being dragged");
+        assert!(label(&shapes).is_none() && lit(&ctx, &shapes).is_empty(), "no label, no lit row");
+        // Once: the frame after that gets no event.
+        let mut raw = egui::RawInput::default();
+        end_hand_off(&ctx, &mut raw);
+        assert!(raw.events.is_empty(), "nothing pending");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn without_a_hand_off_a_frame_adds_nothing() {
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        end_hand_off(&ctx, &mut raw);
+        assert!(raw.events.is_empty());
     }
 
     #[test]
