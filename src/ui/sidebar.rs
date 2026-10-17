@@ -860,4 +860,35 @@ mod tests {
         assert!(drawn, "the bookmark's menu opens");
         let _ = std::fs::remove_dir_all(&panel.dir);
     }
+
+    #[test]
+    fn files_dragged_in_from_another_app_light_the_place_under_them_and_drop_on_it_but_not_the_trash() {
+        let panel = drop_panel("dnd-side-outside");
+        let ctx = egui::Context::default();
+        let file = panel.dir.join("f.txt");
+        let outside = |at, keys, released| {
+            let drag = crate::drag::Drag { paths: vec![file.clone()] };
+            crate::ui::dnd::set_outside(&ctx, Some(crate::ui::dnd::Outside { drag, at, keys, released }));
+        };
+        let (home, trash) = (row_of(&ctx, &panel, "Home"), row_of(&ctx, &panel, "Trash"));
+        outside(home, Keys::default(), false);
+        run(&ctx, vec![], side(&panel));
+        let (_, shapes) = run(&ctx, vec![], side(&panel));
+        assert!(lit(&ctx, &shapes).iter().any(|r| r.contains(home)), "Home lights up");
+        assert_eq!(label(&shapes).as_deref(), Some("Move 1 item to home"));
+        outside(home, Keys::default(), true);
+        run(&ctx, vec![], side(&panel));
+        assert_eq!(taken(&ctx), Some((vec![file.clone()], panel.dir.join("home"), Keys::default())));
+
+        outside(trash, Keys::default(), false);
+        run(&ctx, vec![], side(&panel));
+        let (_, shapes) = run(&ctx, vec![], side(&panel));
+        assert!(lit(&ctx, &shapes).is_empty(), "the Trash stays dark");
+        assert_eq!(label(&shapes).as_deref(), Some("1 item"));
+        outside(trash, Keys::default(), true);
+        run(&ctx, vec![], side(&panel));
+        assert_eq!(taken(&ctx), None);
+        crate::ui::dnd::set_outside(&ctx, None);
+        let _ = std::fs::remove_dir_all(&panel.dir);
+    }
 }

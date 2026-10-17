@@ -26,6 +26,76 @@ pub struct Dropped {
 struct Aim {
     target: PathBuf,
     mode: Mode,
+    /// What it would do with no key held.
+    preferred: Mode,
+}
+
+/// Files dragged over the window from another app (Wayland). While one is
+/// over the window egui gets no pointer events, so where it is, which keys
+/// act on it and whether it was let go come from the compositor; the app sets
+/// them every frame and the targets read them in place of egui's pointer.
+#[derive(Clone)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub struct Outside {
+    pub drag: Drag,
+    /// In egui points.
+    pub at: egui::Pos2,
+    /// The action agreed with the dragging app, as the keys that force it.
+    pub keys: Keys,
+    /// Let go over the window this frame.
+    pub released: bool,
+}
+
+fn outside_id() -> egui::Id {
+    egui::Id::new("lumen_drag_outside")
+}
+
+/// Sets (or, with `None`, clears) the drag from another app for this frame.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn set_outside(ctx: &egui::Context, outside: Option<Outside>) {
+    ctx.data_mut(|d| match outside {
+        Some(outside) => {
+            d.insert_temp(outside_id(), outside);
+        }
+        None => d.remove::<Outside>(outside_id()),
+    });
+}
+
+fn outside(ctx: &egui::Context) -> Option<Outside> {
+    ctx.data(|d| d.get_temp::<Outside>(outside_id()))
+}
+
+/// The drag being carried: the one from another app, else egui's.
+fn carried(ctx: &egui::Context) -> Option<Arc<Drag>> {
+    match outside(ctx) {
+        Some(outside) => Some(Arc::new(outside.drag)),
+        None => DragAndDrop::payload::<Drag>(ctx),
+    }
+}
+
+/// Where the carried drag is: egui's pointer, or the position the compositor gave.
+fn pointer(ctx: &egui::Context) -> Option<egui::Pos2> {
+    match outside(ctx) {
+        Some(outside) => Some(outside.at),
+        None => ctx.input(|i| i.pointer.latest_pos()),
+    }
+}
+
+/// Whether the carried drag was let go this frame.
+fn let_go(ctx: &egui::Context) -> bool {
+    match outside(ctx) {
+        Some(outside) => outside.released,
+        None => ctx.input(|i| i.pointer.primary_released()),
+    }
+}
+
+/// The keys that act on the carried drag: those held, or the action agreed
+/// with the app it comes from.
+fn keys(ctx: &egui::Context) -> Keys {
+    match outside(ctx) {
+        Some(outside) => outside.keys,
+        None => ctx.input(|i| Keys { ctrl: i.modifiers.ctrl, shift: i.modifiers.shift }),
+    }
 }
 
 fn aim_id() -> egui::Id {
@@ -85,16 +155,20 @@ pub struct Over {
 /// drag. When `folder` is given and takes the drag it is `lit`, and it takes
 /// the drop when the button is let go.
 pub fn over(ctx: &egui::Context, clip: Rect, rect: Rect, folder: Option<&Path>) -> Over {
-    let Some(drag) = DragAndDrop::payload::<Drag>(ctx) else { return Over::default() };
-    if !ctx.input(|i| i.pointer.latest_pos()).is_some_and(|at| rect.contains(at) && clip.contains(at)) {
+    let Some(drag) = carried(ctx) else { return Over::default() };
+    if !pointer(ctx).is_some_and(|at| rect.contains(at) && clip.contains(at)) {
         return Over::default();
     }
     let mut over = Over { inside: true, lit: false };
     if let Some(folder) = folder.filter(|folder| !in_trash(ctx, folder)) {
-        let keys = ctx.input(|i| Keys { ctrl: i.modifiers.ctrl, shift: i.modifiers.shift });
-        if let Some(mode) = drag.mode_for(folder, keys) {
+        let keys = keys(ctx);
+        // Another app is told what to prefer with no key held (Ctrl and Shift
+        // are its own to choose), so what it refuses there is refused for good.
+        let preferred = drag.mode_for(folder, Keys::default());
+        let refused = outside(ctx).is_some() && preferred.is_none();
+        if let Some(mode) = drag.mode_for(folder, keys).filter(|_| !refused) {
             over.lit = true;
-            aim(ctx, &drag, folder, mode, keys);
+            aim(ctx, &drag, folder, mode, preferred.unwrap_or(mode), keys);
         }
     }
     over
@@ -110,9 +184,9 @@ pub fn over_dir(ctx: &egui::Context, clip: Rect, rect: Rect, path: &Path) -> boo
 
 /// Remembers where the drag would drop for the label, and takes the drop when
 /// the button is let go.
-fn aim(ctx: &egui::Context, drag: &Arc<Drag>, target: &Path, mode: Mode, keys: Keys) {
-    ctx.data_mut(|d| d.insert_temp(aim_id(), Aim { target: target.to_path_buf(), mode }));
-    if ctx.input(|i| i.pointer.primary_released()) {
+fn aim(ctx: &egui::Context, drag: &Arc<Drag>, target: &Path, mode: Mode, preferred: Mode, keys: Keys) {
+    ctx.data_mut(|d| d.insert_temp(aim_id(), Aim { target: target.to_path_buf(), mode, preferred }));
+    if let_go(ctx) {
         let dropped = Dropped { drag: Drag::clone(drag), target: target.to_path_buf(), keys };
         ctx.data_mut(|d| d.insert_temp(dropped_id(), dropped));
     }
@@ -143,10 +217,10 @@ pub fn background(ui: &egui::Ui, rect: Rect, current: &Path) {
 /// right, else top and bottom) scrolls `ui`'s scroll area. Only over the list
 /// itself: the band goes on past its edge, a drag on its way to a panel does not.
 pub fn edge_scroll(ui: &egui::Ui, sideways: bool) {
-    if !DragAndDrop::has_payload_of_type::<Drag>(ui.ctx()) {
+    if carried(ui.ctx()).is_none() {
         return;
     }
-    let (pointer, dt) = ui.input(|i| (i.pointer.latest_pos(), i.stable_dt));
+    let (pointer, dt) = (pointer(ui.ctx()), ui.input(|i| i.stable_dt));
     let clip = ui.clip_rect();
     let Some(pointer) = pointer.filter(|p| clip.contains(*p)) else { return };
     let (speed, along) = if sideways {
@@ -172,21 +246,28 @@ pub fn take_drop(ctx: &egui::Context) -> Option<Dropped> {
 
 /// Last thing of the frame, after every target: the label by the pointer
 /// while a drag is carried (not on the frame it is let go), naming the action
-/// and the folder when the pointer is over one that takes the drop.
-pub fn finish(ctx: &egui::Context) {
+/// and the folder when the pointer is over one that takes the drop. Gives the
+/// action that folder takes with no key held, which a drag from another app is
+/// told to prefer; `None` over nothing that takes the drop.
+pub fn finish(ctx: &egui::Context) -> Option<Mode> {
     let aim = ctx.data_mut(|d| {
         let aim = d.get_temp::<Aim>(aim_id());
         d.remove::<Aim>(aim_id());
         aim
     });
-    let Some(drag) = DragAndDrop::payload::<Drag>(ctx) else { return };
-    let Some(at) = ctx.input(|i| i.pointer.latest_pos().filter(|_| !i.pointer.any_released())) else { return };
+    let drag = carried(ctx)?;
+    let preferred = aim.as_ref().map(|aim| aim.preferred);
+    let gone = match outside(ctx) {
+        Some(outside) => outside.released,
+        None => ctx.input(|i| i.pointer.any_released()),
+    };
+    let Some(at) = pointer(ctx).filter(|_| !gone) else { return preferred };
     let items = match drag.paths.len() {
         1 => "1 item".to_owned(),
         n => format!("{n} items"),
     };
     let text = match aim {
-        Some(Aim { target, mode }) => {
+        Some(Aim { target, mode, .. }) => {
             let name = target.file_name().map_or_else(|| target.display().to_string(), |n| n.to_string_lossy().into_owned());
             let verb = match mode {
                 Mode::Move => "Move",
@@ -206,4 +287,170 @@ pub fn finish(ctx: &egui::Context) {
             // had ("1 item"), which would wrap a folder's name.
             egui::Frame::popup(ui.style()).show(ui, |ui| ui.add(egui::Label::new(text).selectable(false).extend()));
         });
+    preferred
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::ops::tests::fresh_fixture;
+    use crate::ui::testing::{label, let_go, lift, lit, run};
+    use eframe::egui::pos2;
+
+    const NONE: Keys = Keys { ctrl: false, shift: false };
+    const CTRL: Keys = Keys { ctrl: true, shift: false };
+    const ROW: Rect = Rect::from_min_max(pos2(100.0, 100.0), pos2(300.0, 130.0));
+
+    /// `dir` with `a.txt` and the folders `sub` and `other`.
+    fn fixture(name: &str) -> PathBuf {
+        let dir = fresh_fixture(name);
+        std::fs::write(dir.join("a.txt"), "A").unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::create_dir(dir.join("other")).unwrap();
+        dir
+    }
+
+    fn outside(paths: &[PathBuf], at: egui::Pos2, keys: Keys, released: bool) -> Option<Outside> {
+        Some(Outside { drag: Drag { paths: paths.to_vec() }, at, keys, released })
+    }
+
+    /// One folder row at `ROW`, as a panel draws it: whether it is lit, and
+    /// what `finish` asks the compositor for.
+    fn row(folder: &Path) -> impl FnMut(&mut egui::Ui) -> (bool, Option<Mode>) + '_ {
+        move |ui| {
+            let lit = over_dir(ui.ctx(), ui.clip_rect(), ROW, folder);
+            (lit, finish(ui.ctx()))
+        }
+    }
+
+    /// Two frames with the drag held (the label is laid out the second): what the last drew.
+    fn held(ctx: &egui::Context, folder: &Path) -> ((bool, Option<Mode>), Vec<egui::epaint::ClippedShape>) {
+        run(ctx, vec![], row(folder));
+        run(ctx, vec![], row(folder))
+    }
+
+    #[test]
+    fn a_drag_from_another_app_lights_the_row_under_it_and_names_the_action() {
+        let dir = fixture("dnd-outside-lit");
+        let sub = dir.join("sub");
+        let ctx = egui::Context::default();
+        let file = dir.join("a.txt");
+        // egui's own pointer is somewhere else: it is stale during such a drag.
+        run(&ctx, vec![egui::Event::PointerMoved(pos2(700.0, 500.0))], row(&sub));
+        set_outside(&ctx, outside(std::slice::from_ref(&file), ROW.center(), NONE, false));
+        let ((is_lit, preferred), shapes) = held(&ctx, &sub);
+        assert!(is_lit, "the row under the outside position lights up");
+        assert_eq!(preferred, Some(Mode::Move), "the same disk: a move is asked for");
+        assert_eq!(label(&shapes).as_deref(), Some("Move 1 item to sub"));
+        // The label sits by the outside position, not by egui's pointer.
+        let near = shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.text().contains(" item") => Some(t.pos),
+            _ => None,
+        });
+        assert!(near.is_some_and(|p| p.x > ROW.center().x && p.x < ROW.center().x + 40.0 && p.y > ROW.center().y && p.y < ROW.center().y + 40.0), "by the drag: {near:?}");
+
+        // Moved off the row: dark, and the offer is refused.
+        set_outside(&ctx, outside(std::slice::from_ref(&file), pos2(500.0, 400.0), NONE, false));
+        let ((is_lit, preferred), _) = held(&ctx, &sub);
+        assert!(!is_lit);
+        assert_eq!(preferred, None, "over no target the offer is refused");
+        // Gone: egui's pointer over the row is no drag.
+        set_outside(&ctx, None);
+        run(&ctx, vec![egui::Event::PointerMoved(ROW.center())], row(&sub));
+        let ((is_lit, preferred), shapes) = held(&ctx, &sub);
+        assert!(!is_lit && preferred.is_none() && label(&shapes).is_none() && lit(&ctx, &shapes).is_empty(), "no drag, no label");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_agreed_action_names_the_label_but_the_preferred_one_ignores_keys() {
+        let dir = fixture("dnd-outside-keys");
+        let sub = dir.join("sub");
+        let ctx = egui::Context::default();
+        set_outside(&ctx, outside(&[dir.join("a.txt")], ROW.center(), CTRL, false));
+        let ((is_lit, preferred), shapes) = held(&ctx, &sub);
+        assert!(is_lit);
+        assert_eq!(label(&shapes).as_deref(), Some("Copy 1 item to sub"), "Ctrl in the other app: a copy");
+        assert_eq!(preferred, Some(Mode::Move), "the compositor is asked to prefer the disks' action, or Ctrl would stick");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn another_disk_prefers_a_copy() {
+        // /dev/shm is a tmpfs, never the disk the home folder is on.
+        let shm = Path::new("/dev/shm");
+        if !shm.is_dir() {
+            return;
+        }
+        let dir = fixture("dnd-outside-other-disk");
+        let ctx = egui::Context::default();
+        set_outside(&ctx, outside(&[dir.join("a.txt")], ROW.center(), NONE, false));
+        let ((is_lit, preferred), _) = held(&ctx, shm);
+        assert!(is_lit);
+        assert_eq!(preferred, Some(Mode::Copy));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_row_that_refuses_the_drag_is_dark_and_asks_for_nothing() {
+        let dir = fixture("dnd-outside-refused");
+        let ctx = egui::Context::default();
+        // A folder over itself, and a move into the folder the file is in.
+        for (paths, target) in [(vec![dir.join("sub")], dir.join("sub")), (vec![dir.join("a.txt")], dir.clone())] {
+            set_outside(&ctx, outside(&paths, ROW.center(), NONE, false));
+            let ((is_lit, preferred), shapes) = held(&ctx, &target);
+            assert!(!is_lit, "{target:?} stays dark");
+            assert_eq!(preferred, None);
+            assert_eq!(label(&shapes).as_deref(), Some("1 item"), "no folder named");
+        }
+        // Ctrl in the other app would copy into the folder the file is in, but
+        // the offer was refused: nothing is agreed, so nothing is lit.
+        set_outside(&ctx, outside(&[dir.join("a.txt")], ROW.center(), CTRL, false));
+        let ((is_lit, preferred), _) = held(&ctx, &dir);
+        assert!(!is_lit && preferred.is_none());
+        // The trash takes nothing either.
+        set_trash(&ctx, Some(&dir.join("other")));
+        set_outside(&ctx, outside(&[dir.join("a.txt")], ROW.center(), NONE, false));
+        let ((is_lit, preferred), _) = held(&ctx, &dir.join("other"));
+        assert!(!is_lit && preferred.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn letting_go_over_a_row_takes_the_drop_there_with_the_agreed_keys() {
+        let dir = fixture("dnd-outside-drop");
+        let sub = dir.join("sub");
+        let ctx = egui::Context::default();
+        let file = dir.join("a.txt");
+        set_outside(&ctx, outside(std::slice::from_ref(&file), ROW.center(), CTRL, false));
+        held(&ctx, &sub);
+        assert!(take_drop(&ctx).is_none(), "held is not dropped");
+        set_outside(&ctx, outside(std::slice::from_ref(&file), ROW.center(), CTRL, true));
+        let (_, shapes) = run(&ctx, vec![], row(&sub));
+        let dropped = take_drop(&ctx).expect("let go over the row");
+        assert_eq!((dropped.drag.paths, dropped.target, dropped.keys), (vec![file.clone()], sub.clone(), CTRL));
+        assert!(label(&shapes).is_none(), "no label on the frame it is let go");
+        assert!(take_drop(&ctx).is_none(), "taken once");
+        // Let go over nothing: no drop.
+        set_outside(&ctx, outside(&[file], pos2(500.0, 400.0), NONE, true));
+        run(&ctx, vec![], row(&sub));
+        assert!(take_drop(&ctx).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_internal_drag_still_reads_egui_and_ignores_a_cleared_outside() {
+        let dir = fixture("dnd-outside-internal");
+        let sub = dir.join("sub");
+        let ctx = egui::Context::default();
+        set_outside(&ctx, None);
+        lift(&ctx, &[dir.join("a.txt")], ROW.center(), egui::Modifiers::NONE, row(&sub));
+        let ((is_lit, preferred), _) = run(&ctx, vec![], row(&sub));
+        assert!(is_lit);
+        assert_eq!(preferred, Some(Mode::Move));
+        let_go(&ctx, ROW.center(), egui::Modifiers::NONE, row(&sub));
+        assert_eq!(take_drop(&ctx).map(|d| d.target), Some(sub));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

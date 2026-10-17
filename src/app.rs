@@ -1791,16 +1791,12 @@ impl LumenApp {
         self.start_batch(ctx, paths, dest, mode);
     }
 
-    /// Files dropped on the window from another app land in the folder on
-    /// screen with the action agreed with that app (`mode`), refused where an
-    /// internal drop is.
-    #[cfg(target_os = "linux")]
-    fn drop_from_outside(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, mode: Mode) {
-        let folder = self.tab.view.current.clone();
-        // The agreed action, as the keys that force it inside Lumen.
-        let keys = crate::drag::Keys { ctrl: mode == Mode::Copy, shift: mode == Mode::Move };
-        if let Some(mode) = (crate::drag::Drag { paths: paths.clone() }).mode_for(&folder, keys) {
-            self.drop_into(ctx, paths, folder, mode);
+    /// Runs a drop a target took: as a paste into the folder it landed on,
+    /// with the action the keys (held, or agreed with the app the files come
+    /// from) and the disks settle, refused where any drop is.
+    fn run_drop(&mut self, ctx: &egui::Context, drop: ui::dnd::Dropped) {
+        if let Some(mode) = drop.drag.mode_for(&drop.target, drop.keys) {
+            self.drop_into(ctx, drop.drag.paths, drop.target, mode);
         }
     }
 
@@ -2454,10 +2450,9 @@ impl eframe::App for LumenApp {
         #[cfg(not(any(windows, target_os = "linux")))]
         let _ = frame;
         let ctx = ui.ctx().clone();
+        // Files dragged over the window from another app, if any.
         #[cfg(target_os = "linux")]
-        for (paths, mode) in self.wayland_dnd.poll(frame, &ctx) {
-            self.drop_from_outside(&ctx, paths, mode);
-        }
+        ui::dnd::set_outside(&ctx, self.wayland_dnd.poll(frame, &ctx));
         // Before any drop target is drawn: none in the trash takes a drop.
         ui::dnd::set_trash(&ctx, self.trash.as_deref());
 
@@ -2736,14 +2731,18 @@ impl eframe::App for LumenApp {
             self.answer_dialog(&ctx, answer);
         }
 
-        // A drop the list took: run as a paste into the folder it landed on.
-        if let Some(drop) = ui::dnd::take_drop(&ctx)
-            && let Some(mode) = drop.drag.mode_for(&drop.target, drop.keys)
-        {
-            self.drop_into(&ctx, drop.drag.paths, drop.target, mode);
+        // A drop a target took: run as a paste into the folder it landed on.
+        let dropped = ui::dnd::take_drop(&ctx);
+        let took = dropped.is_some();
+        if let Some(drop) = dropped {
+            self.run_drop(&ctx, drop);
         }
-        // After every target: the label by the pointer while entries are dragged.
-        ui::dnd::finish(&ctx);
+        // After every target: the label by the pointer while entries are dragged,
+        // and what a drag from another app is told: take it, or refuse.
+        let preferred = ui::dnd::finish(&ctx);
+        let _ = (preferred, took);
+        #[cfg(target_os = "linux")]
+        self.wayland_dnd.answer(preferred, took);
 
         if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
             self.window = Some([rect.width(), rect.height()]);
@@ -3647,7 +3646,13 @@ mod tests {
         assert!(app.tab.view.error.is_none());
     }
 
-    #[cfg(target_os = "linux")]
+    /// A drop on `target` of `paths` from another app, with the keys that
+    /// stand for the action agreed with it.
+    fn from_outside(paths: Vec<PathBuf>, target: PathBuf, mode: Mode) -> ui::dnd::Dropped {
+        let keys = crate::drag::Keys { ctrl: mode == Mode::Copy, shift: mode == Mode::Move };
+        ui::dnd::Dropped { drag: crate::drag::Drag { paths }, target, keys }
+    }
+
     #[test]
     fn files_dropped_from_another_app_land_in_the_folder_on_screen() {
         let (ctx, mut app, dir) = app_in("app-drop-outside");
@@ -3655,7 +3660,7 @@ mod tests {
         std::fs::write(other.join("n.txt"), "N").unwrap();
         std::fs::write(other.join("m.txt"), "M").unwrap();
         app.clipboard = Some(Clip { paths: vec![dir.join("b.txt")], mode: Mode::Copy });
-        app.drop_from_outside(&ctx, vec![other.join("n.txt"), other.join("m.txt")], Mode::Move);
+        app.run_drop(&ctx, from_outside(vec![other.join("n.txt"), other.join("m.txt")], dir.clone(), Mode::Move));
         wait_paste(&ctx, &mut app);
         assert_eq!(names_in(&dir), ["a.txt", "b.txt", "m.txt", "n.txt", "sub"]);
         assert!(names_in(&other).is_empty(), "a move: gone from the source");
@@ -3663,35 +3668,51 @@ mod tests {
         assert!(app.tab.view.error.is_none());
     }
 
-    #[cfg(target_os = "linux")]
+    #[test]
+    fn files_dropped_from_another_app_on_a_folder_land_in_that_folder_with_the_agreed_action() {
+        let (ctx, mut app, dir) = app_in("app-drop-outside-named");
+        let other = crate::fs::ops::tests::fresh_fixture("app-drop-outside-named-source");
+        std::fs::write(other.join("n.txt"), "N").unwrap();
+        std::fs::write(other.join("m.txt"), "M").unwrap();
+        // The folder on screen is `dir`; the drop is on `sub`, a move.
+        app.run_drop(&ctx, from_outside(vec![other.join("n.txt")], dir.join("sub"), Mode::Move));
+        wait_paste(&ctx, &mut app);
+        assert_eq!(names_in(&dir.join("sub")), ["n.txt"], "in the folder under the pointer");
+        assert_eq!(names_in(&dir), ["a.txt", "b.txt", "sub"], "not in the folder on screen");
+        assert_eq!(names_in(&other), ["m.txt"], "a move: gone from the source");
+        // The agreed copy is a copy even where the disks would move.
+        app.run_drop(&ctx, from_outside(vec![other.join("m.txt")], dir.join("sub"), Mode::Copy));
+        wait_paste(&ctx, &mut app);
+        assert_eq!(names_in(&dir.join("sub")), ["m.txt", "n.txt"]);
+        assert_eq!(names_in(&other), ["m.txt"], "a copy: the source keeps its file");
+    }
+
     #[test]
     fn a_copy_dropped_from_another_app_on_the_same_disk_leaves_the_source_alone() {
         let (ctx, mut app, dir) = app_in("app-drop-outside-copy");
         let other = crate::fs::ops::tests::fresh_fixture("app-drop-outside-copy-source");
         std::fs::write(other.join("n.txt"), "N").unwrap();
-        app.drop_from_outside(&ctx, vec![other.join("n.txt")], Mode::Copy);
+        app.run_drop(&ctx, from_outside(vec![other.join("n.txt")], dir.clone(), Mode::Copy));
         wait_paste(&ctx, &mut app);
         assert_eq!(names_in(&dir), ["a.txt", "b.txt", "n.txt", "sub"]);
         assert_eq!(names_in(&other), ["n.txt"], "the source keeps its file");
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn files_dropped_from_another_app_into_the_trash_view_are_refused() {
         let (ctx, mut app, dir) = app_in("app-drop-outside-trash");
         let other = crate::fs::ops::tests::fresh_fixture("app-drop-outside-trash-source");
         std::fs::write(other.join("n.txt"), "N").unwrap();
         app.trash = Some(dir.clone());
-        app.drop_from_outside(&ctx, vec![other.join("n.txt")], Mode::Move);
+        app.run_drop(&ctx, from_outside(vec![other.join("n.txt")], dir.clone(), Mode::Move));
         assert_eq!(app.tab.view.error.as_deref(), Some("Nothing can be dropped into the trash"));
         assert_eq!(names_in(&other), ["n.txt"]);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_folder_dropped_from_another_app_onto_itself_does_nothing() {
         let (ctx, mut app, dir) = app_in("app-drop-outside-self");
-        app.drop_from_outside(&ctx, vec![dir.clone()], Mode::Move);
+        app.run_drop(&ctx, from_outside(vec![dir.clone()], dir.clone(), Mode::Move));
         assert!(app.batch.is_none() && app.job.is_none(), "nothing started");
         assert_eq!(names_in(&dir), ["a.txt", "b.txt", "sub"]);
     }
