@@ -46,6 +46,8 @@ pub enum Action {
     /// Put the selected entry in Lumen's clipboard (Ctrl+C / Ctrl+X).
     Copy,
     Cut,
+    /// Ctrl+Shift+C: the selected entries' paths as text, one per line.
+    CopyPath,
     /// Paste the clipboard into the current folder (Ctrl+V).
     Paste,
     /// Alt+R: count the selected folder's size, folders and files.
@@ -305,6 +307,7 @@ fn clipboard_actions(ctx: &Context, events: &[Event]) -> Vec<Action> {
     let mut actions = Vec::new();
     for event in events {
         match event {
+            Event::Copy if ctx.input(|i| i.modifiers.shift) => actions.push(Action::CopyPath),
             Event::Copy => actions.push(Action::Copy),
             // On Windows egui-winit turns Shift+Delete into a cut (its old
             // shortcut) and sends no Delete press: here it deletes, as in Explorer.
@@ -451,6 +454,15 @@ mod tests {
         assert_eq!(actions_for(ctrl_x), [Action::Cut], "Ctrl+X still cuts");
         let ctrl_shift_x = vec![Event::ModifiersChanged(Modifiers::COMMAND | Modifiers::SHIFT), Event::Cut];
         assert_eq!(actions_for(ctrl_shift_x), [Action::Cut]);
+    }
+
+    // egui-winit sends Ctrl+C with or without Shift as Event::Copy.
+    #[test]
+    fn ctrl_shift_c_copies_the_path_and_ctrl_c_still_copies_the_entries() {
+        let ctrl_shift_c = vec![Event::ModifiersChanged(Modifiers::COMMAND | Modifiers::SHIFT), Event::Copy];
+        assert_eq!(actions_for(ctrl_shift_c), [Action::CopyPath]);
+        let ctrl_c = vec![Event::ModifiersChanged(Modifiers::COMMAND), Event::Copy];
+        assert_eq!(actions_for(ctrl_c), [Action::Copy], "Ctrl+C still copies");
     }
 
     #[test]

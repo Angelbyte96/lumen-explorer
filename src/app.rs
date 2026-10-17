@@ -1509,6 +1509,18 @@ impl LumenApp {
         self.context_menu = Some(ContextMenu::new(items, pos));
     }
 
+    /// Copy Path (Ctrl+Shift+C): the selected entries' paths as text; with
+    /// nothing selected, nothing.
+    fn copy_paths(&mut self, ctx: &egui::Context) {
+        let selection = self.tab.view.selection();
+        if selection.is_empty() {
+            return;
+        }
+        let paths: Vec<&Path> = selection.iter().map(|e| e.path.as_path()).collect();
+        ctx.copy_text(paths_text(&paths));
+        self.notice = Some(if paths.len() == 1 { "Path copied".into() } else { format!("{} paths copied", paths.len()) });
+    }
+
     fn run_command(&mut self, ctx: &egui::Context, command: Command) {
         let single = self.tab.view.single().map(|e| (e.path.clone(), e.is_dir));
         match command {
@@ -1535,12 +1547,7 @@ impl LumenApp {
             }
             Command::Cut => self.set_clipboard(Mode::Move),
             Command::Copy => self.set_clipboard(Mode::Copy),
-            Command::CopyPath => {
-                let selection = self.tab.view.selection();
-                let paths: Vec<&Path> = selection.iter().map(|e| e.path.as_path()).collect();
-                ctx.copy_text(paths_text(&paths));
-                self.notice = Some(if paths.len() == 1 { "Path copied".into() } else { format!("{} paths copied", paths.len()) });
-            }
+            Command::CopyPath => self.copy_paths(ctx),
             Command::Paste => self.paste(ctx),
             Command::PasteInto => {
                 if let Some((folder, true)) = single {
@@ -1765,6 +1772,20 @@ impl LumenApp {
         self.clipboard = Some(Clip { paths, mode });
     }
 
+    /// Copies or moves `paths` into `dest` as a paste does (the same
+    /// questions, progress and cancel), leaving the clipboard alone.
+    fn drop_into(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, dest: PathBuf, mode: Mode) {
+        // Moved in by hand it would have no record to be restored from.
+        if self.trash.as_deref().is_some_and(|trash| places::in_trash(&dest, trash)) {
+            self.tab.view.error = Some("Nothing can be dropped into the trash".into());
+            return;
+        }
+        if self.busy() {
+            return;
+        }
+        self.start_batch(ctx, paths, dest, mode);
+    }
+
     fn paste(&mut self, ctx: &egui::Context) {
         self.paste_into(ctx, self.tab.view.current.clone());
     }
@@ -1772,14 +1793,27 @@ impl LumenApp {
     /// Pastes the clipboard into `dest`: the folder on screen, or a folder's
     /// own Paste in the Windows menu.
     fn paste_into(&mut self, ctx: &egui::Context, dest: PathBuf) {
-        if self.job.is_some() || self.batch.is_some() {
-            self.tab.view.error = Some("Another operation is still running".into());
+        if self.busy() {
             return;
         }
         let Some(Clip { paths, mode }) = self.clipboard.clone() else {
             self.notice = Some("Nothing to paste: Ctrl+C or Ctrl+X first".into());
             return;
         };
+        self.start_batch(ctx, paths, dest, mode);
+    }
+
+    /// A copy or move is already running: says so.
+    fn busy(&mut self) -> bool {
+        let busy = self.job.is_some() || self.batch.is_some();
+        if busy {
+            self.tab.view.error = Some("Another operation is still running".into());
+        }
+        busy
+    }
+
+    /// Copies or moves `paths` into `dest`, one entry at a time.
+    fn start_batch(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, dest: PathBuf, mode: Mode) {
         self.notice = None;
         self.tab.view.error = None;
         let total = paths.len();
@@ -1938,13 +1972,12 @@ impl LumenApp {
 
     /// Titles of every tab, in bar order.
     fn tab_labels(&self) -> Vec<String> {
-        self.tabs
-            .iter()
-            .map(|slot| {
-                let tab = slot.as_ref().unwrap_or(&self.tab);
-                ui::tabs::tab_label(&tab.view.current)
-            })
-            .collect()
+        self.tab_folders().iter().map(|folder| ui::tabs::tab_label(folder)).collect()
+    }
+
+    /// The folder each tab shows (the active tab's is in `self.tab`).
+    fn tab_folders(&self) -> Vec<PathBuf> {
+        self.tabs.iter().map(|slot| slot.as_ref().unwrap_or(&self.tab).view.current.clone()).collect()
     }
 
     /// Ctrl+T or +: opens the current folder in a new tab after this one.
@@ -2347,6 +2380,7 @@ impl LumenApp {
             Action::NewFolder => self.new_folder(ctx),
             Action::Copy => self.set_clipboard(Mode::Copy),
             Action::Cut => self.set_clipboard(Mode::Move),
+            Action::CopyPath => self.copy_paths(ctx),
             Action::Paste => self.paste(ctx),
             Action::Count => self.count_selected(ctx),
             Action::ToggleBookmark => self.toggle_bookmark(self.tab.view.current.clone()),
@@ -2402,6 +2436,8 @@ impl eframe::App for LumenApp {
         #[cfg(not(windows))]
         let _ = frame;
         let ctx = ui.ctx().clone();
+        // Before any drop target is drawn: none in the trash takes a drop.
+        ui::dnd::set_trash(&ctx, self.trash.as_deref());
 
         if let Some(listing) = self.tab.lister.poll() {
             self.apply(listing);
@@ -2447,6 +2483,7 @@ impl eframe::App for LumenApp {
                 Some(TabEvent::New) => self.new_tab(&ctx),
                 None => {}
             }
+            ui::tabs::drop_targets(ui, &self.tab_folders());
         });
 
         egui::Panel::top("toolbar").show(ui, |ui| {
@@ -2676,6 +2713,15 @@ impl eframe::App for LumenApp {
         {
             self.answer_dialog(&ctx, answer);
         }
+
+        // A drop the list took: run as a paste into the folder it landed on.
+        if let Some(drop) = ui::dnd::take_drop(&ctx)
+            && let Some(mode) = drop.drag.mode_for(&drop.target, drop.keys)
+        {
+            self.drop_into(&ctx, drop.drag.paths, drop.target, mode);
+        }
+        // After every target: the label by the pointer while entries are dragged.
+        ui::dnd::finish(&ctx);
 
         if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
             self.window = Some([rect.width(), rect.height()]);
@@ -3565,6 +3611,63 @@ mod tests {
     }
 
     #[test]
+    fn a_drop_moves_into_the_folder_and_leaves_the_clipboard_alone() {
+        let (ctx, mut app, dir) = app_in("app-drop-move");
+        pick(&mut app, &["b.txt"]);
+        app.handle_action(&ctx, Action::Copy);
+        app.drop_into(&ctx, vec![dir.join("a.txt")], dir.join("sub"), Mode::Move);
+        wait_paste(&ctx, &mut app);
+        assert_eq!(names_in(&dir.join("sub")), ["a.txt"]);
+        assert_eq!(names_in(&dir), ["b.txt", "sub"]);
+        assert_eq!(app.clipboard.as_ref().map(|c| (c.paths.clone(), c.mode)), Some((vec![dir.join("b.txt")], Mode::Copy)));
+        assert!(app.tab.view.error.is_none());
+    }
+
+    #[test]
+    fn a_drop_with_a_taken_name_asks_like_a_paste() {
+        let (ctx, mut app, dir) = app_in("app-drop-taken");
+        std::fs::write(dir.join("sub").join("a.txt"), "old").unwrap();
+        app.drop_into(&ctx, vec![dir.join("a.txt")], dir.join("sub"), Mode::Copy);
+        wait_paste(&ctx, &mut app);
+        assert!(matches!(&app.dialog, Some(Dialog::Paste { mode: Mode::Copy, .. })), "the replace question");
+        assert_eq!(std::fs::read_to_string(dir.join("sub").join("a.txt")).unwrap(), "old", "nothing replaced yet");
+    }
+
+    #[test]
+    fn a_drop_into_the_trash_is_refused() {
+        let (ctx, mut app, dir) = app_in("app-drop-trash");
+        let trash = dir.join("sub");
+        app.trash = Some(trash.clone());
+        std::fs::create_dir(trash.join("old")).unwrap();
+        for dest in [trash.clone(), trash.join("old")] {
+            app.drop_into(&ctx, vec![dir.join("a.txt")], dest, Mode::Move);
+            assert!(app.batch.is_none() && app.job.is_none(), "nothing started");
+            assert_eq!(app.tab.view.error.as_deref(), Some("Nothing can be dropped into the trash"));
+            app.tab.view.error = None;
+        }
+        assert_eq!(names_in(&dir), ["a.txt", "b.txt", "sub"]);
+        assert_eq!(names_in(&trash), ["old"]);
+    }
+
+    #[test]
+    fn a_drop_while_a_paste_runs_is_refused() {
+        let (ctx, mut app, dir) = app_in("app-drop-busy");
+        app.batch = Some(Batch {
+            mode: Mode::Copy,
+            dest: dir.join("sub"),
+            sources: Vec::new(),
+            parked: None,
+            queue: VecDeque::new(),
+            total: 0,
+            landed: None,
+            in_place: Vec::new(),
+        });
+        app.drop_into(&ctx, vec![dir.join("a.txt")], dir.join("sub"), Mode::Move);
+        assert_eq!(app.tab.view.error.as_deref(), Some("Another operation is still running"));
+        assert_eq!(names_in(&dir), ["a.txt", "b.txt", "sub"]);
+    }
+
+    #[test]
     fn sort_and_refresh_from_the_menu_keep_the_selected_entry() {
         let (ctx, mut app, dir) = app_in("app-menu-sort");
         pick(&mut app, &["b.txt"]);
@@ -3575,6 +3678,30 @@ mod tests {
         assert_eq!(app.tab.lister.last_requested(), Some(dir.clone()));
         land(&mut app);
         assert_eq!(selection_names(&app.tab.view), ["b.txt"]);
+    }
+
+    #[test]
+    fn ctrl_shift_c_copies_the_selected_paths_and_leaves_lumens_clipboard_alone() {
+        let (ctx, mut app, dir) = app_in("app-copy-path-key");
+        let copied = |ctx: &egui::Context| {
+            ctx.output(|o| {
+                o.commands.iter().find_map(|c| match c {
+                    egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                    _ => None,
+                })
+            })
+        };
+        // Nothing selected (Escape unselects): nothing copied, nothing said.
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.tab.view.selection().is_empty());
+        app.handle_action(&ctx, Action::CopyPath);
+        assert_eq!((copied(&ctx), app.notice.as_deref()), (None, None));
+        pick(&mut app, &["a.txt"]);
+        app.handle_action(&ctx, Action::CopyPath);
+        assert_eq!(copied(&ctx), Some(dir.join("a.txt").display().to_string()));
+        assert_eq!(app.notice.as_deref(), Some("Path copied"));
+        assert!(app.clipboard.is_none(), "no entry is put up for Paste");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
