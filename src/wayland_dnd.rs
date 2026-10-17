@@ -86,10 +86,15 @@ fn unescape(text: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Reads a whole list from the pipe the dragging app writes to.
+/// Reads a whole list from the pipe the dragging app writes to. One that
+/// reaches the cap is refused: its last line may be cut short into another
+/// file's name.
 fn read_list(source: impl Read) -> std::io::Result<Vec<PathBuf>> {
     let mut data = Vec::new();
     source.take(MAX_LIST).read_to_end(&mut data)?;
+    if data.len() as u64 >= MAX_LIST {
+        return Err(std::io::Error::other("the list of files is too long"));
+    }
     Ok(parse_uri_list(&data))
 }
 
@@ -193,7 +198,9 @@ impl Receiver {
             if let Some(hover) = hover.take() {
                 end_drop(&hover, took);
             }
-        } else if let Some(hover) = hover.as_mut().filter(|hover| hover.track.paths.is_some() && hover.answered != Some(verdict)) {
+        // Not once let go: set_actions on a dropped offer is a protocol error,
+        // which would close the connection (and the window). The next frame ends it.
+        } else if let Some(hover) = hover.as_mut().filter(|hover| !hover.track.released && hover.track.paths.is_some() && hover.answered != Some(verdict)) {
             send_verdict(hover, verdict);
             hover.answered = Some(verdict);
         }
@@ -713,16 +720,23 @@ mod tests {
     }
 
     #[test]
-    fn a_list_that_never_ends_is_cut_at_the_cap() {
-        /// A source that keeps writing the same line.
+    fn a_list_that_reaches_the_cap_is_refused_whole() {
+        /// A source that keeps writing file lines.
         struct Endless;
         impl Read for Endless {
             fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                buf.fill(b'\n');
+                for (i, byte) in buf.iter_mut().enumerate() {
+                    *byte = b"file:///tmp/a long name\n"[i % 24];
+                }
                 Ok(buf.len())
             }
         }
-        // Blank lines only: the read ends at the cap instead of hanging or filling memory.
-        assert!(read_list(Endless).unwrap().is_empty());
+        // The read ends at the cap instead of hanging or filling memory, and
+        // the last line may be cut short (another file's name): nothing is taken.
+        assert!(read_list(Endless).is_err());
+        // Just under the cap: taken.
+        let line = b"file:///tmp/x\n";
+        let fits = line.repeat((MAX_LIST as usize - 1) / line.len());
+        assert_eq!(read_list(&fits[..]).unwrap().len(), fits.len() / line.len());
     }
 }
