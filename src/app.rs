@@ -2737,6 +2737,10 @@ impl eframe::App for LumenApp {
         if let Some(drop) = dropped {
             self.run_drop(&ctx, drop);
         }
+        // A drag whose pointer went past the window's edge goes to the
+        // compositor, to be dropped on another app.
+        #[cfg(target_os = "linux")]
+        self.wayland_dnd.carry_out(&ctx);
         // After every target: the label by the pointer while entries are dragged,
         // and what a drag from another app is told: take it, or refuse.
         let preferred = ui::dnd::finish(&ctx);
@@ -2748,6 +2752,11 @@ impl eframe::App for LumenApp {
             self.window = Some([rect.width(), rect.height()]);
         }
         self.save_settings(false);
+    }
+
+    /// The release of a drag handed to the compositor, which egui never sees.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        ui::dnd::end_hand_off(ctx, raw_input);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
