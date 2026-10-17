@@ -281,7 +281,8 @@ pub fn finish(ctx: &egui::Context) -> Option<Mode> {
         .order(egui::Order::Tooltip)
         .fade_in(false)
         .interactable(false)
-        .fixed_pos(at + egui::vec2(16.0, 16.0))
+        // From another app, right of the icon that app draws by the pointer.
+        .fixed_pos(at + if outside(ctx).is_some() { egui::vec2(72.0, 8.0) } else { egui::vec2(16.0, 16.0) })
         .show(ctx, |ui| {
             // One line as wide as the text: the area keeps the width it first
             // had ("1 item"), which would wrap a folder's name.
@@ -342,12 +343,14 @@ mod tests {
         assert!(is_lit, "the row under the outside position lights up");
         assert_eq!(preferred, Some(Mode::Move), "the same disk: a move is asked for");
         assert_eq!(label(&shapes).as_deref(), Some("Move 1 item to sub"));
-        // The label sits by the outside position, not by egui's pointer.
+        // The label sits by the outside position, not by egui's pointer, and
+        // clear of the icon the dragging app draws there (up to 64 points).
         let near = shapes.iter().find_map(|s| match &s.shape {
             egui::Shape::Text(t) if t.galley.text().contains(" item") => Some(t.pos),
             _ => None,
         });
-        assert!(near.is_some_and(|p| p.x > ROW.center().x && p.x < ROW.center().x + 40.0 && p.y > ROW.center().y && p.y < ROW.center().y + 40.0), "by the drag: {near:?}");
+        let at = ROW.center();
+        assert!(near.is_some_and(|p| p.x > at.x + 64.0 && p.x < at.x + 100.0 && p.y > at.y && p.y < at.y + 40.0), "by the drag, past its icon: {near:?}");
 
         // Moved off the row: dark, and the offer is refused.
         set_outside(&ctx, outside(std::slice::from_ref(&file), pos2(500.0, 400.0), NONE, false));
