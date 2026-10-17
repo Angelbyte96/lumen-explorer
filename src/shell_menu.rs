@@ -130,7 +130,7 @@ pub fn entry_menu(shell: Vec<Item>, selection: &[&Entry], bookmarked: bool, can_
     if folder {
         items.push(Item::run("Open in New Tab", None, true, Command::OpenInNewTab));
     }
-    items.push(Item::run("Copy Path", None, true, Command::CopyPath));
+    items.push(Item::run("Copy Path", Some("Ctrl+Shift+C"), true, Command::CopyPath));
     items.push(Item::run("Delete Permanently", Some("Shift+Delete"), true, Command::DeleteForever));
     if folder {
         let bookmark = if bookmarked { "Remove from Bookmarks" } else { "Add to Bookmarks" };
@@ -265,7 +265,7 @@ mod tests {
                 "Properties",
                 "-",
                 "Open in New Tab",
-                "Copy Path",
+                "Copy Path [Ctrl+Shift+C]",
                 "Delete Permanently [Shift+Delete]",
                 "Add to Bookmarks",
                 "Calculate Size [Alt+R]",

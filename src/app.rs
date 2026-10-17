@@ -1509,6 +1509,18 @@ impl LumenApp {
         self.context_menu = Some(ContextMenu::new(items, pos));
     }
 
+    /// Copy Path (Ctrl+Shift+C): the selected entries' paths as text; with
+    /// nothing selected, nothing.
+    fn copy_paths(&mut self, ctx: &egui::Context) {
+        let selection = self.tab.view.selection();
+        if selection.is_empty() {
+            return;
+        }
+        let paths: Vec<&Path> = selection.iter().map(|e| e.path.as_path()).collect();
+        ctx.copy_text(paths_text(&paths));
+        self.notice = Some(if paths.len() == 1 { "Path copied".into() } else { format!("{} paths copied", paths.len()) });
+    }
+
     fn run_command(&mut self, ctx: &egui::Context, command: Command) {
         let single = self.tab.view.single().map(|e| (e.path.clone(), e.is_dir));
         match command {
@@ -1535,12 +1547,7 @@ impl LumenApp {
             }
             Command::Cut => self.set_clipboard(Mode::Move),
             Command::Copy => self.set_clipboard(Mode::Copy),
-            Command::CopyPath => {
-                let selection = self.tab.view.selection();
-                let paths: Vec<&Path> = selection.iter().map(|e| e.path.as_path()).collect();
-                ctx.copy_text(paths_text(&paths));
-                self.notice = Some(if paths.len() == 1 { "Path copied".into() } else { format!("{} paths copied", paths.len()) });
-            }
+            Command::CopyPath => self.copy_paths(ctx),
             Command::Paste => self.paste(ctx),
             Command::PasteInto => {
                 if let Some((folder, true)) = single {
@@ -2373,6 +2380,7 @@ impl LumenApp {
             Action::NewFolder => self.new_folder(ctx),
             Action::Copy => self.set_clipboard(Mode::Copy),
             Action::Cut => self.set_clipboard(Mode::Move),
+            Action::CopyPath => self.copy_paths(ctx),
             Action::Paste => self.paste(ctx),
             Action::Count => self.count_selected(ctx),
             Action::ToggleBookmark => self.toggle_bookmark(self.tab.view.current.clone()),
@@ -3670,6 +3678,30 @@ mod tests {
         assert_eq!(app.tab.lister.last_requested(), Some(dir.clone()));
         land(&mut app);
         assert_eq!(selection_names(&app.tab.view), ["b.txt"]);
+    }
+
+    #[test]
+    fn ctrl_shift_c_copies_the_selected_paths_and_leaves_lumens_clipboard_alone() {
+        let (ctx, mut app, dir) = app_in("app-copy-path-key");
+        let copied = |ctx: &egui::Context| {
+            ctx.output(|o| {
+                o.commands.iter().find_map(|c| match c {
+                    egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                    _ => None,
+                })
+            })
+        };
+        // Nothing selected (Escape unselects): nothing copied, nothing said.
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.tab.view.selection().is_empty());
+        app.handle_action(&ctx, Action::CopyPath);
+        assert_eq!((copied(&ctx), app.notice.as_deref()), (None, None));
+        pick(&mut app, &["a.txt"]);
+        app.handle_action(&ctx, Action::CopyPath);
+        assert_eq!(copied(&ctx), Some(dir.join("a.txt").display().to_string()));
+        assert_eq!(app.notice.as_deref(), Some("Path copied"));
+        assert!(app.clipboard.is_none(), "no entry is put up for Paste");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
