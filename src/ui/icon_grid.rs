@@ -933,4 +933,46 @@ pub(crate) mod tests {
         let unread = shapes_of(&ctx, &view, 0.0, &file_icons, &Thumbnails::default());
         assert!(meshes_of(&unread, folder_icon.id()).is_empty(), "also while the peek is not read");
     }
+
+    /// Holds a drag from another app at `to` with the keys agreed with it.
+    fn hold_outside(ctx: &egui::Context, view: &View, to: egui::Pos2, keys: crate::drag::Keys, released: bool) -> Drawn {
+        let drag = crate::drag::Drag { paths: paths(&["a.txt"]) };
+        crate::ui::dnd::set_outside(ctx, Some(crate::ui::dnd::Outside { drag, at: to, keys, released }));
+        let drawn = draw(ctx, view, 0.0, vec![]);
+        if released { drawn } else { draw(ctx, view, 0.0, vec![]) }
+    }
+
+    #[test]
+    fn files_dragged_in_from_another_app_light_the_folder_card_under_them_and_drop_on_it() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["test"], &["a.txt", "b.txt"]);
+        view.current = PathBuf::from("/x");
+        let drawn = settled(&ctx, &view, 0.0);
+        let (folder, b) = (at(&drawn, "test").1.center(), at(&drawn, "b.txt").1.center());
+        let none = crate::drag::Keys::default();
+        // egui's pointer is elsewhere (it gets no events during such a drag).
+        draw(&ctx, &view, 0.0, vec![egui::Event::PointerMoved(b)]);
+        let held = hold_outside(&ctx, &view, folder, none, false);
+        assert!(lit(&ctx, &held, folder), "the folder card lights up: {:?}", held.fills);
+        assert!(!lit(&ctx, &held, b), "and only it");
+        at(&held, "Copy 1 item to test");
+        let held = hold_outside(&ctx, &view, folder, crate::drag::Keys { ctrl: false, shift: true }, false);
+        at(&held, "Move 1 item to test");
+        hold_outside(&ctx, &view, folder, crate::drag::Keys { ctrl: false, shift: true }, true);
+        let dropped = crate::ui::dnd::take_drop(&ctx).map(|d| (d.drag.paths, d.target, d.keys));
+        assert_eq!(dropped, Some((paths(&["a.txt"]), PathBuf::from("/x/test"), crate::drag::Keys { ctrl: false, shift: true })));
+
+        // The empty space drops into the folder on screen; a file card takes nothing.
+        let space = egui::pos2(500.0, 400.0);
+        let held = hold_outside(&ctx, &view, space, none, false);
+        at(&held, "Copy 1 item to x");
+        hold_outside(&ctx, &view, space, none, true);
+        assert_eq!(crate::ui::dnd::take_drop(&ctx).map(|d| d.target), Some(PathBuf::from("/x")));
+        let held = hold_outside(&ctx, &view, b, none, false);
+        assert!(!lit(&ctx, &held, b));
+        at(&held, "1 item");
+        hold_outside(&ctx, &view, b, none, true);
+        assert!(crate::ui::dnd::take_drop(&ctx).is_none());
+        crate::ui::dnd::set_outside(&ctx, None);
+    }
 }

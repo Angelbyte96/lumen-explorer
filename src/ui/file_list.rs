@@ -2073,4 +2073,29 @@ mod tests {
         let second = draw_tree(&ctx, &view, true, events(), Some(10.1)).0;
         assert!(matches!(second, Some(ListEvent::Activate(0))), "opens, not unfolds");
     }
+
+    #[test]
+    fn files_dragged_in_from_another_app_light_the_folder_row_under_them_and_drop_on_it() {
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        view.entries = vec![folder_entry("dir"), entry("a.txt")];
+        view.rows = vec![0, 1];
+        let rows: Vec<egui::Rect> = (0..2).map(|row| row_rect(&ctx, &mut view, row)).collect();
+        let (dir, file) = (egui::pos2(500.0, rows[0].center().y), egui::pos2(500.0, rows[1].center().y));
+        let outside = |at, released| {
+            let drag = crate::drag::Drag { paths: paths(&["a.txt"]) };
+            crate::ui::dnd::set_outside(&ctx, Some(crate::ui::dnd::Outside { drag, at, keys: crate::drag::Keys { ctrl: true, shift: false }, released }));
+        };
+        // egui's pointer is over the file row; the drag is over the folder row.
+        hold(&ctx, &view, Sizes::default(), vec![egui::Event::PointerMoved(file)], Default::default());
+        outside(dir, false);
+        hold(&ctx, &view, Sizes::default(), vec![], Default::default());
+        let shapes = hold(&ctx, &view, Sizes::default(), vec![], Default::default());
+        assert!(lit(&ctx, &shapes, dir) && !lit(&ctx, &shapes, file), "only the folder row lights up");
+        assert!(texts_of(&shapes).iter().any(|t| t == "Copy 1 item to dir"), "{:?}", texts_of(&shapes));
+        outside(dir, true);
+        hold(&ctx, &view, Sizes::default(), vec![], Default::default());
+        assert_eq!(crate::ui::dnd::take_drop(&ctx).map(|d| (d.drag.paths, d.target)), Some((paths(&["a.txt"]), PathBuf::from("/x/dir"))));
+        crate::ui::dnd::set_outside(&ctx, None);
+    }
 }

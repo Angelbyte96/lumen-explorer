@@ -269,4 +269,27 @@ mod tests {
         assert_eq!(taken(&ctx), None, "and nothing was dropped");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn files_dragged_in_from_another_app_light_the_tab_under_them_and_drop_on_it() {
+        let (dir, folders) = two_tabs("dnd-tabs-outside");
+        let ctx = egui::Context::default();
+        run(&ctx, vec![], bar(&folders));
+        let b = tab_rect(&ctx, 1);
+        let file = dir.join("f.txt");
+        let outside = |released| {
+            let drag = crate::drag::Drag { paths: vec![file.clone()] };
+            crate::ui::dnd::set_outside(&ctx, Some(crate::ui::dnd::Outside { drag, at: b.center(), keys: Keys::default(), released }));
+        };
+        outside(false);
+        run(&ctx, vec![], bar(&folders));
+        let (_, shapes) = run(&ctx, vec![], bar(&folders));
+        assert!(lit(&ctx, &shapes).iter().any(|r| r.contains(b.center())), "the tab lights up");
+        assert_eq!(label(&shapes).as_deref(), Some("Move 1 item to b"));
+        outside(true);
+        run(&ctx, vec![], bar(&folders));
+        assert_eq!(taken(&ctx), Some((vec![file], dir.join("b"), Keys::default())));
+        crate::ui::dnd::set_outside(&ctx, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
