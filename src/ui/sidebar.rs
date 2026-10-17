@@ -779,6 +779,26 @@ mod tests {
     }
 
     #[test]
+    fn the_label_by_the_pointer_grows_to_its_text_on_one_line() {
+        let panel = drop_panel("dnd-side-label");
+        let ctx = egui::Context::default();
+        let file = panel.dir.join("f.txt");
+        // First shown short ("1 item" over the trash), then naming a folder.
+        let trash = row_of(&ctx, &panel, "Trash");
+        let home = row_of(&ctx, &panel, "Home");
+        lift(&ctx, std::slice::from_ref(&file), trash, NONE, side(&panel));
+        run(&ctx, vec![egui::Event::PointerMoved(home)], side(&panel));
+        let (_, shapes) = run(&ctx, vec![], side(&panel));
+        let rows = shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.text().contains(" item") => Some((t.galley.text().to_owned(), t.galley.rows.len())),
+            _ => None,
+        });
+        assert_eq!(rows, Some(("Move 1 item to home".to_owned(), 1)));
+        let_go(&ctx, home, NONE, side(&panel));
+        let _ = std::fs::remove_dir_all(&panel.dir);
+    }
+
+    #[test]
     fn rows_that_are_no_folder_that_takes_it_stay_dark_and_take_nothing() {
         let panel = drop_panel("dnd-side-refused");
         let ctx = egui::Context::default();
