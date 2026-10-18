@@ -266,9 +266,11 @@ pub fn lit_fill(visuals: &egui::Visuals) -> egui::Color32 {
     visuals.selection.bg_fill.gamma_multiply(0.55)
 }
 
-/// The empty space of the list at `rect`, when the pointer is over no row,
-/// card or cell: a ring round it, and it drops into `current`, the folder on
-/// screen.
+/// Everything of the list at `rect` that is not a folder (a file row, card or
+/// cell, the gaps between them, the empty space), as Nautilus does: a ring
+/// round it, and it drops into `current`, the folder on screen. The caller
+/// leaves it out while the pointer is over a folder row, card or cell, which
+/// takes the drop itself or, when it refuses it, stays refused.
 pub fn background(ui: &egui::Ui, rect: Rect, current: &Path) {
     let rect = rect.intersect(ui.clip_rect());
     if over(ui.ctx(), ui.clip_rect(), rect, Some(current)).lit {
