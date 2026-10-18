@@ -202,7 +202,7 @@ fn write_within(fd: OwnedFd, data: &[u8], limit: Duration) -> std::io::Result<()
 }
 
 /// The pointer of Lumen's own on the seat, as far as a drag out needs it: the
-/// serial of the left button's press while it is held over the window.
+/// serial of the left button's press made over the window, while it is held.
 #[derive(Default)]
 struct Grab {
     /// The pointer is over the window's own surface (not its decorations).
@@ -211,12 +211,15 @@ struct Grab {
 }
 
 impl Grab {
+    // The press outlives the focus: while the button is held the compositor
+    // may move the focus onto the window's frame (a subsurface of it, on
+    // GNOME) and back, and the grab, with its serial, goes on.
     fn entered(&mut self, main: bool) {
-        *self = Grab { focus: main, press: None };
+        self.focus = main;
     }
 
     fn left(&mut self) {
-        *self = Grab::default();
+        self.focus = false;
     }
 
     fn button(&mut self, button: u32, pressed: bool, serial: u32) {
@@ -862,7 +865,7 @@ impl Dispatch<WlSeat, ()> for State {
                     pointer.release();
                 }
                 if let Ok(mut grab) = state.shared.grab.lock() {
-                    grab.left();
+                    *grab = Grab::default();
                 }
             }
             _ => {}
@@ -1150,22 +1153,35 @@ mod tests {
     }
 
     #[test]
-    fn leaving_the_window_or_entering_a_decoration_forgets_the_press() {
+    fn a_press_on_a_decoration_or_with_no_focus_is_no_drag_of_the_list() {
         let mut grab = Grab::default();
         grab.entered(true);
-        grab.button(BTN_LEFT, true, 3);
         grab.left();
-        assert_eq!(grab.press, None);
         grab.button(BTN_LEFT, true, 4);
         assert_eq!(grab.press, None, "no focus after the leave");
         // Over the title bar (a surface of its own): a press there is no drag of the list.
         grab.entered(false);
         grab.button(BTN_LEFT, true, 5);
         assert_eq!(grab.press, None);
+    }
+
+    #[test]
+    fn a_held_press_outlives_the_focus_passing_over_the_frame_and_back() {
+        // A slow drag out on GNOME (M13, L35-L37): the frame's border is a
+        // subsurface of the window, and the compositor moves the focus onto it
+        // and back while the button is held.
+        let mut grab = Grab::default();
         grab.entered(true);
-        grab.button(BTN_LEFT, true, 6);
+        grab.button(BTN_LEFT, true, 7021);
+        grab.left();
+        assert_eq!(grab.press, Some(7021), "left for the frame's border");
         grab.entered(false);
-        assert_eq!(grab.press, None, "a new focus starts clean");
+        assert_eq!(grab.press, Some(7021), "over the frame's border");
+        grab.left();
+        grab.entered(true);
+        assert_eq!(grab.press, Some(7021), "back on the window, past its edge");
+        grab.button(BTN_LEFT, false, 7028);
+        assert_eq!(grab.press, None, "let go");
     }
 
     fn reader_of(fd: OwnedFd) -> std::thread::JoinHandle<Vec<u8>> {
