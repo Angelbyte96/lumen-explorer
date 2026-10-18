@@ -67,6 +67,15 @@ windows-sys = { version = "0.61", features = [
 # an Adwaita-style one. Same winit eframe already uses: only adds the feature.
 [target.'cfg(target_os = "linux")'.dependencies]
 winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
+# Files dropped from other apps on Wayland: winit has no drag and drop there, so
+# Lumen listens on its own queue of winit's display (src/wayland_dnd.rs). The
+# same versions and features winit already builds: only adds direct uses.
+wayland-client = { version = "0.31", features = ["system"] }
+raw-window-handle = "0.6"
+# The session bus, for the document portal: sandboxed apps (Flatpak) can only
+# read the files of a drag out through it (src/portal.rs). Blocking API on
+# zbus's own thread (async-io, the default), no async runtime of ours.
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 
 [profile.release]
 opt-level = "z"     # optimize for size
