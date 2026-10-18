@@ -32,6 +32,7 @@ use eframe::egui;
 
 use crate::drag::{Drag, Keys};
 use crate::fs::transfer::Mode;
+use crate::portal::{self, Transfer};
 use crate::ui::dnd::Outside;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use wayland_client::backend::{Backend, ObjectId, WaylandError};
@@ -109,8 +110,12 @@ fn read_list(source: impl Read) -> std::io::Result<Vec<PathBuf>> {
 }
 
 /// What a drag out of Lumen offers, in the order of preference: the files as
-/// URIs, then their paths as text (an editor or a terminal takes those).
-const OFFERED: [&str; 3] = [URI_LIST, "text/plain;charset=utf-8", "text/plain"];
+/// URIs, the same files through the document portal (what a sandboxed app, a
+/// Flatpak, needs: the host paths mean nothing to it; `filetransfer` then
+/// `files`, the order Firefox asks in), then their paths as text (an editor or
+/// a terminal takes those). Nautilus lists the text first; here the files stay
+/// ahead of it so an app that takes both asks for the files.
+const OFFERED: [&str; 5] = [URI_LIST, portal::FILE_TRANSFER, portal::FILES, "text/plain;charset=utf-8", "text/plain"];
 /// How long a receiving app has to read what is written to it.
 const WRITE_LIMIT: Duration = Duration::from_secs(10);
 /// The left button of the pointer, in Linux input codes.
@@ -146,10 +151,13 @@ fn path_list(paths: &[PathBuf]) -> Vec<u8> {
 }
 
 /// What to write for a receiving app that asked for `mime`; `None` for a kind
-/// that was never offered.
-fn payload_for(mime: &str, paths: &[PathBuf]) -> Option<Vec<u8>> {
+/// that was never offered, and for a portal kind when the portal took no
+/// transfer. The portal's kinds open `transfer` (once for the drag) and block
+/// on the session bus while they do.
+fn payload_for(mime: &str, paths: &[PathBuf], transfer: &Transfer) -> Option<Vec<u8>> {
     match mime {
         URI_LIST => Some(uri_list(paths)),
+        kind if portal::is_portal(kind) => transfer.key(paths).map(portal::framed),
         text if OFFERED.contains(&text) => Some(path_list(paths)),
         _ => None,
     }
@@ -264,6 +272,8 @@ struct Out {
     /// The press that started it.
     serial: u32,
     paths: Arc<Vec<PathBuf>>,
+    /// The portal transfer of these paths, opened when a receiver asks for it.
+    transfer: Arc<Transfer>,
 }
 
 /// The id of the drag out a source belongs to.
@@ -314,7 +324,7 @@ impl Shared {
             source.set_actions(DndAction::Copy | DndAction::Move);
         }
         wire.device.start_drag(Some(&source), &origin, None, serial);
-        *out = Some(Out { id, source, serial, paths: Arc::new(paths) });
+        *out = Some(Out { id, source, serial, paths: Arc::new(paths), transfer: Arc::new(Transfer::new()) });
         drop(out);
         conn.flush().map_err(|err| err.to_string())
     }
@@ -335,14 +345,21 @@ impl Shared {
     /// queue and the frames must not wait for it) and given up on after
     /// `WRITE_LIMIT`.
     fn serve(&self, id: u64, mime: &str, fd: OwnedFd) {
-        let paths = self.out.lock().ok().and_then(|out| out.as_ref().filter(|out| out.id == id).map(|out| out.paths.clone()));
+        let drag = self.out.lock().ok().and_then(|out| out.as_ref().filter(|out| out.id == id).map(|out| (out.paths.clone(), out.transfer.clone())));
         // Not a kind offered, or a drag that is over: the descriptor closes.
-        let Some(data) = paths.and_then(|paths| payload_for(mime, &paths)) else { return };
-        let writer = std::thread::Builder::new().name("lumen-wayland-dnd-write".into()).spawn(move || match write_within(fd, &data, WRITE_LIMIT) {
-            // The receiver closed its end: it has what it wanted, or gave up.
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {}
-            Err(err) => eprintln!("[lumen] sending the dragged files failed: {err}"),
+        let (Some((paths, transfer)), true) = (drag, OFFERED.contains(&mime)) else { return };
+        let mime = mime.to_owned();
+        // The payload is made on the writer's thread too: a portal kind waits
+        // for the session bus, and neither the queue nor the frames may.
+        let writer = std::thread::Builder::new().name("lumen-wayland-dnd-write".into()).spawn(move || {
+            // No payload (the portal took no transfer): the descriptor closes.
+            let Some(data) = payload_for(&mime, &paths, &transfer) else { return };
+            match write_within(fd, &data, WRITE_LIMIT) {
+                // The receiver closed its end: it has what it wanted, or gave up.
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(err) => eprintln!("[lumen] sending the dragged files failed: {err}"),
+            }
         });
         if let Err(err) = writer {
             eprintln!("[lumen] sending the dragged files failed: {err}");
@@ -1117,13 +1134,54 @@ mod tests {
     fn the_paths_are_offered_as_text_one_per_line_and_nothing_else_is_asked_for() {
         let paths = [PathBuf::from("/tmp/a b"), PathBuf::from("/tmp/c")];
         assert_eq!(path_list(&paths), b"/tmp/a b\n/tmp/c");
-        assert_eq!(payload_for(URI_LIST, &paths), Some(uri_list(&paths)));
+        let transfer = Transfer::with(Box::new(|_| Ok("key".into())));
+        assert_eq!(payload_for(URI_LIST, &paths, &transfer), Some(uri_list(&paths)));
         for text in ["text/plain;charset=utf-8", "text/plain"] {
-            assert_eq!(payload_for(text, &paths), Some(path_list(&paths)), "{text}");
+            assert_eq!(payload_for(text, &paths, &transfer), Some(path_list(&paths)), "{text}");
         }
-        assert_eq!(payload_for("image/png", &paths), None);
-        assert!(OFFERED.iter().all(|mime| payload_for(mime, &paths).is_some()), "all that is offered can be served");
+        assert_eq!(payload_for("image/png", &paths, &transfer), None);
+        assert!(OFFERED.iter().all(|mime| payload_for(mime, &paths, &transfer).is_some()), "all that is offered can be served");
         assert_eq!(OFFERED[0], URI_LIST, "the files come first");
+    }
+
+    #[test]
+    fn sandboxed_apps_are_offered_the_portal_kinds_after_the_files_and_before_the_text() {
+        assert_eq!(
+            OFFERED[..],
+            [URI_LIST, "application/vnd.portal.filetransfer", "application/vnd.portal.files", "text/plain;charset=utf-8", "text/plain"]
+        );
+    }
+
+    #[test]
+    fn a_portal_kind_is_answered_with_the_transfer_key_and_its_nul() {
+        let paths = [PathBuf::from("/tmp/a b")];
+        let transfer = Transfer::with(Box::new(|paths| {
+            assert_eq!(paths, [PathBuf::from("/tmp/a b")], "the dragged paths are what the transfer holds");
+            Ok("k42".into())
+        }));
+        for mime in ["application/vnd.portal.filetransfer", "application/vnd.portal.files"] {
+            assert_eq!(payload_for(mime, &paths, &transfer), Some(b"k42\0".to_vec()), "{mime}");
+        }
+    }
+
+    #[test]
+    fn without_a_portal_nothing_is_written_for_its_kinds_and_the_other_kinds_still_are() {
+        let paths = [PathBuf::from("/tmp/a")];
+        let transfer = Transfer::with(Box::new(|_| Err("no session bus".into())));
+        for mime in ["application/vnd.portal.filetransfer", "application/vnd.portal.files"] {
+            assert_eq!(payload_for(mime, &paths, &transfer), None, "{mime}");
+        }
+        assert_eq!(payload_for(URI_LIST, &paths, &transfer), Some(uri_list(&paths)));
+        assert_eq!(payload_for("text/plain", &paths, &transfer), Some(path_list(&paths)));
+    }
+
+    #[test]
+    fn the_files_and_the_text_never_open_a_transfer() {
+        let paths = [PathBuf::from("/tmp/a")];
+        let transfer = Transfer::with(Box::new(|_| panic!("no transfer for this kind")));
+        for mime in [URI_LIST, "text/plain;charset=utf-8", "text/plain", "image/png"] {
+            let _ = payload_for(mime, &paths, &transfer);
+        }
     }
 
     #[test]

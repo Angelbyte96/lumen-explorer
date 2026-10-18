@@ -20,6 +20,8 @@ mod shell_menu;
 mod places;
 mod ui;
 #[cfg(target_os = "linux")]
+mod portal;
+#[cfg(target_os = "linux")]
 mod wayland_dnd;
 
 use eframe::egui;
