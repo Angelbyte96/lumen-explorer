@@ -152,12 +152,12 @@ fn path_list(paths: &[PathBuf]) -> Vec<u8> {
 
 /// What to write for a receiving app that asked for `mime`; `None` for a kind
 /// that was never offered, and for a portal kind when the portal took no
-/// transfer. The portal's kinds open `transfer` (once for the drag) and block
-/// on the session bus while they do.
+/// transfer. The portal's kinds open a transfer of their own each time and
+/// block on the session bus while they do.
 fn payload_for(mime: &str, paths: &[PathBuf], transfer: &Transfer) -> Option<Vec<u8>> {
     match mime {
         URI_LIST => Some(uri_list(paths)),
-        kind if portal::is_portal(kind) => transfer.key(paths).map(portal::framed),
+        kind if portal::is_portal(kind) => transfer.key(paths).map(|key| portal::framed(&key)),
         text if OFFERED.contains(&text) => Some(path_list(paths)),
         _ => None,
     }
@@ -272,7 +272,7 @@ struct Out {
     /// The press that started it.
     serial: u32,
     paths: Arc<Vec<PathBuf>>,
-    /// The portal transfer of these paths, opened when a receiver asks for it.
+    /// The portal transfers of these paths, one per receiver's request.
     transfer: Arc<Transfer>,
 }
 

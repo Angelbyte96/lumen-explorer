@@ -13,7 +13,8 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use zbus::blocking::Connection;
 use zbus::zvariant::{Fd, Value};
@@ -39,11 +40,13 @@ pub fn framed(key: &str) -> Vec<u8> {
 
 type Start = Box<dyn Fn(&[PathBuf]) -> Result<String, String> + Send + Sync>;
 
-/// The portal transfer of one drag out: opened by the first receiver that asks
-/// for a portal kind, the same key for the ones after it.
+/// The portal transfers of one drag out: one for each request of a portal
+/// kind, as GTK opens them. A transfer stops once its files are retrieved
+/// (autostop), and an app asks again when the drag comes back to it.
 pub struct Transfer {
     start: Start,
-    key: OnceLock<Option<String>>,
+    /// The portal failed once: not asked again for this drag.
+    failed: AtomicBool,
 }
 
 impl Transfer {
@@ -53,23 +56,24 @@ impl Transfer {
     }
 
     pub fn with(start: Start) -> Self {
-        Transfer { start, key: OnceLock::new() }
+        Transfer { start, failed: AtomicBool::new(false) }
     }
 
-    /// The key of the transfer of `paths`, opening it on the first call. A
-    /// failure is told once on stderr and not tried again for this drag.
-    pub fn key(&self, paths: &[PathBuf]) -> Option<&str> {
-        // `get_or_init` holds back the requests that come while the first one
-        // is still talking to the portal.
-        self.key
-            .get_or_init(|| match (self.start)(paths) {
-                Ok(key) => Some(key),
-                Err(err) => {
+    /// The key of a new transfer of `paths`. A failure is told once on stderr
+    /// and not tried again for this drag.
+    pub fn key(&self, paths: &[PathBuf]) -> Option<String> {
+        if self.failed.load(Ordering::Relaxed) {
+            return None;
+        }
+        match (self.start)(paths) {
+            Ok(key) => Some(key),
+            Err(err) => {
+                if !self.failed.swap(true, Ordering::Relaxed) {
                     eprintln!("[lumen] the document portal did not take the dragged files: {err}");
-                    None
                 }
-            })
-            .as_deref()
+                None
+            }
+        }
     }
 }
 
@@ -142,15 +146,16 @@ mod tests {
 
     type Seen = Arc<Mutex<Vec<Vec<PathBuf>>>>;
 
+    /// A transfer whose portal answers `result`, an `Ok` key numbered by the call ("key1", "key2"...).
     fn counting(result: Result<String, String>) -> (Transfer, Arc<AtomicUsize>, Seen) {
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let transfer = {
             let (calls, seen) = (calls.clone(), seen.clone());
             Transfer::with(Box::new(move |paths| {
-                calls.fetch_add(1, Ordering::SeqCst);
+                let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
                 seen.lock().unwrap().push(paths.to_vec());
-                result.clone()
+                result.clone().map(|key| format!("{key}{call}"))
             }))
         };
         (transfer, calls, seen)
@@ -201,14 +206,16 @@ mod tests {
     }
 
     #[test]
-    fn one_transfer_serves_every_request_of_a_drag() {
+    fn every_request_of_a_drag_opens_a_transfer_of_its_own() {
+        // A transfer stops once its files are retrieved (autostop), and an app
+        // asks again when the drag comes back to it (Zen after Alt+Tab, L47).
         let paths = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b c")];
-        let (transfer, calls, seen) = counting(Ok("key1".into()));
-        assert_eq!(transfer.key(&paths), Some("key1"));
-        assert_eq!(transfer.key(&paths), Some("key1"));
-        assert_eq!(transfer.key(&paths), Some("key1"));
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "started once");
-        assert_eq!(*seen.lock().unwrap(), vec![paths], "with the dragged paths");
+        let (transfer, calls, seen) = counting(Ok("key".into()));
+        assert_eq!(transfer.key(&paths).as_deref(), Some("key1"));
+        assert_eq!(transfer.key(&paths).as_deref(), Some("key2"));
+        assert_eq!(transfer.key(&paths).as_deref(), Some("key3"));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(*seen.lock().unwrap(), vec![paths.clone(), paths.clone(), paths], "each with the dragged paths");
     }
 
     #[test]
@@ -221,19 +228,19 @@ mod tests {
     }
 
     #[test]
-    fn requests_at_the_same_time_start_one_transfer() {
+    fn requests_at_the_same_time_get_a_transfer_each() {
         let paths = vec![PathBuf::from("/tmp/a")];
         let (transfer, calls, _) = counting(Ok("k".into()));
         let transfer = Arc::new(transfer);
         let threads: Vec<_> = (0..4)
             .map(|_| {
                 let (transfer, paths) = (transfer.clone(), paths.clone());
-                std::thread::spawn(move || transfer.key(&paths).map(str::to_owned))
+                std::thread::spawn(move || transfer.key(&paths))
             })
             .collect();
-        for thread in threads {
-            assert_eq!(thread.join().unwrap().as_deref(), Some("k"));
-        }
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let mut keys: Vec<String> = threads.into_iter().map(|thread| thread.join().unwrap().expect("a key")).collect();
+        keys.sort();
+        assert_eq!(keys, ["k1", "k2", "k3", "k4"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
     }
 }
