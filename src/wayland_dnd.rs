@@ -145,9 +145,15 @@ fn uri_list(paths: &[PathBuf]) -> Vec<u8> {
     out
 }
 
-/// `paths` as text, one per line.
+/// `paths` as text, one per line, the raw bytes of the names.
 fn path_list(paths: &[PathBuf]) -> Vec<u8> {
     paths.iter().map(|path| path.as_os_str().as_bytes()).collect::<Vec<_>>().join(&b'\n')
+}
+
+/// The same as valid UTF-8, for the kind that says so: a byte that is not
+/// UTF-8 becomes U+FFFD.
+fn utf8_list(paths: &[PathBuf]) -> Vec<u8> {
+    String::from_utf8_lossy(&path_list(paths)).into_owned().into_bytes()
 }
 
 /// What to write for a receiving app that asked for `mime`; `None` for a kind
@@ -158,6 +164,7 @@ fn payload_for(mime: &str, paths: &[PathBuf], transfer: &Transfer) -> Option<Vec
     match mime {
         URI_LIST => Some(uri_list(paths)),
         kind if portal::is_portal(kind) => transfer.key(paths).map(|key| portal::framed(&key)),
+        "text/plain;charset=utf-8" => Some(utf8_list(paths)),
         text if OFFERED.contains(&text) => Some(path_list(paths)),
         _ => None,
     }
@@ -235,6 +242,33 @@ impl Grab {
             self.press = (pressed && self.focus).then_some(serial);
         }
     }
+
+    /// The compositor holds the drag now and Lumen's pointer never sees the
+    /// release: the press is spent, not to be reused with the next drag.
+    fn handed_off(&mut self) {
+        self.press = None;
+    }
+}
+
+/// How handing a drag over to the compositor went.
+#[derive(Debug, PartialEq)]
+enum Begin {
+    /// `start_drag` is written.
+    Started,
+    /// Not bound yet: tried again next frame.
+    NotYet,
+    /// Drag out cannot work for this window.
+    Never(String),
+}
+
+/// What a flush after `start_drag` was queued says about the drag: nothing.
+/// The request sits in the buffer and goes out with the next flush (the
+/// frames make one each, the thread every tick); a connection that is lost
+/// takes the window with it. Handing off is right either way, a retry would
+/// queue a second drag.
+fn written(flush: Result<(), WaylandError>) -> Begin {
+    let _ = flush;
+    Begin::Started
 }
 
 /// What the thread and the frames share.
@@ -299,18 +333,19 @@ impl Shared {
     }
 
     /// Hands `paths` to the compositor as a drag that starts at the press
-    /// `serial`, from the window's surface, with no icon of its own.
-    fn begin(&self, paths: Vec<PathBuf>, serial: u32) -> Result<(), String> {
-        let (Some(conn), Some(wire)) = (self.conn.get(), self.wire.get()) else { return Err("not ready yet".into()) };
+    /// `serial`, from the window's surface, with no icon of its own. Nothing
+    /// is queued unless it is `Started`.
+    fn begin(&self, paths: Vec<PathBuf>, serial: u32) -> Begin {
         if self.surface == 0 {
-            return Err("the window's surface is not known".into());
+            return Begin::Never("the window's surface is not known".into());
         }
+        // The thread binds these a moment after the first frame.
+        let (Some(conn), Some(wire)) = (self.conn.get(), self.wire.get()) else { return Begin::NotYet };
         // SAFETY: the surface is winit's and outlives the frames that call this.
-        let origin = unsafe { ObjectId::from_ptr(WlSurface::interface(), self.surface as *mut _) }
-            .ok()
-            .and_then(|id| WlSurface::from_id(conn, id).ok())
-            .ok_or("the window's surface is not a wl_surface")?;
-        let mut out = self.out.lock().map_err(|_| "poisoned")?;
+        let Some(origin) = unsafe { ObjectId::from_ptr(WlSurface::interface(), self.surface as *mut _) }.ok().and_then(|id| WlSurface::from_id(conn, id).ok()) else {
+            return Begin::Never("the window's surface is not a wl_surface".into());
+        };
+        let Ok(mut out) = self.out.lock() else { return Begin::Never("poisoned".into()) };
         // A drag that never finished (its receiver did not say) is over.
         if let Some(old) = out.take() {
             old.source.destroy();
@@ -326,7 +361,7 @@ impl Shared {
         wire.device.start_drag(Some(&source), &origin, None, serial);
         *out = Some(Out { id, source, serial, paths: Arc::new(paths), transfer: Arc::new(Transfer::new()) });
         drop(out);
-        conn.flush().map_err(|err| err.to_string())
+        written(conn.flush())
     }
 
     /// Ends drag out `id`: finished, cancelled, or replaced.
@@ -476,11 +511,19 @@ impl Receiver {
         }
         let (Some(drag), Some(serial)) = (drag, serial) else { return false };
         match worker.shared.begin(drag.paths, serial) {
-            Ok(()) => {
+            Begin::Started => {
+                if let Ok(mut grab) = worker.shared.grab.lock() {
+                    grab.handed_off();
+                }
                 crate::ui::dnd::hand_off(ctx);
                 true
             }
-            Err(err) => {
+            // egui keeps the drag, and the pointer is still past the edge: look again soon.
+            Begin::NotYet => {
+                ctx.request_repaint_after(TICK);
+                false
+            }
+            Begin::Never(err) => {
                 eprintln!("[lumen] dragging files out is off: {err}");
                 worker.out_failed = true;
                 false
@@ -1145,6 +1188,15 @@ mod tests {
     }
 
     #[test]
+    fn the_utf8_text_is_valid_utf8_and_the_plain_text_keeps_the_raw_bytes() {
+        let paths = [PathBuf::from("/tmp/ñ a"), PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/a\xffb".to_vec()))];
+        let transfer = Transfer::with(Box::new(|_| panic!("no transfer for text")));
+        let utf8 = payload_for("text/plain;charset=utf-8", &paths, &transfer).unwrap();
+        assert_eq!(std::str::from_utf8(&utf8), Ok("/tmp/ñ a\n/tmp/a\u{FFFD}b"));
+        assert_eq!(payload_for("text/plain", &paths, &transfer), Some(b"/tmp/\xc3\xb1 a\n/tmp/a\xffb".to_vec()), "the raw bytes, as before");
+    }
+
+    #[test]
     fn sandboxed_apps_are_offered_the_portal_kinds_after_the_files_and_before_the_text() {
         assert_eq!(
             OFFERED[..],
@@ -1240,6 +1292,53 @@ mod tests {
         assert_eq!(grab.press, Some(7021), "back on the window, past its edge");
         grab.button(BTN_LEFT, false, 7028);
         assert_eq!(grab.press, None, "let go");
+    }
+
+    #[test]
+    fn the_press_is_spent_once_the_compositor_holds_the_drag() {
+        // Lumen's pointer never sees the release of a drag handed off (L39).
+        let mut grab = Grab::default();
+        grab.entered(true);
+        grab.button(BTN_LEFT, true, 7021);
+        grab.handed_off();
+        assert_eq!(grab.press, None);
+        grab.entered(true);
+        grab.button(BTN_LEFT, true, 7100);
+        assert_eq!(grab.press, Some(7100), "the next press is kept as ever");
+    }
+
+    fn shared(surface: usize) -> Shared {
+        Shared {
+            ctx: egui::Context::default(),
+            hover: Mutex::new(None),
+            conn: OnceLock::new(),
+            surface,
+            wire: OnceLock::new(),
+            grab: Mutex::new(Grab::default()),
+            out: Mutex::new(None),
+            last_out: AtomicU64::new(0),
+        }
+    }
+
+    #[test]
+    fn a_thread_that_has_not_bound_yet_is_not_ready_not_a_drag_out_that_cannot_work() {
+        assert_eq!(shared(0x1000).begin(vec![PathBuf::from("/tmp/a")], 7), Begin::NotYet, "no connection and no wire yet: next frame");
+    }
+
+    #[test]
+    fn a_window_with_no_surface_can_never_drag_out() {
+        let Begin::Never(why) = shared(0).begin(vec![PathBuf::from("/tmp/a")], 7) else { panic!("a window with no known surface") };
+        assert_eq!(why, "the window's surface is not known");
+    }
+
+    #[test]
+    fn a_flush_error_after_start_drag_was_written_still_counts_as_started() {
+        // The request is in the buffer: the next flush (the frames', the thread's) sends it.
+        assert_eq!(written(Ok(())), Begin::Started);
+        let would_block = WaylandError::Io(std::io::ErrorKind::WouldBlock.into());
+        assert_eq!(written(Err(would_block)), Begin::Started);
+        let broken = WaylandError::Io(std::io::ErrorKind::BrokenPipe.into());
+        assert_eq!(written(Err(broken)), Begin::Started);
     }
 
     fn reader_of(fd: OwnedFd) -> std::thread::JoinHandle<Vec<u8>> {

@@ -15,6 +15,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use zbus::blocking::Connection;
 use zbus::zvariant::{Fd, Value};
@@ -84,35 +85,67 @@ const INTERFACE: &str = "org.freedesktop.portal.FileTransfer";
 /// limit of the bus" (gdk/filetransferportal.c).
 const FDS_PER_CALL: usize = 16;
 
+/// How long the portal has to answer a call, and to take all the files: a hung
+/// portal must not park the writer thread of a drag out for good (the pipe
+/// writes give up after as long, `WRITE_LIMIT` in `wayland_dnd`).
+const CALL_LIMIT: Duration = Duration::from_secs(10);
+
 /// The connection to the session bus that opens the transfers, kept for the
 /// life of the process once it is opened. The portal ties a transfer to the
 /// bus connection that started it and drops it when that connection goes, and
 /// the receiver may come for the files long after the frame that began the
 /// drag, so the connection must outlive the drag; one shared by every drag
 /// costs one socket and zbus's own thread, only for a process that has dragged
-/// files out. Dropped when a call fails, so the next drag opens a new one.
+/// files out. Dropped when the bus itself fails, so the next drag opens a new one.
 static BUS: Mutex<Option<Connection>> = Mutex::new(None);
 
 fn bus() -> Result<Connection, String> {
     let mut bus = BUS.lock().map_err(|_| "poisoned")?;
     if bus.is_none() {
-        *bus = Some(Connection::session().map_err(|err| format!("no session bus: {err}"))?);
+        let conn = zbus::blocking::connection::Builder::session().and_then(|builder| builder.method_timeout(CALL_LIMIT).build());
+        *bus = Some(conn.map_err(|err| format!("no session bus: {err}"))?);
     }
     Ok(bus.clone().expect("just set"))
+}
+
+/// A call to the portal that failed.
+struct CallError {
+    message: String,
+    /// The bus connection itself is gone (closed, an I/O error), not just this call.
+    bus_gone: bool,
+}
+
+fn call_error(call: &str, err: zbus::Error) -> CallError {
+    // A call that got no answer in time is an I/O error of kind TimedOut too,
+    // but the connection is fine: only the portal is slow.
+    let bus_gone = matches!(&err, zbus::Error::InputOutput(io) if io.kind() != std::io::ErrorKind::TimedOut);
+    CallError { message: format!("{call}: {err}"), bus_gone }
+}
+
+/// Fails once `end` has passed: the files are not all taken in time.
+fn within(end: Instant, call: &str) -> Result<(), CallError> {
+    if Instant::now() < end {
+        return Ok(());
+    }
+    Err(CallError { message: format!("{call}: timed out"), bus_gone: false })
 }
 
 /// Opens a transfer of `paths` in the document portal and returns its key.
 /// Blocks on the bus: only ever called from a thread of the drag out's own.
 fn start(paths: &[PathBuf]) -> Result<String, String> {
+    // Before the bus: a file that cannot be opened is no fault of the connection.
+    let files = open_files(paths)?;
     let conn = bus()?;
-    let result = add_files(&conn, paths);
-    if result.is_err() {
-        *BUS.lock().map_err(|_| "poisoned")? = None;
-    }
-    result
+    add_files(&conn, &files).map_err(|err| {
+        if err.bus_gone {
+            *BUS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+        err.message
+    })
 }
 
-fn add_files(conn: &Connection, paths: &[PathBuf]) -> Result<String, String> {
+/// A descriptor for each absolute path of `paths`.
+fn open_files(paths: &[PathBuf]) -> Result<Vec<File>, String> {
     // A path that is not absolute names no file for the portal either.
     let paths: Vec<&PathBuf> = paths.iter().filter(|path| path.as_os_str().as_bytes().first() == Some(&b'/')).collect();
     if paths.is_empty() {
@@ -121,19 +154,24 @@ fn add_files(conn: &Connection, paths: &[PathBuf]) -> Result<String, String> {
     // O_PATH: the portal only needs to name the file, and a file that cannot
     // be read can still be handed over. Opened before the transfer starts, so
     // a vanished file leaves no transfer behind.
-    let files: Vec<File> = paths
+    paths
         .iter()
         .map(|path| OpenOptions::new().read(true).custom_flags(libc::O_PATH | libc::O_CLOEXEC).open(path).map_err(|err| format!("{}: {err}", path.display())))
-        .collect::<Result<_, _>>()?;
+        .collect()
+}
+
+fn add_files(conn: &Connection, files: &[File]) -> Result<String, CallError> {
+    let end = Instant::now() + CALL_LIMIT;
     let options = HashMap::from([("writable", Value::from(false)), ("autostop", Value::from(true))]);
     let reply = conn
         .call_method(Some(DESTINATION), PATH, Some(INTERFACE), "StartTransfer", &(options,))
-        .map_err(|err| format!("StartTransfer: {err}"))?;
-    let key: String = reply.body().deserialize().map_err(|err| format!("StartTransfer: {err}"))?;
+        .map_err(|err| call_error("StartTransfer", err))?;
+    let key: String = reply.body().deserialize().map_err(|err| call_error("StartTransfer", err))?;
     for chunk in files.chunks(FDS_PER_CALL) {
+        within(end, "AddFiles")?;
         let fds: Vec<Fd> = chunk.iter().map(Fd::from).collect();
         let none: HashMap<&str, Value> = HashMap::new();
-        conn.call_method(Some(DESTINATION), PATH, Some(INTERFACE), "AddFiles", &(key.as_str(), fds, none)).map_err(|err| format!("AddFiles: {err}"))?;
+        conn.call_method(Some(DESTINATION), PATH, Some(INTERFACE), "AddFiles", &(key.as_str(), fds, none)).map_err(|err| call_error("AddFiles", err))?;
     }
     Ok(key)
 }
@@ -188,6 +226,45 @@ mod tests {
         let received = received.expect("RetrieveFiles");
         assert_eq!(received.len(), 20, "{received:?}");
         eprintln!("portal key {key:?}, first file {:?}", received[0]);
+    }
+
+    fn io_error(kind: std::io::ErrorKind) -> zbus::Error {
+        zbus::Error::InputOutput(Arc::new(kind.into()))
+    }
+
+    #[test]
+    fn only_a_failure_of_the_bus_itself_drops_the_shared_connection() {
+        for kind in [std::io::ErrorKind::BrokenPipe, std::io::ErrorKind::UnexpectedEof, std::io::ErrorKind::ConnectionReset] {
+            assert!(call_error("StartTransfer", io_error(kind)).bus_gone, "{kind:?}");
+        }
+        // The call timed out: the connection is fine, the portal is slow.
+        assert!(!call_error("StartTransfer", io_error(std::io::ErrorKind::TimedOut)).bus_gone, "timed out");
+        // The portal answered, with an error: the connection did its job.
+        assert!(!call_error("AddFiles", zbus::Error::NameTaken).bus_gone, "an error of the call");
+    }
+
+    #[test]
+    fn a_failed_call_says_which_call_and_why() {
+        let err = call_error("AddFiles", io_error(std::io::ErrorKind::TimedOut));
+        assert!(err.message.starts_with("AddFiles: "), "{}", err.message);
+        assert!(err.message.contains("timed out"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_transfer_that_takes_longer_than_the_limit_is_given_up_on() {
+        let now = Instant::now();
+        assert!(within(now + Duration::from_secs(5), "AddFiles").is_ok());
+        let late = within(now - Duration::from_millis(1), "AddFiles").expect_err("past the end");
+        assert_eq!(late.message, "AddFiles: timed out");
+        assert!(!late.bus_gone, "a slow portal is not a lost connection");
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_opened_fails_before_any_call() {
+        let missing = PathBuf::from("/nonexistent-lumen-dir/file");
+        let err = open_files(&[missing]).expect_err("no such file");
+        assert!(err.starts_with("/nonexistent-lumen-dir/file: "), "{err}");
+        assert_eq!(open_files(&[PathBuf::from("relative")]).err().as_deref(), Some("no file to hand over"));
     }
 
     #[test]
