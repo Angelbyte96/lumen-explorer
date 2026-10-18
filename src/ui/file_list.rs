@@ -152,6 +152,8 @@ pub fn show(
     let pitch = row_height + ui.spacing().item_spacing.y;
     let mut first_drawn: Option<(usize, f32)> = None;
     let mut band_may_start = false;
+    // Whether a carried drag is over a folder row, which takes it (or refuses it) itself.
+    let mut over_folder = false;
     let pressed = ui.input(|i| i.pointer.primary_pressed());
     let whole = ui.available_rect_before_wrap();
     focus_stop(ui, whole);
@@ -268,6 +270,7 @@ pub fn show(
                     }
                     let response = row.response();
                     let over = crate::ui::dnd::over(&response.ctx, clip, row_rect, entry.is_dir.then_some(entry.path.as_path()));
+                    over_folder |= over.inside && entry.is_dir;
                     if let (true, Some(slot)) = (over.lit, lit_slot) {
                         let painter = egui::Painter::new(response.ctx.clone(), response.layer_id, row_rect);
                         painter.set(slot, crate::ui::dnd::lit_shape(&response.ctx, row_rect));
@@ -314,11 +317,14 @@ pub fn show(
         if let Some(resized) = column_borders(ui, &cells, &widths) {
             event = Some(resized);
         }
+        // Everything under the header that is not a folder row (a file row, the
+        // gaps between rows, the space below them) drops into the folder on screen.
+        if !over_folder {
+            let below_header = egui::Rect::from_min_max(egui::pos2(whole.min.x, cells[0].max.y), whole.max);
+            crate::ui::dnd::background(ui, below_header, &view.current);
+        }
         // Whatever space the rows leave below them.
         let rest = ui.available_rect_before_wrap();
-        if rest.height() > 0.0 {
-            crate::ui::dnd::background(ui, rest, &view.current);
-        }
         if event.is_none() && rest.height() > 0.0 {
             let response = ui.interact(rest, egui::Id::new("lumen_list_empty"), egui::Sense::CLICK);
             if pressed && response.is_pointer_button_down_on() {
@@ -1098,16 +1104,17 @@ mod tests {
     fn a_label_by_the_pointer_counts_what_is_carried_and_a_click_on_a_name_still_selects() {
         let ctx = egui::Context::default();
         let mut view = listed(&["a.txt", "b.txt", "c.txt"]);
+        view.current = PathBuf::from("/x");
         let rows: Vec<egui::Rect> = (0..3).map(|row| row_rect(&ctx, &mut view, row)).collect();
         let name = egui::pos2(rows[0].left() + 30.0, rows[0].center().y);
-        // Over a file row: it takes no drop, so the label only counts.
+        // Over a file row the folder on screen takes the drop: the label counts and names it.
         let to = egui::pos2(400.0, rows[2].center().y);
         let (_, shapes) = lift(&ctx, &view, name, to);
-        assert!(texts_of(&shapes).iter().any(|t| t == "1 item"), "{:?}", texts_of(&shapes));
+        assert!(texts_of(&shapes).iter().any(|t| t == "Copy 1 item to x"), "{:?}", texts_of(&shapes));
         let label = shapes
             .iter()
             .find_map(|s| match &s.shape {
-                egui::Shape::Text(t) if t.galley.text() == "1 item" => Some(t.pos),
+                egui::Shape::Text(t) if t.galley.text() == "Copy 1 item to x" => Some(t.pos),
                 _ => None,
             })
             .unwrap();
@@ -1116,7 +1123,7 @@ mod tests {
         view.select_row(0);
         view.extend_to(2);
         let (_, shapes) = lift(&ctx, &view, name, to);
-        assert!(texts_of(&shapes).iter().any(|t| t == "3 items"), "{:?}", texts_of(&shapes));
+        assert!(texts_of(&shapes).iter().any(|t| t == "Copy 3 items to x"), "{:?}", texts_of(&shapes));
         let_go(&ctx, &view, to);
 
         // A click on the name is a click, not a drag.
@@ -1170,6 +1177,7 @@ mod tests {
         let mut view = View::default();
         view.entries = vec![folder_entry("dir"), entry("a.txt"), entry("b.txt")];
         view.rows = vec![0, 1, 2];
+        view.current = PathBuf::from("/x");
         let rows: Vec<egui::Rect> = (0..3).map(|row| row_rect(&ctx, &mut view, row)).collect();
         let (name_a, dir, b) = (egui::pos2(rows[1].left() + 30.0, rows[1].center().y), egui::pos2(500.0, rows[0].center().y), egui::pos2(500.0, rows[2].center().y));
         pick_up(&ctx, &view, Sizes::default(), name_a);
@@ -1183,12 +1191,54 @@ mod tests {
         assert!(crate::ui::dnd::take_drop(&ctx).is_none(), "taken once");
         assert!(!lit(&ctx, &hold(&ctx, &view, Sizes::default(), vec![], Default::default()), dir), "dark again");
 
-        // A file row is no target.
+        // A file row is no folder: the folder on screen takes the drop, and no row lights up.
         pick_up(&ctx, &view, Sizes::default(), name_a);
         let shapes = hold(&ctx, &view, Sizes::default(), vec![egui::Event::PointerMoved(b)], Default::default());
         assert!(!lit(&ctx, &shapes, b));
-        assert!(texts_of(&shapes).iter().any(|t| t == "1 item"));
-        assert_eq!(release(&ctx, &view, Sizes::default(), b, Default::default()), None);
+        assert!(texts_of(&shapes).iter().any(|t| t == "Copy 1 item to x"), "{:?}", texts_of(&shapes));
+        assert_eq!(release(&ctx, &view, Sizes::default(), b, Default::default()), Some((paths(&["a.txt"]), PathBuf::from("/x"))));
+    }
+
+    #[test]
+    fn a_file_row_and_the_gap_between_rows_drop_into_the_folder_on_screen() {
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        view.entries = vec![folder_entry("dir"), entry("a.txt"), entry("b.txt")];
+        view.rows = vec![0, 1, 2];
+        view.current = PathBuf::from("/x");
+        let rows: Vec<egui::Rect> = (0..3).map(|row| row_rect(&ctx, &mut view, row)).collect();
+        let name_a = egui::pos2(rows[1].left() + 30.0, rows[1].center().y);
+        // Between two rows: no row, not the space below the rows either.
+        let gap = egui::pos2(500.0, (rows[1].bottom() + rows[2].top()) / 2.0);
+        assert!(rows[2].top() > rows[1].bottom(), "a gap between the rows: {:?} {:?}", rows[1], rows[2]);
+        let ring = ctx.global_style().visuals.selection.stroke;
+        for over in [egui::pos2(500.0, rows[2].center().y), gap] {
+            pick_up(&ctx, &view, Sizes::default(), name_a);
+            let shapes = hold(&ctx, &view, Sizes::default(), vec![egui::Event::PointerMoved(over)], Default::default());
+            assert!(!lit(&ctx, &shapes, over), "no row lights up");
+            assert!(texts_of(&shapes).iter().any(|t| t == "Copy 1 item to x"), "{:?}", texts_of(&shapes));
+            let ringed = shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.stroke == ring && r.fill == egui::Color32::TRANSPARENT && r.rect.contains(over)));
+            assert!(ringed, "the list is ringed");
+            assert_eq!(release(&ctx, &view, Sizes::default(), over, Default::default()), Some((paths(&["a.txt"]), PathBuf::from("/x"))));
+        }
+    }
+
+    #[test]
+    fn a_folder_row_that_refuses_the_drag_stays_refused_and_the_folder_on_screen_does_not_take_it() {
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        view.entries = vec![folder_entry("dir"), entry("a.txt")];
+        view.rows = vec![0, 1];
+        view.current = PathBuf::from("/x");
+        let dir = row_rect(&ctx, &mut view, 0);
+        let name = egui::pos2(dir.left() + 30.0, dir.center().y);
+        let over = egui::pos2(500.0, dir.center().y);
+        // `dir` onto itself.
+        pick_up(&ctx, &view, Sizes::default(), name);
+        let shapes = hold(&ctx, &view, Sizes::default(), vec![egui::Event::PointerMoved(over)], Default::default());
+        assert!(!lit(&ctx, &shapes, over));
+        assert!(texts_of(&shapes).iter().any(|t| t == "1 item"), "{:?}", texts_of(&shapes));
+        assert_eq!(release(&ctx, &view, Sizes::default(), over, Default::default()), None);
     }
 
     #[test]
@@ -1228,12 +1278,12 @@ mod tests {
         let ringed = shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.stroke == ring && r.fill == egui::Color32::TRANSPARENT && r.rect.contains(below)));
         assert!(ringed, "the space below the rows is ringed");
         assert_eq!(release(&ctx, &view, Sizes::default(), below, Default::default()), Some((paths(&["a.txt"]), PathBuf::from("/x"))));
-        // Over a row it is not the empty space.
+        // Over a file row the folder on screen takes it as well (a.txt is already in it).
         pick_up(&ctx, &view, Sizes::default(), name);
         let over_b = egui::pos2(500.0, row_rect(&ctx, &mut view, 1).center().y);
         let shapes = hold(&ctx, &view, Sizes::default(), vec![egui::Event::PointerMoved(over_b)], Default::default());
-        assert!(texts_of(&shapes).iter().any(|t| t == "1 item"));
-        assert_eq!(release(&ctx, &view, Sizes::default(), over_b, Default::default()), None);
+        assert!(texts_of(&shapes).iter().any(|t| t == "Copy 1 item to x"), "{:?}", texts_of(&shapes));
+        assert_eq!(release(&ctx, &view, Sizes::default(), over_b, Default::default()), Some((paths(&["a.txt"]), PathBuf::from("/x"))));
     }
 
     #[test]
@@ -2096,6 +2146,32 @@ mod tests {
         outside(dir, true);
         hold(&ctx, &view, Sizes::default(), vec![], Default::default());
         assert_eq!(crate::ui::dnd::take_drop(&ctx).map(|d| (d.drag.paths, d.target)), Some((paths(&["a.txt"]), PathBuf::from("/x/dir"))));
+        crate::ui::dnd::set_outside(&ctx, None);
+    }
+
+    #[test]
+    fn files_dragged_in_from_another_app_over_a_file_row_or_a_gap_drop_into_the_folder_on_screen() {
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        view.entries = vec![folder_entry("dir"), entry("a.txt"), entry("b.txt")];
+        view.rows = vec![0, 1, 2];
+        view.current = PathBuf::from("/x");
+        let rows: Vec<egui::Rect> = (0..3).map(|row| row_rect(&ctx, &mut view, row)).collect();
+        let gap = egui::pos2(500.0, (rows[1].bottom() + rows[2].top()) / 2.0);
+        let outside = |at, released| {
+            let drag = crate::drag::Drag { paths: paths(&["a.txt"]) };
+            crate::ui::dnd::set_outside(&ctx, Some(crate::ui::dnd::Outside { drag, at, keys: Default::default(), released }));
+        };
+        for over in [egui::pos2(500.0, rows[2].center().y), gap] {
+            outside(over, false);
+            hold(&ctx, &view, Sizes::default(), vec![], Default::default());
+            let shapes = hold(&ctx, &view, Sizes::default(), vec![], Default::default());
+            assert!(!lit(&ctx, &shapes, over), "no row lights up");
+            assert!(texts_of(&shapes).iter().any(|t| t == "Copy 1 item to x"), "{:?}", texts_of(&shapes));
+            outside(over, true);
+            hold(&ctx, &view, Sizes::default(), vec![], Default::default());
+            assert_eq!(crate::ui::dnd::take_drop(&ctx).map(|d| (d.drag.paths, d.target)), Some((paths(&["a.txt"]), PathBuf::from("/x"))));
+        }
         crate::ui::dnd::set_outside(&ctx, None);
     }
 }

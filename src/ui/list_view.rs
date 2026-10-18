@@ -64,7 +64,7 @@ pub fn show(
                 let entry = view.entry(view.rows[i]);
                 let rect = place(i);
                 let over = dnd::over(ui.ctx(), clip, rect, entry.is_dir.then_some(entry.path.as_path()));
-                covered |= over.inside;
+                covered |= over.inside && entry.is_dir;
                 let response = ui.interact(rect, egui::Id::new(("lumen_list_cell", i)), egui::Sense::click_and_drag());
                 if !edit.as_deref().is_some_and(|e| e.path == entry.path) {
                     dnd::start(&response, || dnd::carry(view, i));
@@ -290,17 +290,18 @@ mod tests {
     fn a_label_by_the_pointer_counts_what_is_carried() {
         let ctx = egui::Context::default();
         let mut view = listed(&["test"], &["a.txt".into(), "b.txt".into()]);
+        view.current = PathBuf::from("/x");
         let texts = settled_texts(&ctx, &view);
-        // Over a file cell: it takes no drop, so the label only counts.
+        // Over a file cell the folder on screen takes the drop: the label counts and names it.
         let to = find(&texts, "b.txt").center();
         let (_, one) = lift(&ctx, &view, find(&texts, "a.txt").center(), to);
-        let label = find(&one, "1 item");
+        let label = find(&one, "Copy 1 item to x");
         assert!(label.min.x > to.x && label.min.x < to.x + 40.0 && label.min.y > to.y && label.min.y < to.y + 40.0, "by the pointer: {label:?}");
         draw(&ctx, &view, vec![button(to, false)]);
         view.select_row(1);
         view.extend_to(2);
         let (_, two) = lift(&ctx, &view, find(&texts, "a.txt").center(), to);
-        find(&two, "2 items");
+        find(&two, "Copy 2 items to x");
     }
 
     #[test]
@@ -334,7 +335,8 @@ mod tests {
     #[test]
     fn a_dragged_cell_over_a_folder_cell_lights_it_names_the_action_and_drops_on_it() {
         let ctx = egui::Context::default();
-        let view = listed(&["test"], &["a.txt".into(), "b.txt".into()]);
+        let mut view = listed(&["test"], &["a.txt".into(), "b.txt".into()]);
+        view.current = PathBuf::from("/x");
         let texts = settled_texts(&ctx, &view);
         let (folder, a, b) = (find(&texts, "test").center(), find(&texts, "a.txt").center(), find(&texts, "b.txt").center());
         draw(&ctx, &view, vec![egui::Event::PointerMoved(a), button(a, true)]);
@@ -347,13 +349,60 @@ mod tests {
         find(&texts, "Copy 1 item to test");
         assert_eq!(let_go(&ctx, &view, folder, SHIFT), Some((vec![PathBuf::from("/x/a.txt")], PathBuf::from("/x/test"))));
 
-        // A file cell is no target.
+        // A file cell is no folder: the folder on screen takes the drop, and no cell lights up.
         draw(&ctx, &view, vec![egui::Event::PointerMoved(a), button(a, true)]);
         draw(&ctx, &view, vec![egui::Event::PointerMoved(a + vec2(5.0, 5.0))]);
         let (_, texts, fills) = draw_shapes(&ctx, &view, vec![egui::Event::PointerMoved(b)], Default::default());
         assert!(!lit(&ctx, &fills, b));
-        find(&texts, "1 item");
-        assert_eq!(let_go(&ctx, &view, b, SHIFT), None);
+        find(&texts, "Copy 1 item to x");
+        assert_eq!(let_go(&ctx, &view, b, Default::default()), Some((vec![PathBuf::from("/x/a.txt")], PathBuf::from("/x"))));
+    }
+
+    #[test]
+    fn a_file_cell_and_the_gap_between_cells_drop_into_the_folder_on_screen() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&[], &["a.txt".into(), "b.txt".into(), "c.txt".into()]);
+        view.current = PathBuf::from("/x");
+        let texts = settled_texts(&ctx, &view);
+        let (a, b) = (find(&texts, "a.txt").center(), find(&texts, "b.txt").center());
+        // Between two cells of a column: no cell, not the background either.
+        let gap = egui::pos2(a.x, (a.y + b.y) / 2.0);
+        for over in [b, gap] {
+            draw(&ctx, &view, vec![egui::Event::PointerMoved(a), button(a, true)]);
+            draw(&ctx, &view, vec![egui::Event::PointerMoved(a + vec2(5.0, 5.0))]);
+            let (_, texts, fills) = draw_shapes(&ctx, &view, vec![egui::Event::PointerMoved(over)], Default::default());
+            assert!(!lit(&ctx, &fills, over), "no cell lights up");
+            find(&texts, "Copy 1 item to x");
+            assert_eq!(let_go(&ctx, &view, over, Default::default()), Some((vec![PathBuf::from("/x/a.txt")], PathBuf::from("/x"))));
+        }
+    }
+
+    #[test]
+    fn a_drag_from_another_app_over_a_file_cell_or_a_gap_names_the_folder_on_screen_and_drops_there() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["test"], &["a.txt".into(), "b.txt".into()]);
+        view.current = PathBuf::from("/x");
+        let texts = settled_texts(&ctx, &view);
+        let (folder, a, b) = (find(&texts, "test").center(), find(&texts, "a.txt").center(), find(&texts, "b.txt").center());
+        let gap = egui::pos2(a.x, (a.y + b.y) / 2.0);
+        let hold = |at, released| {
+            let drag = crate::drag::Drag { paths: vec![PathBuf::from("/x/a.txt")] };
+            crate::ui::dnd::set_outside(&ctx, Some(crate::ui::dnd::Outside { drag, at, keys: Default::default(), released }));
+            draw_shapes(&ctx, &view, vec![], Default::default());
+            draw_shapes(&ctx, &view, vec![], Default::default())
+        };
+        // A folder cell takes it itself; a file cell and a gap fall to the folder on screen.
+        let (_, texts, fills) = hold(folder, false);
+        find(&texts, "Copy 1 item to test");
+        assert!(lit(&ctx, &fills, folder));
+        for over in [b, gap] {
+            let (_, texts, fills) = hold(over, false);
+            assert!(!lit(&ctx, &fills, over));
+            find(&texts, "Copy 1 item to x");
+            hold(over, true);
+            assert_eq!(crate::ui::dnd::take_drop(&ctx).map(|d| d.target), Some(PathBuf::from("/x")));
+        }
+        crate::ui::dnd::set_outside(&ctx, None);
     }
 
     #[test]
