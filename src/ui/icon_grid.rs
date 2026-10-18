@@ -92,7 +92,7 @@ pub fn show(
                 let entry = view.entry(view.rows[i]);
                 let rect = place(i);
                 let over = dnd::over(ui.ctx(), clip, rect, entry.is_dir.then_some(entry.path.as_path()));
-                covered |= over.inside;
+                covered |= over.inside && entry.is_dir;
                 let response = ui.interact(rect, egui::Id::new(("lumen_card", i)), egui::Sense::click_and_drag());
                 if !edit.as_deref().is_some_and(|e| e.path == entry.path) {
                     dnd::start(&response, || dnd::carry(view, i));
@@ -554,17 +554,18 @@ pub(crate) mod tests {
     fn a_label_by_the_pointer_counts_what_is_carried_and_goes_with_it() {
         let ctx = egui::Context::default();
         let mut view = listed(&["test"], &["a.txt", "b.txt", "c.txt"]);
+        view.current = PathBuf::from("/x");
         let drawn = settled(&ctx, &view, 0.0);
         let a = at(&drawn, "a.txt").1.center();
-        // Over file cards: they take no drop, so the label only counts.
+        // Over file cards the folder on screen takes the drop: the label counts and names it.
         let first = at(&drawn, "b.txt").1.center();
         let one = lift(&ctx, &view, a, first);
-        let label = at(&one, "1 item").1;
-        assert!(one.texts.iter().all(|(t, ..)| t != "1 items"), "singular: {:?}", one.texts);
+        let label = at(&one, "Copy 1 item to x").1;
+        assert!(one.texts.iter().all(|(t, ..)| t != "Copy 1 items to x"), "singular: {:?}", one.texts);
         assert!(label.min.x > first.x && label.min.y > first.y && label.min.x < first.x + 40.0 && label.min.y < first.y + 40.0, "by the pointer: {label:?}");
         let second = at(&drawn, "c.txt").1.center();
         let moved = draw(&ctx, &view, 0.0, vec![egui::Event::PointerMoved(second)]);
-        let label = at(&moved, "1 item").1;
+        let label = at(&moved, "Copy 1 item to x").1;
         assert!(label.min.x > second.x && label.min.x < second.x + 40.0 && label.min.y > second.y && label.min.y < second.y + 40.0, "follows it: {label:?}");
 
         draw(&ctx, &view, 0.0, vec![button(second, false)]);
@@ -573,7 +574,7 @@ pub(crate) mod tests {
         view.select_row(1);
         view.extend_to(3);
         let three = lift(&ctx, &view, at(&settled(&ctx, &view, 0.0), "b.txt").1.center(), second);
-        at(&three, "3 items");
+        at(&three, "Copy 3 items to x");
     }
 
     #[test]
@@ -664,6 +665,7 @@ pub(crate) mod tests {
         let held = lift(&ctx, &view, one, one + vec2(0.0, -25.0));
         assert!(!lit(&ctx, &held, one), "not lit: {:?}", held.fills);
         at(&held, "1 item");
+        assert!(held.rings.is_empty(), "and the folder on screen does not take it instead: {:?}", held.rings);
         assert_eq!(let_go(&ctx, &view, one + vec2(0.0, -25.0), Default::default()), None, "no drop");
         // And onto the other one.
         let held = lift(&ctx, &view, one, two);
@@ -673,15 +675,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_file_card_takes_no_drop() {
+    fn a_file_card_and_the_gap_between_cards_drop_into_the_folder_on_screen() {
         let ctx = egui::Context::default();
-        let view = listed(&[], &["a.txt", "b.txt"]);
+        let mut view = listed(&[], &["a.txt", "b.txt"]);
+        view.current = PathBuf::from("/x");
         let drawn = settled(&ctx, &view, 0.0);
-        let (a, b) = (at(&drawn, "a.txt").1.center(), at(&drawn, "b.txt").1.center());
-        let held = lift(&ctx, &view, a, b);
-        assert!(!lit(&ctx, &held, b));
-        at(&held, "1 item");
-        assert_eq!(let_go(&ctx, &view, b, Default::default()), None);
+        let (a_card, b_card) = (at(&drawn, "a.txt").1, at(&drawn, "b.txt").1);
+        let (a, b) = (a_card.center(), b_card.center());
+        let gap = egui::pos2((a_card.right() + b_card.left()) / 2.0, a.y);
+        let ring = ctx.global_style().visuals.selection.stroke;
+        for over in [b, gap] {
+            let held = lift(&ctx, &view, a, over);
+            assert!(!lit(&ctx, &held, over), "no card lights up");
+            at(&held, "Copy 1 item to x");
+            assert!(held.rings.iter().any(|(rect, stroke)| *stroke == ring && rect.contains(over) && rect.width() > 400.0), "the list is ringed: {:?}", held.rings);
+            assert_eq!(let_go(&ctx, &view, over, Default::default()), Some((paths(&["a.txt"]), PathBuf::from("/x"), crate::drag::Keys::default())));
+        }
     }
 
     #[test]
@@ -932,5 +941,51 @@ pub(crate) mod tests {
         }
         let unread = shapes_of(&ctx, &view, 0.0, &file_icons, &Thumbnails::default());
         assert!(meshes_of(&unread, folder_icon.id()).is_empty(), "also while the peek is not read");
+    }
+
+    /// Holds a drag from another app at `to` with the keys agreed with it.
+    fn hold_outside(ctx: &egui::Context, view: &View, to: egui::Pos2, keys: crate::drag::Keys, released: bool) -> Drawn {
+        let drag = crate::drag::Drag { paths: paths(&["a.txt"]) };
+        crate::ui::dnd::set_outside(ctx, Some(crate::ui::dnd::Outside { drag, at: to, keys, released }));
+        let drawn = draw(ctx, view, 0.0, vec![]);
+        if released { drawn } else { draw(ctx, view, 0.0, vec![]) }
+    }
+
+    #[test]
+    fn files_dragged_in_from_another_app_light_the_folder_card_under_them_and_drop_on_it() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["test"], &["a.txt", "b.txt"]);
+        view.current = PathBuf::from("/x");
+        let drawn = settled(&ctx, &view, 0.0);
+        let (folder, b) = (at(&drawn, "test").1.center(), at(&drawn, "b.txt").1.center());
+        let none = crate::drag::Keys::default();
+        // egui's pointer is elsewhere (it gets no events during such a drag).
+        draw(&ctx, &view, 0.0, vec![egui::Event::PointerMoved(b)]);
+        let held = hold_outside(&ctx, &view, folder, none, false);
+        assert!(lit(&ctx, &held, folder), "the folder card lights up: {:?}", held.fills);
+        assert!(!lit(&ctx, &held, b), "and only it");
+        at(&held, "Copy 1 item to test");
+        let held = hold_outside(&ctx, &view, folder, crate::drag::Keys { ctrl: false, shift: true }, false);
+        at(&held, "Move 1 item to test");
+        hold_outside(&ctx, &view, folder, crate::drag::Keys { ctrl: false, shift: true }, true);
+        let dropped = crate::ui::dnd::take_drop(&ctx).map(|d| (d.drag.paths, d.target, d.keys));
+        assert_eq!(dropped, Some((paths(&["a.txt"]), PathBuf::from("/x/test"), crate::drag::Keys { ctrl: false, shift: true })));
+
+        // The empty space, a file card and the gap between cards drop into the folder on screen.
+        let space = egui::pos2(500.0, 400.0);
+        let held = hold_outside(&ctx, &view, space, none, false);
+        at(&held, "Copy 1 item to x");
+        hold_outside(&ctx, &view, space, none, true);
+        assert_eq!(crate::ui::dnd::take_drop(&ctx).map(|d| d.target), Some(PathBuf::from("/x")));
+        let (b_card, a_card) = (at(&drawn, "b.txt").1, at(&drawn, "a.txt").1);
+        let gap = egui::pos2((a_card.right() + b_card.left()) / 2.0, b.y);
+        for over in [b, gap] {
+            let held = hold_outside(&ctx, &view, over, none, false);
+            assert!(!lit(&ctx, &held, over));
+            at(&held, "Copy 1 item to x");
+            hold_outside(&ctx, &view, over, none, true);
+            assert_eq!(crate::ui::dnd::take_drop(&ctx).map(|d| d.target), Some(PathBuf::from("/x")));
+        }
+        crate::ui::dnd::set_outside(&ctx, None);
     }
 }
