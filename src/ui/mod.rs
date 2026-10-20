@@ -10,6 +10,7 @@ pub mod icons;
 pub mod list_view;
 pub mod path_popup;
 pub mod preview;
+pub mod recycle_view;
 pub mod sidebar;
 pub mod status_bar;
 pub mod tabs;
@@ -201,6 +202,7 @@ mod tests {
             ("app.rs", include_str!("../app.rs")),
             ("config.rs", include_str!("../config.rs")),
             ("places.rs", include_str!("../places.rs")),
+            ("recycle_bin.rs", include_str!("../recycle_bin.rs")),
             ("fs/count.rs", include_str!("../fs/count.rs")),
             ("fs/ops.rs", include_str!("../fs/ops.rs")),
             ("fs/preview.rs", include_str!("../fs/preview.rs")),
@@ -214,6 +216,7 @@ mod tests {
             ("ui/file_list.rs", include_str!("file_list.rs")),
             ("ui/path_popup.rs", include_str!("path_popup.rs")),
             ("ui/preview.rs", include_str!("preview.rs")),
+            ("ui/recycle_view.rs", include_str!("recycle_view.rs")),
             ("ui/sidebar.rs", include_str!("sidebar.rs")),
             ("ui/status_bar.rs", include_str!("status_bar.rs")),
             ("ui/tabs.rs", include_str!("tabs.rs")),

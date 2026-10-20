@@ -47,8 +47,8 @@ impl Watcher {
         if self.watched.as_deref() == Some(path) {
             return;
         }
-        // This PC is no folder, and as a relative path it could name one.
-        if crate::places::is_this_pc(path) {
+        // A marker (This PC, the Recycle Bin) is no folder, and as a relative path it could name one.
+        if crate::places::is_marker(path) {
             self.forget();
             return;
         }
@@ -135,6 +135,18 @@ mod tests {
         w.watch(&dir);
         assert_eq!(w.watched.as_deref(), Some(dir.as_path()));
         w.watch(&crate::places::this_pc());
+        assert_eq!(w.watched, None);
+        std::fs::write(dir.join("x"), "").unwrap();
+        std::thread::sleep(SETTLE);
+        assert!(!w.take_changed(), "the folder left is no longer watched");
+    }
+
+    #[test]
+    fn the_recycle_bin_is_watched_as_nothing_too() {
+        let dir = fresh_fixture("watch-recycle-bin");
+        let (mut w, _woke) = watcher();
+        w.watch(&dir);
+        w.watch(&crate::places::recycle_bin());
         assert_eq!(w.watched, None);
         std::fs::write(dir.join("x"), "").unwrap();
         std::thread::sleep(SETTLE);
