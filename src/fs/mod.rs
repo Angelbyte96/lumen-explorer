@@ -34,6 +34,9 @@ pub fn resolve_input_path(input: &str, current: &Path, home: Option<&Path>) -> P
     if input.is_empty() {
         return current.to_path_buf();
     }
+    if crate::places::names_this_pc(input) {
+        return crate::places::this_pc();
+    }
     let rooted = if cfg!(windows) { with_drive_root(input) } else { None };
     let input = rooted.as_deref().unwrap_or(input);
     let expanded = match (input.strip_prefix('~'), home) {
@@ -45,6 +48,9 @@ pub fn resolve_input_path(input: &str, current: &Path, home: Option<&Path>) -> P
     };
     let absolute = if expanded.is_absolute() {
         expanded
+    } else if crate::places::is_this_pc(current) {
+        // No folder to be relative to.
+        return current.to_path_buf();
     } else {
         current.join(expanded)
     };
@@ -123,6 +129,19 @@ mod tests {
         assert_eq!(resolve_input_path("/..", Path::new("/"), None), Path::new("/"));
         let home = Path::new("/home/u");
         assert_eq!(resolve_input_path("~/..", Path::new("/tmp"), Some(home)), Path::new("/home"));
+    }
+
+    #[test]
+    fn this_pc_is_no_folder_so_nothing_resolves_against_it() {
+        let pc = crate::places::this_pc();
+        assert_eq!(resolve_input_path("docs", &pc, None), pc, "stays where it is");
+        assert_eq!(resolve_input_path("../docs", &pc, None), pc);
+        assert_eq!(resolve_input_path("", &pc, None), pc);
+        let (etc, home) = if cfg!(windows) { (r"C:\Windows", r"C:\Users\u") } else { ("/etc", "/home/u") };
+        assert_eq!(resolve_input_path(etc, &pc, None), Path::new(etc), "an absolute path still goes there");
+        assert_eq!(resolve_input_path("~/docs", &pc, Some(Path::new(home))), Path::new(home).join("docs"));
+        let typed = resolve_input_path("this pc", Path::new("/usr"), None);
+        assert_eq!(typed, if cfg!(windows) { pc } else { PathBuf::from("/usr/this pc") }, "its name goes back to it, on Windows");
     }
 
     #[test]

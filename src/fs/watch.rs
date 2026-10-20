@@ -47,6 +47,11 @@ impl Watcher {
         if self.watched.as_deref() == Some(path) {
             return;
         }
+        // This PC is no folder, and as a relative path it could name one.
+        if crate::places::is_this_pc(path) {
+            self.forget();
+            return;
+        }
         let Some(inner) = &mut self.inner else { return };
         if let Some(old) = self.watched.take() {
             let _ = inner.unwatch(&old);
@@ -121,6 +126,19 @@ mod tests {
         std::fs::read(dir.join("a.txt")).unwrap();
         std::thread::sleep(SETTLE);
         assert!(!w.take_changed(), "otherwise every listing would trigger another");
+    }
+
+    #[test]
+    fn this_pc_is_watched_as_nothing_and_stops_the_old_folder() {
+        let dir = fresh_fixture("watch-this-pc");
+        let (mut w, _woke) = watcher();
+        w.watch(&dir);
+        assert_eq!(w.watched.as_deref(), Some(dir.as_path()));
+        w.watch(&crate::places::this_pc());
+        assert_eq!(w.watched, None);
+        std::fs::write(dir.join("x"), "").unwrap();
+        std::thread::sleep(SETTLE);
+        assert!(!w.take_changed(), "the folder left is no longer watched");
     }
 
     #[test]
