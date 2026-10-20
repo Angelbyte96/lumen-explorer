@@ -178,15 +178,66 @@ pub fn free_name(original: &Path, is_dir: bool, taken: impl Fn(&Path) -> bool) -
 /// Puts the entry back where it was, in its folder (made if it is gone) and
 /// under a free name, then drops its record. Returns where it landed.
 pub fn restore(item: &Recycled) -> Result<PathBuf, String> {
-    let target = free_name(&item.original, item.is_dir, |path| std::fs::symlink_metadata(path).is_ok());
     let fail = |err: std::io::Error| format!("Cannot restore {}: {err}", item.name);
-    if let Some(parent) = target.parent() {
+    if let Some(parent) = item.original.parent() {
         std::fs::create_dir_all(parent).map_err(fail)?;
     }
-    std::fs::rename(&item.data, &target).map_err(fail)?;
+    // A name taken between the look and the move: the next free one.
+    let mut target = free_name(&item.original, item.is_dir, |path| std::fs::symlink_metadata(path).is_ok());
+    for _ in 0..10 {
+        match move_without_replacing(&item.data, &target) {
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let refused = target.clone();
+                target = free_name(&item.original, item.is_dir, |path| path == refused || std::fs::symlink_metadata(path).is_ok());
+            }
+            done => {
+                done.map_err(fail)?;
+                break;
+            }
+        }
+    }
+    if std::fs::symlink_metadata(&item.data).is_ok() {
+        return Err(format!("Cannot restore {}: every free name was taken", item.name));
+    }
     // Without its content the record is skipped anyway: nothing to report.
     let _ = std::fs::remove_file(&item.info);
     Ok(target)
+}
+
+/// Moves `from` to `to`, failing (AlreadyExists) when `to` is taken: the
+/// move itself refuses, so nothing that appears there meanwhile is replaced.
+#[cfg(windows)]
+pub fn move_without_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    let wide = |path: &Path| path.as_os_str().encode_wide().chain([0]).collect::<Vec<u16>>();
+    let (from, to) = (wide(from), wide(to));
+    // SAFETY: both are NUL-terminated and outlive the call; no flags: no replace.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+        let err = std::io::Error::last_os_error();
+        // ERROR_ACCESS_DENIED is what a folder onto a folder gives.
+        if to_taken(&to) && err.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, err));
+        }
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn to_taken(wide: &[u16]) -> bool {
+    use std::os::windows::ffi::OsStringExt;
+    let path = std::ffi::OsString::from_wide(&wide[..wide.len() - 1]);
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// Elsewhere (no Recycle Bin there): a check, then the move.
+#[cfg(not(windows))]
+pub fn move_without_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "the target is taken"));
+    }
+    std::fs::rename(from, to)
 }
 
 /// Deletes the entry and its record for good.
@@ -523,6 +574,23 @@ pub(crate) mod tests {
     }
 
     /// A bin with one file, `notes.txt`, recycled from `Users` under the fixture; its item.
+    #[test]
+    fn the_move_back_refuses_a_target_that_is_taken_and_leaves_both_alone() {
+        let dir = fresh_fixture("recycle-move-taken");
+        std::fs::write(dir.join("from.txt"), "bin").unwrap();
+        std::fs::write(dir.join("to.txt"), "user").unwrap();
+        let err = move_without_replacing(&dir.join("from.txt"), &dir.join("to.txt")).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists, "{err}");
+        assert_eq!(std::fs::read_to_string(dir.join("to.txt")).unwrap(), "user");
+        assert_eq!(std::fs::read_to_string(dir.join("from.txt")).unwrap(), "bin");
+        std::fs::create_dir(dir.join("empty")).unwrap();
+        std::fs::create_dir(dir.join("folder")).unwrap();
+        assert!(move_without_replacing(&dir.join("folder"), &dir.join("empty")).is_err(), "nor an empty folder");
+        assert!(dir.join("folder").is_dir());
+        move_without_replacing(&dir.join("from.txt"), &dir.join("free.txt")).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("free.txt")).unwrap(), "bin");
+    }
+
     fn one_file(name: &str) -> (PathBuf, Recycled) {
         let dir = fresh_fixture(name);
         let bin = bin(&dir);
