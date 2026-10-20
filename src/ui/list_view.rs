@@ -235,7 +235,7 @@ mod tests {
             last = draw(&ctx, &view, events).0.event;
         }
         draw(&ctx, &view, vec![button(to, false)]);
-        assert!(matches!(last, Some(ListEvent::Cells { ref cells, cursor: Some(0) }) if cells == &[0, 1]), "a and b, cursor on a");
+        assert!(matches!(last, Some(ListEvent::Cells { ref cells, cursor: Some(0), .. }) if cells == &[0, 1]), "a and b, cursor on a");
     }
 
     fn carried(ctx: &egui::Context) -> Option<Vec<PathBuf>> {
