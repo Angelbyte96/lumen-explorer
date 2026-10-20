@@ -52,7 +52,9 @@ On Windows:
   manager (no terminal), while `lumen` from a terminal opens the folder it
   was started from. A folder given to Lumen always opens alone.
 - Storage in the side panel lists local and USB drives with their free space;
-  network and CD drives are left out.
+  network and CD drives are left out. On Windows a drive plugged in or ejected
+  shows up (here and in This PC) within about a second; free space is read
+  every 5 seconds.
 - Files open as a double-click in File Explorer does: Windows asks before
   opening a downloaded file only when its type is dangerous (`.exe`, `.bat`…),
   not for a downloaded image or document.
@@ -122,7 +124,7 @@ Each tab keeps its own folder, history, filter and selection; a tab is reloaded 
 
 The side panel on the left (☰ shows or hides it) lists your **Bookmarks** (right-click one for its menu, where "Remove from Bookmarks" removes it), **Places** (on Windows **This PC** first, then home, Desktop, Downloads, Documents, Music, Pictures and Videos as named on your system; on Linux also the Trash), **Storage** (mounted disks with a bar showing how full they are; hover a disk for its free space) and **Recents** (the last 10 folders you visited in Lumen). Right-click any row of the panel for its menu (open it, open it in a new tab, copy its path, bookmark it; on Windows also the shell's own items, such as Eject for a USB drive). Nothing inside the Trash can be trashed again.
 
-On Windows, **This PC** opens a view of the drives the side panel's Storage lists, with their Name, Type (Local Disk, Removable Disk...), File System, Free Space, Size and Percent Full (a bar). Click a drive to select it, double-click it or press Enter to open it, and right-click it (or press the Menu key) for its menu, with Eject for a USB drive. Back and forward come back to it, and the crumbs and the tab say "This PC".
+On Windows, **This PC** opens a view of the drives the side panel's Storage lists, with their Name, Type (Local Disk, Removable Disk...), File System, Free Space, Size and Percent Full (a bar). Click a drive to select it, double-click it or press Enter to open it, and right-click it (or press the Menu key) for its menu, with Eject for a USB drive. Its headers work like the list's: click one to sort by it (click again to reverse; the arrow shows the order), drag a header border to resize a column, and right-click a header, or press Ctrl+Shift+F, to size one column or all of them to fit (all of them inside the width of the view, with the same priorities as the list). The sort and the widths last until you quit. Back and forward come back to it, and the crumbs and the tab say "This PC".
 
 The toolbar has back, forward and up buttons, the bookmark star and the current path as crumbs (`angelbyte › Descargas`): click a crumb to go there. Inside your home folder the crumbs start at it; elsewhere they start at `/`.
 

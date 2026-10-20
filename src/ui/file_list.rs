@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use eframe::egui::{self, text::CCursorRange};
 use egui_extras::{Column, TableBuilder};
 
-use crate::app::{Scroll, Sort, SortColumn, View};
+use crate::app::{Scroll, SortColumn, View};
 use crate::format::{format_size, format_time};
 use crate::fs::Entry;
 use crate::fs::count::Totals;
@@ -140,12 +140,7 @@ pub fn show(
     // Set again below if the cursor row is drawn this frame.
     ui.ctx().data_mut(|d| d.remove::<egui::Rect>(cursor_row_id()));
 
-    // While a border is dragged, the widths the pointer gives now; the saved ones otherwise.
-    let pointer = ui.input(|i| i.pointer.latest_pos());
-    let widths = match (ui.ctx().data(|d| d.get_temp::<Drag>(drag_id())), pointer) {
-        (Some(drag), Some(pointer)) => drag.at(pointer.x),
-        _ => sizes.widths,
-    };
+    let widths = live_widths(ui, &sizes.widths);
     let mut cells = [egui::Rect::NOTHING; COLUMNS.len()];
     // From the rows: one drawn row's index and top, to turn a height on
     // screen into row units; and whether the button went down here on a
@@ -193,15 +188,11 @@ pub fn show(
                     let (label, column) = COLUMNS[i];
                     header.col(|ui| {
                         cells[i] = ui.max_rect();
-                        // The whole header, not only its label: a click sorts, a right click opens its menu.
-                        let cell = ui.interact(ui.max_rect(), egui::Id::new(("lumen_header", i)), egui::Sense::CLICK);
-                        let label = sort_header(ui, label, column, sort);
-                        if label.clicked() || cell.clicked() {
-                            event = Some(ListEvent::Sort(column));
-                        } else if label.secondary_clicked() || cell.secondary_clicked() {
-                            event = Some(ListEvent::HeaderMenu(i));
-                        } else if (label.middle_clicked() || cell.middle_clicked()) && i != 0 {
-                            event = Some(ListEvent::CloseColumn(i));
+                        match header_cell(ui, i, label, (sort.column == column).then_some(sort.descending)) {
+                            Some(HeaderClick::Sort) => event = Some(ListEvent::Sort(column)),
+                            Some(HeaderClick::Menu) => event = Some(ListEvent::HeaderMenu(i)),
+                            Some(HeaderClick::Close) if i != 0 => event = Some(ListEvent::CloseColumn(i)),
+                            _ => {}
                         }
                     });
                 }
@@ -317,7 +308,7 @@ pub fn show(
                 });
             });
         if let Some(resized) = column_borders(ui, &cells, &widths) {
-            event = Some(resized);
+            event = Some(ListEvent::Resized(resized));
         }
         // Everything under the header that is not a folder row (a file row, the
         // gaps between rows, the space below them) drops into the folder on screen.
@@ -433,9 +424,8 @@ fn band(ui: &egui::Ui, pressed: bool, may_start: bool, unit: impl Fn(f32) -> f32
 pub fn fit_width(ctx: &egui::Context, view: &View, column: usize) -> f32 {
     let style = ctx.global_style();
     let font = egui::TextStyle::Body.resolve(&style);
-    let measure = |text: String| ctx.fonts_mut(|f| f.layout_no_wrap(text, font.clone(), egui::Color32::WHITE).size().x);
-    // The header with room for the sort arrow, which may show up later.
-    let header = measure(format!("{} {SORT_DESCENDING}", COLUMNS[column].0)) + 2.0 * style.spacing.button_padding.x;
+    let measure = body_measure(ctx);
+    let header = header_width(ctx, COLUMNS[column].0);
     let icon = icon_side(ctx.fonts_mut(|f| f.row_height(&font))) + style.spacing.item_spacing.x;
     let widest = view
         .rows
@@ -453,7 +443,22 @@ pub fn fit_width(ctx: &egui::Context, view: &View, column: usize) -> f32 {
             }
         })
         .fold(header, f32::max);
-    // Whole points: the config keeps them so.
+    fitted(widest)
+}
+
+/// How wide `text` is in the body font.
+pub fn body_measure(ctx: &egui::Context) -> impl Fn(String) -> f32 + '_ {
+    let font = egui::TextStyle::Body.resolve(&ctx.global_style());
+    move |text| ctx.fonts_mut(|f| f.layout_no_wrap(text, font.clone(), egui::Color32::WHITE).size().x)
+}
+
+/// The width a header `label` needs, with room for the sort arrow, which may show up later.
+pub fn header_width(ctx: &egui::Context, label: &str) -> f32 {
+    body_measure(ctx)(format!("{label} {SORT_DESCENDING}")) + 2.0 * ctx.global_style().spacing.button_padding.x
+}
+
+/// The column width for a `widest` cell: some air, whole points (the config keeps them so).
+pub fn fitted(widest: f32) -> f32 {
     (widest + FIT_MARGIN).max(MIN_WIDTH).ceil()
 }
 
@@ -553,9 +558,19 @@ fn drag_id() -> egui::Id {
 /// How far either side of a border the pointer grabs it.
 const BORDER_GRAB: f32 = 4.0;
 
+/// The widths to draw: while a border is dragged, the ones the pointer gives
+/// now; `saved` otherwise.
+pub fn live_widths(ui: &egui::Ui, saved: &Widths) -> Widths {
+    let pointer = ui.input(|i| i.pointer.latest_pos());
+    match (ui.ctx().data(|d| d.get_temp::<Drag>(drag_id())), pointer) {
+        (Some(drag), Some(pointer)) => drag.at(pointer.x),
+        _ => *saved,
+    }
+}
+
 /// The draggable border on the right of each header `cells` holds, drawn
 /// over the header. Returns the new widths when a border is let go.
-fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths: &Widths) -> Option<ListEvent> {
+pub fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths: &Widths) -> Option<Widths> {
     let gap = ui.spacing().item_spacing.x;
     let mut event = None;
     for (column, cell) in cells.iter().enumerate().filter(|(_, cell)| cell.is_positive()) {
@@ -581,7 +596,7 @@ fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths
         {
             ui.ctx().data_mut(|d| d.remove::<Drag>(drag_id()));
             let x = pointer.or_else(|| ui.input(|i| i.pointer.latest_pos())).map_or(drag.start_x, |p| p.x);
-            event = Some(ListEvent::Resized(drag.at(x)));
+            event = Some(drag.at(x));
         }
     }
     event
@@ -750,12 +765,39 @@ pub(crate) fn rename_field(ui: &mut egui::Ui, edit: &mut RenameEdit) -> Option<b
         .then(|| ui.input(|i| i.key_pressed(egui::Key::Enter)))
 }
 
-/// A header label that sorts on click; the active column shows its direction.
-fn sort_header(ui: &mut egui::Ui, label: &str, column: SortColumn, sort: Sort) -> egui::Response {
-    let arrow = match (sort.column == column, sort.descending) {
-        (false, _) => "",
-        (true, false) => SORT_ASCENDING,
-        (true, true) => SORT_DESCENDING,
+/// A click on a column's header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderClick {
+    /// Left click: sort by the column.
+    Sort,
+    /// Right click: the column's menu.
+    Menu,
+    /// Middle click: close the column.
+    Close,
+}
+
+/// The header cell `ui` is, for column `i`: the whole cell takes the click, not
+/// only its label. `direction` is `Some(descending)` when the table is sorted by it.
+pub fn header_cell(ui: &mut egui::Ui, i: usize, label: &str, direction: Option<bool>) -> Option<HeaderClick> {
+    let cell = ui.interact(ui.max_rect(), egui::Id::new(("lumen_header", i)), egui::Sense::CLICK);
+    let label = sort_header(ui, label, direction);
+    if label.clicked() || cell.clicked() {
+        Some(HeaderClick::Sort)
+    } else if label.secondary_clicked() || cell.secondary_clicked() {
+        Some(HeaderClick::Menu)
+    } else if label.middle_clicked() || cell.middle_clicked() {
+        Some(HeaderClick::Close)
+    } else {
+        None
+    }
+}
+
+/// A header label that sorts on click; the sorted column shows its direction.
+fn sort_header(ui: &mut egui::Ui, label: &str, direction: Option<bool>) -> egui::Response {
+    let arrow = match direction {
+        None => "",
+        Some(false) => SORT_ASCENDING,
+        Some(true) => SORT_DESCENDING,
     };
     let text = egui::RichText::new(format!("{label} {arrow}")).strong();
     ui.add(egui::Button::new(text).frame(false).sense(egui::Sense::CLICK))
