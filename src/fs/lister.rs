@@ -55,8 +55,8 @@ pub struct Listing {
 
 /// Reads and sorts a directory synchronously. Runs on the worker thread.
 pub fn read_entries(path: &Path) -> Result<Vec<Entry>, ListError> {
-    // This PC is no folder: its drives are drawn from the side panel's disks.
-    if crate::places::is_this_pc(path) {
+    // This PC and the Recycle Bin are no folders: the app draws their rows itself.
+    if crate::places::is_marker(path) {
         return Ok(Vec::new());
     }
     // `read_dir` on a file fails with a generic error on some platforms, so check first.
@@ -280,6 +280,11 @@ mod tests {
     #[test]
     fn this_pc_lists_no_entries_whatever_the_working_directory_holds() {
         assert_eq!(read_entries(&crate::places::this_pc()).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn the_recycle_bin_lists_no_entries_either_it_is_drawn_from_the_bins() {
+        assert_eq!(read_entries(&crate::places::recycle_bin()).unwrap().len(), 0);
     }
 
     #[test]

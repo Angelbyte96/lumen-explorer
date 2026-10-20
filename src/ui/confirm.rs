@@ -12,6 +12,7 @@ use eframe::egui;
 use crate::format::{format_size, format_time};
 use crate::fs::Entry;
 use crate::input::Confirm;
+use crate::recycle_bin::Recycled;
 use crate::ui::icons::{self, IconKind};
 use crate::ui::preview::plural;
 use crate::ui::theme;
@@ -35,6 +36,35 @@ impl Subject {
             [one] => Self::one(one),
             many => Self::many(many),
         }
+    }
+
+    /// Recycled entries, by the names they had and where they were.
+    pub fn recycled(items: &[Recycled]) -> Self {
+        if let [item] = items {
+            let shown = Entry { name: item.name.clone(), path: item.original.clone(), is_dir: item.is_dir, size: None, modified: None, hidden: false };
+            let mut facts = vec![("Original Location", item.location.clone())];
+            if let Some(deleted) = item.deleted {
+                facts.push(("Date Deleted", format_time(deleted)));
+            }
+            // A folder's record may hold no size.
+            if !item.is_dir || item.size > 0 {
+                facts.push(("Size", format_size(item.size)));
+            }
+            return Self { icon: icons::kind_of(&shown), name: item.name.clone(), facts };
+        }
+        let folders = items.iter().filter(|item| item.is_dir).count() as u64;
+        let files = items.len() as u64 - folders;
+        let contains = match (files, folders) {
+            (0, n) => plural(n, "folder"),
+            (n, 0) => plural(n, "file"),
+            (f, d) => format!("{}, {}", plural(f, "file"), plural(d, "folder")),
+        };
+        let mut names = items.iter().take(NAMES_SHOWN).map(|item| item.name.as_str()).collect::<Vec<_>>().join(", ");
+        if items.len() > NAMES_SHOWN {
+            names += &format!(" and {} more", items.len() - NAMES_SHOWN);
+        }
+        let icon = if files == 0 { IconKind::Folder } else { IconKind::File };
+        Self { icon, name: plural(items.len() as u64, "item"), facts: vec![("Contains", contains), ("Items", names)] }
     }
 
     fn one(entry: &Entry) -> Self {
@@ -233,6 +263,55 @@ mod tests {
             [("Contains", "3 files, 1 folder".into()), ("Items", "a.txt, b.txt, sub and 1 more".into())],
             "no size: a folder's is unknown"
         );
+    }
+
+    fn recycled(name: &str, location: &str, is_dir: bool, size: u64, unix: Option<u64>) -> Recycled {
+        Recycled {
+            info: format!("/bin/$I{name}").into(),
+            data: format!("/bin/$R{name}").into(),
+            original: Path::new(location).join(name),
+            name: name.into(),
+            location: location.into(),
+            size,
+            deleted: unix.map(|s| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(s)),
+            is_dir,
+        }
+    }
+
+    #[test]
+    fn one_recycled_file_shows_where_it_was_when_it_went_and_its_size() {
+        let item = recycled("cover.png", "/home/u/Pictures", false, 2048, Some(1_600_000_000));
+        let subject = Subject::recycled(std::slice::from_ref(&item));
+        assert_eq!((subject.icon, subject.name.as_str()), (IconKind::Image, "cover.png"), "by its extension");
+        assert_eq!(labels(&subject), ["Original Location", "Date Deleted", "Size"]);
+        assert_eq!(fact(&subject, "Original Location"), "/home/u/Pictures");
+        assert_eq!(fact(&subject, "Date Deleted"), format_time(item.deleted.unwrap()));
+        assert_eq!(fact(&subject, "Size"), "2.0 KB");
+    }
+
+    #[test]
+    fn one_recycled_folder_with_no_date_or_size_shows_only_where_it_was() {
+        let subject = Subject::recycled(&[recycled("docs", "/home/u", true, 0, None)]);
+        assert_eq!((subject.icon, labels(&subject)), (IconKind::Folder, vec!["Original Location"]));
+        let sized = Subject::recycled(&[recycled("docs", "/home/u", true, 10, None)]);
+        assert_eq!(labels(&sized), ["Original Location", "Size"]);
+    }
+
+    #[test]
+    fn several_recycled_entries_show_what_they_hold_and_their_names() {
+        let items = [
+            recycled("a.txt", "/x", false, 1, None),
+            recycled("b.txt", "/y", false, 1, None),
+            recycled("docs", "/z", true, 0, None),
+            recycled("c.txt", "/x", false, 1, None),
+            recycled("d.txt", "/x", false, 1, None),
+        ];
+        let three = Subject::recycled(&items[..3]);
+        assert_eq!((three.icon, three.name.as_str()), (IconKind::File, "3 items"));
+        assert_eq!(three.facts, [("Contains", "2 files, 1 folder".into()), ("Items", "a.txt, b.txt, docs".into())]);
+        assert_eq!(Subject::recycled(&items).facts[1], ("Items", "a.txt, b.txt, docs and 2 more".into()));
+        let folders = Subject::recycled(&items[2..3].iter().cloned().cycle().take(2).collect::<Vec<_>>());
+        assert_eq!((folders.icon, folders.facts[0].1.as_str()), (IconKind::Folder, "2 folders"));
     }
 
     /// Every text the dialog painted this frame.
