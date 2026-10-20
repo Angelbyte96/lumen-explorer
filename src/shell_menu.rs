@@ -6,6 +6,8 @@
 // Built everywhere so its tests run on Linux; only Windows uses it.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+use std::path::Path;
+
 use crate::app::Sort;
 use crate::fs::Entry;
 use crate::menu::{self, Command, Item, Kind};
@@ -138,6 +140,42 @@ pub fn entry_menu(shell: Vec<Item>, selection: &[&Entry], bookmarked: bool, can_
         items.push(Item::run("Calculate Size", Some("Alt+R"), true, Command::Count));
     }
     items
+}
+
+/// The menu for a side panel item on Windows: the shell's items for `path`
+/// (`shell`, empty when the shell could not be asked) minus those Lumen maps
+/// to the list's selection (Cut, Copy, Paste, Delete, Rename, Refresh, New
+/// folder), then what only Lumen offers. The shell's Open opens `path`.
+pub fn place_menu(shell: Vec<Item>, path: &Path, bookmarked: bool) -> Vec<Item> {
+    if shell.is_empty() {
+        return menu::place_menu(path, bookmarked);
+    }
+    let mut items = tidy(for_place(shell, path));
+    if !contains(&items, &Command::OpenPlace(path.to_path_buf())) {
+        items.splice(0..0, [Item::run("Open", None, true, Command::OpenPlace(path.to_path_buf())), Item::separator()]);
+        items = tidy(items);
+    }
+    items.push(Item::separator());
+    items.extend(menu::place_own(path, bookmarked));
+    items
+}
+
+/// `items` for a side panel item: Open runs on `path`, and what acts on the list is dropped.
+fn for_place(items: Vec<Item>, path: &Path) -> Vec<Item> {
+    items
+        .into_iter()
+        .filter_map(|mut item| {
+            match &mut item.kind {
+                Kind::Sub(sub) => *sub = for_place(std::mem::take(sub), path),
+                Kind::Run(Command::Open) => item.kind = Kind::Run(Command::OpenPlace(path.to_path_buf())),
+                Kind::Run(
+                    Command::Cut | Command::Copy | Command::Paste | Command::Trash | Command::Rename | Command::Refresh | Command::NewFolder,
+                ) => return None,
+                _ => {}
+            }
+            Some(item)
+        })
+        .collect()
 }
 
 /// The menu for the folder's empty space on Windows: the shell's items, then
@@ -314,6 +352,57 @@ mod tests {
             }
         }
         out
+    }
+
+    /// The shell's items for a folder: Open, the clipboard and trash ones, Properties.
+    fn folder_items() -> Vec<Item> {
+        vec![
+            Item::run("Open", None, true, Command::Open),
+            shell("Open in new window", 1),
+            Item::separator(),
+            Item::run("Cut", None, true, Command::Cut),
+            Item::run("Copy", None, true, Command::Copy),
+            Item::run("Paste", None, true, Command::Paste),
+            Item::separator(),
+            Item::run("Delete", None, true, Command::Trash),
+            Item::run("Rename", None, true, Command::Rename),
+            Item::run("Refresh", None, true, Command::Refresh),
+            Item::run("New folder", None, true, Command::NewFolder),
+            Item::sub_plain("Send to", vec![Item::run("Cut", None, true, Command::Cut), shell("Desktop", 2)]),
+            Item::separator(),
+            shell("Eject", 3),
+            shell("Properties", 4),
+        ]
+    }
+
+    #[test]
+    fn a_side_panel_item_keeps_the_shells_items_but_not_those_that_act_on_the_list_selection() {
+        let path = std::path::PathBuf::from("/x/usb");
+        let items = place_menu(folder_items(), &path, false);
+        assert_eq!(
+            outline(&items),
+            ["Open", "Open in new window", "-", "Send to", "  Desktop", "-", "Eject", "Properties", "-", "Open in New Tab", "Copy Path", "Add to Bookmarks"]
+        );
+        assert_eq!(runs(&items, &Command::OpenPlace(path.clone())), [("Open".to_owned(), true)], "the shell's Open opens this path");
+        for gone in [Command::Open, Command::Cut, Command::Copy, Command::Paste, Command::Trash, Command::Rename, Command::Refresh, Command::NewFolder] {
+            assert!(runs(&items, &gone).is_empty(), "{gone:?} would act on the list");
+        }
+        for offset in [1, 2, 3, 4] {
+            assert_eq!(runs(&items, &Command::Shell(offset)).len(), 1, "Shell({offset}) stays");
+        }
+        for own in [Command::OpenPlaceInNewTab(path.clone()), Command::CopyPlacePath(path.clone()), Command::ToggleBookmarkOf(path.clone())] {
+            assert_eq!(runs(&items, &own).len(), 1, "{own:?}");
+        }
+        assert!(outline(&place_menu(folder_items(), &path, true)).contains(&"Remove from Bookmarks".to_owned()));
+    }
+
+    #[test]
+    fn a_side_panel_item_without_the_shell_or_its_open_gets_lumens() {
+        let path = std::path::PathBuf::from("/x/usb");
+        assert_eq!(place_menu(Vec::new(), &path, false), menu::place_menu(&path, false));
+        let items = place_menu(vec![shell("Properties", 4)], &path, true);
+        assert_eq!(outline(&items)[..3], ["Open", "-", "Properties"], "Open is always first");
+        assert_eq!(runs(&items, &Command::OpenPlace(path)).len(), 1);
     }
 
     #[test]

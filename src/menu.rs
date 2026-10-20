@@ -57,6 +57,12 @@ pub enum Command {
     ShiftColumnRight(usize),
     /// Show the column again, or hide it.
     ToggleColumn(usize),
+    /// The side panel's menu: these act on that item's path, never on the list's selection.
+    OpenPlace(std::path::PathBuf),
+    OpenPlaceInNewTab(std::path::PathBuf),
+    CopyPlacePath(std::path::PathBuf),
+    /// Bookmark the folder, or remove its bookmark.
+    ToggleBookmarkOf(std::path::PathBuf),
 }
 
 /// The line icon drawn left of an item (see `ui::icons::menu_icon`).
@@ -108,17 +114,17 @@ impl MenuIcon {
     /// The icon a command shows; sort columns have none, like Dolphin's.
     fn of(command: &Command) -> Option<Self> {
         Some(match command {
-            Command::Open => Self::Open,
+            Command::Open | Command::OpenPlace(_) => Self::Open,
             Command::OpenWith(_) => return None,
-            Command::OpenInNewTab => Self::NewTab,
+            Command::OpenInNewTab | Command::OpenPlaceInNewTab(_) => Self::NewTab,
             Command::Cut => Self::Cut,
             Command::Copy => Self::Copy,
-            Command::CopyPath => Self::CopyPath,
+            Command::CopyPath | Command::CopyPlacePath(_) => Self::CopyPath,
             Command::Paste | Command::PasteInto => Self::Paste,
             Command::Rename => Self::Rename,
             Command::Trash => Self::Trash,
             Command::DeleteForever => Self::Delete,
-            Command::ToggleBookmark => Self::Bookmark,
+            Command::ToggleBookmark | Command::ToggleBookmarkOf(_) => Self::Bookmark,
             Command::Count => Self::Size,
             Command::NewFolder => Self::NewFolder,
             Command::NewFile(_) => Self::NewFile,
@@ -438,6 +444,24 @@ pub fn entry_menu(selection: &[&Entry], bookmarked: bool, apps: &[App]) -> Vec<I
     items
 }
 
+/// The menu for a side panel item (a bookmark, place, disk or recent folder):
+/// its own path, whatever the list has selected. `bookmarked`: it is a bookmark.
+pub fn place_menu(path: &std::path::Path, bookmarked: bool) -> Vec<Item> {
+    let mut items = vec![Item::run("Open", None, true, Command::OpenPlace(path.to_path_buf())), Item::separator()];
+    items.extend(place_own(path, bookmarked));
+    items
+}
+
+/// What only Lumen adds to a side panel item's menu.
+pub fn place_own(path: &std::path::Path, bookmarked: bool) -> [Item; 3] {
+    let bookmark = if bookmarked { "Remove from Bookmarks" } else { "Add to Bookmarks" };
+    [
+        Item::run("Open in New Tab", None, true, Command::OpenPlaceInNewTab(path.to_path_buf())),
+        Item::run("Copy Path", None, true, Command::CopyPlacePath(path.to_path_buf())),
+        Item::run(bookmark, None, true, Command::ToggleBookmarkOf(path.to_path_buf())),
+    ]
+}
+
 /// Lumen opens terminals itself only off Windows; there the shell's menu does.
 const TERMINAL: bool = cfg!(not(windows));
 
@@ -651,7 +675,8 @@ pub(crate) mod tests {
     fn every_item_has_an_icon_except_the_sort_columns() {
         let (dir, file) = (entry("src", true), entry("a.txt", false));
         let templates = [std::path::PathBuf::from("/t/Report.odt")];
-        for items in [entry_menu(&[&dir], false, &[]), entry_menu(&[&file], true, &[]), background_menu(true, Sort::default(), &templates)] {
+        let place = place_menu(std::path::Path::new("/x/src"), false);
+        for items in [entry_menu(&[&dir], false, &[]), entry_menu(&[&file], true, &[]), background_menu(true, Sort::default(), &templates), place] {
             assert_eq!(without_icon(&items), Vec::<String>::new());
         }
     }
@@ -698,6 +723,17 @@ pub(crate) mod tests {
             ])
         );
         assert!(outline(&entry_menu(&[&dir], true, &[])).contains(&"Remove from Bookmarks".to_owned()));
+    }
+
+    #[test]
+    fn a_side_panel_item_offers_open_new_tab_copy_path_and_its_bookmark_all_on_its_own_path() {
+        let path = std::path::PathBuf::from("/x/src");
+        assert_eq!(outline(&place_menu(&path, false)), ["Open", "-", "Open in New Tab", "Copy Path", "Add to Bookmarks"]);
+        let items = place_menu(&path, true);
+        assert_eq!(outline(&items)[4], "Remove from Bookmarks");
+        let commands: Vec<Command> = lines(&items).into_iter().filter_map(|line| line.2.cloned()).collect();
+        let expected = [Command::OpenPlace(path.clone()), Command::OpenPlaceInNewTab(path.clone()), Command::CopyPlacePath(path.clone()), Command::ToggleBookmarkOf(path)];
+        assert_eq!(commands, expected);
     }
 
     #[test]
