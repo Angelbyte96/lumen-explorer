@@ -501,6 +501,15 @@ pub fn column_menu(column: usize, shown: &Shown, order: &Order) -> Vec<Item> {
     items
 }
 
+/// Right click on the This PC view's header `column`: its columns are fixed, so
+/// only the list's two fits apply.
+pub fn drives_column_menu(column: usize) -> Vec<Item> {
+    vec![
+        Item::run("Size Column To Fit", None, true, Command::FitColumn(column)),
+        Item::run("Size All Columns To Fit", Some("Ctrl+Shift+F"), true, Command::FitAllColumns),
+    ]
+}
+
 /// The menu for the folder's empty space. `can_paste`: the clipboard holds
 /// something; `templates`: the files New ▸ offers copies of.
 pub fn background_menu(can_paste: bool, sort: Sort, templates: &[std::path::PathBuf]) -> Vec<Item> {
@@ -851,5 +860,16 @@ pub(crate) mod tests {
         assert!(!enabled(&size, "Shift Column Right"), "Size is last");
         let moved = column_menu(5, &shown, &[0, 1, 2, 3, 5, 4]);
         assert!(enabled(&moved, "Shift Column Right"), "follows the order");
+    }
+
+    #[test]
+    fn the_this_pc_header_menu_only_fits_the_column_or_all_of_them() {
+        assert_eq!(
+            lines(&drives_column_menu(3)),
+            [
+                ("Size Column To Fit", None, Some(&Command::FitColumn(3)), true, None),
+                ("Size All Columns To Fit", Some("Ctrl+Shift+F"), Some(&Command::FitAllColumns), true, None),
+            ]
+        );
     }
 }
