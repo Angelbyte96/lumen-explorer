@@ -892,6 +892,8 @@ fn came_from(current: &Path, target: &Path) -> Option<String> {
 enum MenuBasis {
     Entries { selection: Vec<Entry>, bookmarked: bool, can_paste: bool },
     Background { can_paste: bool, sort: Sort },
+    /// A side panel item: its own path, bookmarked or not.
+    Place { path: PathBuf, bookmarked: bool },
 }
 
 #[cfg(windows)]
@@ -904,6 +906,7 @@ impl MenuBasis {
                 crate::shell_menu::entry_menu(shell, &selection, *bookmarked, *can_paste)
             }
             Self::Background { can_paste, sort } => crate::shell_menu::background_menu(shell, *can_paste, *sort),
+            Self::Place { path, bookmarked } => crate::shell_menu::place_menu(shell, path, *bookmarked),
         }
     }
 }
@@ -1420,12 +1423,36 @@ impl LumenApp {
     fn handle_sidebar(&mut self, ctx: &egui::Context, event: SidebarEvent) {
         match event {
             SidebarEvent::Open(path) => self.navigate(ctx, path, None),
-            SidebarEvent::RemoveBookmark(path) => {
-                self.bookmarks.toggle(&path);
-                let name = file_name(&path).unwrap_or_else(|| path.display().to_string());
-                self.notice = Some(format!("Removed “{name}” from bookmarks"));
+            SidebarEvent::Menu(path) => {
+                // Where the right click was; mid-window if the pointer is gone.
+                let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ctx.content_rect().center());
+                self.open_place_menu(path, pos);
             }
         }
+    }
+
+    /// Right click on a side panel item: the menu for that path, not for the
+    /// list's selection.
+    fn open_place_menu(&mut self, path: PathBuf, pos: egui::Pos2) {
+        let bookmarked = self.bookmarks.contains(&path);
+        #[cfg(not(windows))]
+        {
+            self.context_menu = Some(ContextMenu::new(menu::place_menu(&path, bookmarked), pos));
+        }
+        // The shell's items for it, as for a list row (see `open_entry_menu`).
+        // A drive's top has no parent: the drive is bound to itself.
+        #[cfg(windows)]
+        {
+            let folder = path.parent().map_or_else(|| path.clone(), Path::to_path_buf);
+            let repaint = self.repaint.clone();
+            self.shell_menu = Some(crate::shell_menu::native::Loader::entries(vec![path.clone()], folder, self.hwnd, move || {
+                repaint.request_repaint()
+            }));
+            self.menu_basis = Some(MenuBasis::Place { path, bookmarked });
+            self.context_menu = None;
+            self.menu_pending = Some(pos);
+        }
+        self.context_on_entry = false;
     }
 
     fn navigate(&mut self, ctx: &egui::Context, path: PathBuf, select: Option<String>) {
@@ -1694,6 +1721,16 @@ impl LumenApp {
                 self.column_order = ui::file_list::shift(&self.column_order, &self.shown_columns, column, false);
             }
             Command::ToggleColumn(column) => self.shown_columns[column] = column == 0 || !self.shown_columns[column],
+            Command::OpenPlace(path) => self.navigate(ctx, path, None),
+            Command::OpenPlaceInNewTab(path) => {
+                self.new_tab(ctx);
+                self.navigate(ctx, path, None);
+            }
+            Command::CopyPlacePath(path) => {
+                ctx.copy_text(paths_text(&[path.as_path()]));
+                self.notice = Some("Path copied".into());
+            }
+            Command::ToggleBookmarkOf(path) => self.toggle_bookmark(path),
         }
     }
 
@@ -4621,9 +4658,82 @@ mod tests {
         app.handle_sidebar(&ctx, SidebarEvent::Open(dir.join("sub")));
         assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub")));
         app.bookmarks.toggle(&dir.join("sub"));
-        app.handle_sidebar(&ctx, SidebarEvent::RemoveBookmark(dir.join("sub")));
+        app.run_command(&ctx, Command::ToggleBookmarkOf(dir.join("sub")));
         assert!(app.bookmarks.paths().is_empty());
         assert_eq!(app.notice.as_deref(), Some("Removed “sub” from bookmarks"));
+    }
+
+    #[test]
+    fn the_side_panel_menu_commands_act_on_their_path_and_leave_the_list_selection_alone() {
+        let (ctx, mut app, dir) = app_in("app-place-commands");
+        let sub = dir.join("sub");
+        pick(&mut app, &["a.txt"]);
+        app.run_command(&ctx, Command::ToggleBookmarkOf(sub.clone()));
+        assert!(app.bookmarks.contains(&sub) && !app.bookmarks.contains(&dir.join("a.txt")));
+        assert_eq!(app.notice.as_deref(), Some("Added “sub” to bookmarks"));
+        app.run_command(&ctx, Command::ToggleBookmarkOf(sub.clone()));
+        assert!(app.bookmarks.paths().is_empty());
+        app.notice = None;
+        app.run_command(&ctx, Command::CopyPlacePath(sub.clone()));
+        let copied = ctx.output(|o| {
+            o.commands.iter().find_map(|c| match c {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            })
+        });
+        assert_eq!(copied, Some(sub.display().to_string()));
+        assert_eq!(app.notice.as_deref(), Some("Path copied"));
+        assert!(app.clipboard.is_none(), "no entry is put up for Paste");
+        app.run_command(&ctx, Command::OpenPlace(sub.clone()));
+        assert_eq!(app.tab.lister.last_requested(), Some(sub.clone()));
+        assert_eq!(selection_names(&app.tab.view), ["a.txt"], "the list kept its selection");
+        app.run_command(&ctx, Command::OpenPlaceInNewTab(sub.clone()));
+        assert_eq!((app.tabs.len(), app.active), (2, 1));
+        assert_eq!(app.tab.lister.last_requested(), Some(sub));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_right_click_on_a_side_panel_item_opens_the_menu_for_that_path_not_the_selection() {
+        let (ctx, mut app, dir) = app_in("app-place-menu");
+        let sub = dir.join("sub");
+        pick(&mut app, &["a.txt"]);
+        app.context_on_entry = true;
+        app.handle_sidebar(&ctx, SidebarEvent::Menu(sub.clone()));
+        wait_for_menu(&mut app);
+        assert!(menu_item(&app, &Command::OpenPlace(sub.clone())).is_some(), "{:?}", menu_labels(&app));
+        assert!(menu_item(&app, &Command::OpenPlaceInNewTab(sub.clone())).is_some());
+        assert!(menu_item(&app, &Command::CopyPlacePath(sub.clone())).is_some());
+        let bookmark = menu_item(&app, &Command::ToggleBookmarkOf(sub.clone())).expect("the bookmark item");
+        assert_eq!(bookmark.label, "Add to Bookmarks");
+        for list in [Command::Open, Command::Cut, Command::Copy, Command::Trash, Command::Rename, Command::DeleteForever] {
+            assert!(menu_item(&app, &list).is_none(), "{list:?} would act on the list selection");
+        }
+        assert!(!app.context_on_entry);
+        assert_eq!(selection_names(&app.tab.view), ["a.txt"], "the selection is untouched");
+        app.bookmarks.toggle(&sub);
+        app.context_menu = None;
+        #[cfg(windows)]
+        {
+            app.shell_menu = None;
+        }
+        app.handle_sidebar(&ctx, SidebarEvent::Menu(sub.clone()));
+        wait_for_menu(&mut app);
+        assert_eq!(menu_item(&app, &Command::ToggleBookmarkOf(sub)).expect("the bookmark item").label, "Remove from Bookmarks");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_right_click_on_a_drive_asks_the_shell_for_its_own_menu() {
+        let (ctx, mut app, _dir) = app_in("app-place-drive");
+        let drive = PathBuf::from(r"C:\");
+        app.handle_sidebar(&ctx, SidebarEvent::Menu(drive.clone()));
+        assert!(app.context_menu.is_none() && app.menu_pending.is_some(), "waits for the shell like the list's menus");
+        wait_for_menu(&mut app);
+        assert!(menu_item(&app, &Command::OpenPlace(drive)).is_some(), "{:?}", menu_labels(&app));
+        let items = app.context_menu.as_ref().expect("menu open").items();
+        assert!(items.iter().any(|item| matches!(item.kind, crate::menu::Kind::Run(Command::Shell(_)))), "the shell's items: {:?}", menu_labels(&app));
     }
 
     #[test]
