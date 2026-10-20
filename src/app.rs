@@ -98,6 +98,9 @@ pub struct View {
     /// hold the same name). Only the rows shown count.
     /// Empty: the selection is the cursor row alone.
     picks: HashSet<PathBuf>,
+    /// While a Shift band is dragged: what was selected before it, kept
+    /// under the rows it touches.
+    band_base: Option<HashSet<PathBuf>>,
     /// Entry a Shift range starts from.
     anchor: Option<PathBuf>,
     /// The Tree view's unfolded folders.
@@ -346,38 +349,80 @@ impl View {
     /// A band dragged with the mouse from `start` to `end`, in row units (row
     /// `i` spans `[i, i + 1)`, so a scroll does not move the start): picks every
     /// row it touches and moves the cursor to the row at `end`. Over no row it
-    /// drops the picks, like a click below the rows.
-    pub fn select_band(&mut self, start: f32, end: f32) {
+    /// drops the picks, like a click below the rows. With `add` (Shift held)
+    /// the rows it touches join what was selected before it.
+    pub fn select_band(&mut self, start: f32, end: f32, add: bool) {
+        let base = self.band_base(add);
         self.unselected = false;
         let Some(last) = self.rows.len().checked_sub(1) else { return };
         let (low, high) = (start.min(end), start.max(end));
         if high < 0.0 || low >= self.rows.len() as f32 {
-            self.drop_picks();
+            self.keep_base(base);
             return;
         }
         self.want = None;
         // Saturating casts: anything above the rows is row 0.
         let row = |at: f32| (at.floor().max(0.0) as usize).min(last);
         let (from, to) = (row(low), row(high));
-        self.picks = self.rows[from..=to].iter().map(|&i| self.entry(i).path.clone()).collect();
+        let touched: Vec<PathBuf> = self.rows[from..=to].iter().map(|&i| self.entry(i).path.clone()).collect();
+        self.picks = base;
+        self.picks.extend(touched);
         self.anchor = Some(self.entry(self.rows[row(start)]).path.clone());
         self.selected = Some(row(end));
     }
 
     /// A band over the cards of a view laid out in lines: picks `cells` (rows
     /// shown) and moves the cursor to `cursor`. Over no card it drops the picks.
-    pub fn select_cells(&mut self, cells: &[usize], cursor: Option<usize>) {
+    /// With `add` the cards join what was selected before the band.
+    pub fn select_cells(&mut self, cells: &[usize], cursor: Option<usize>, add: bool) {
+        let base = self.band_base(add);
         self.unselected = false;
         let cells: Vec<usize> = cells.iter().copied().filter(|&row| row < self.rows.len()).collect();
         if cells.is_empty() {
-            self.drop_picks();
+            self.keep_base(base);
             return;
         }
         self.want = None;
-        self.picks = cells.iter().map(|&row| self.entry(self.rows[row]).path.clone()).collect();
+        let touched: Vec<PathBuf> = cells.iter().map(|&row| self.entry(self.rows[row]).path.clone()).collect();
+        self.picks = base;
+        self.picks.extend(touched);
         let cursor = cursor.filter(|row| cells.contains(row)).unwrap_or(cells[cells.len() - 1]);
         self.anchor = Some(self.entry(self.rows[cells[0]]).path.clone());
         self.selected = Some(cursor);
+    }
+
+    /// The band was let go: the next Shift band starts from the selection then.
+    pub fn end_band(&mut self) {
+        self.band_base = None;
+    }
+
+    /// A band over nothing: what it started from, or no picks at all.
+    fn keep_base(&mut self, base: HashSet<PathBuf>) {
+        if base.is_empty() {
+            self.drop_picks();
+        } else {
+            self.picks = base;
+        }
+    }
+
+    /// With `add`, what the band started from (taken on its first frame):
+    /// the picks, else the cursor row when it is drawn selected.
+    fn band_base(&mut self, add: bool) -> HashSet<PathBuf> {
+        if !add {
+            self.band_base = None;
+            return HashSet::new();
+        }
+        if self.band_base.is_none() {
+            let mut base: HashSet<PathBuf> = self.picks.clone();
+            if base.is_empty()
+                && !self.unselected
+                && let Some(&i) = self.selected.and_then(|row| self.rows.get(row))
+            {
+                base.insert(self.entry(i).path.clone());
+            }
+            self.band_base = Some(base);
+        }
+        self.band_base.clone().unwrap_or_default()
     }
 
     /// A click on the empty space or Escape: nothing is selected any more, the cursor
@@ -731,6 +776,29 @@ pub const REFRESH_DELAY: Duration = Duration::from_millis(200);
 
 /// How long a notice stays in the status bar.
 const NOTICE_TIME: Duration = Duration::from_secs(4);
+
+/// Clears `text` once it has been on screen for `NOTICE_TIME` (`shown`
+/// remembers which text and since when); returns how long until then.
+fn expire(text: &mut Option<String>, shown: &mut Option<(String, Instant)>, now: Instant) -> Option<Duration> {
+    let Some(current) = text.as_ref() else {
+        *shown = None;
+        return None;
+    };
+    let since = match shown {
+        Some((was, since)) if was == current => *since,
+        _ => {
+            *shown = Some((current.clone(), now));
+            now
+        }
+    };
+    let left = NOTICE_TIME.saturating_sub(now.saturating_duration_since(since));
+    if left.is_zero() {
+        *text = None;
+        *shown = None;
+        return None;
+    }
+    Some(left)
+}
 
 /// Schedules the reload that follows changes on disk.
 #[derive(Default)]
@@ -1111,6 +1179,8 @@ pub struct LumenApp {
     notice: Option<String>,
     /// The notice on screen and when it first showed, to clear it later.
     notice_shown: Option<(String, Instant)>,
+    /// The same for the red error line.
+    error_shown: Option<(String, Instant)>,
     /// Watches the folder on screen; changes schedule a refresh.
     watcher: Watcher,
     refresh: RefreshTimer,
@@ -1189,6 +1259,7 @@ impl LumenApp {
             column_order: ui::file_list::DEFAULT_ORDER,
             notice: None,
             notice_shown: None,
+            error_shown: None,
             watcher: Watcher::new({
                 let ctx = ctx.clone();
                 move || ctx.request_repaint()
@@ -1787,7 +1858,7 @@ impl LumenApp {
     /// questions, progress and cancel), leaving the clipboard alone.
     fn drop_into(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, dest: PathBuf, mode: Mode) {
         // Moved in by hand it would have no record to be restored from.
-        if self.trash.as_deref().is_some_and(|trash| places::in_trash(&dest, trash)) {
+        if places::in_recycle_bin(&dest) || self.trash.as_deref().is_some_and(|trash| places::in_trash(&dest, trash)) {
             self.tab.view.error = Some("Nothing can be dropped into the trash".into());
             return;
         }
@@ -1823,27 +1894,12 @@ impl LumenApp {
         self.start_batch(ctx, paths, dest, mode);
     }
 
-    /// Clears the notice once it has been on screen for `NOTICE_TIME`; returns
+    /// Clears the notice and the error once on screen for `NOTICE_TIME`; returns
     /// how long until then, or `None` when there is none left.
     fn expire_notice(&mut self, now: Instant) -> Option<Duration> {
-        let Some(notice) = &self.notice else {
-            self.notice_shown = None;
-            return None;
-        };
-        let since = match &self.notice_shown {
-            Some((shown, since)) if shown == notice => *since,
-            _ => {
-                self.notice_shown = Some((notice.clone(), now));
-                now
-            }
-        };
-        let left = NOTICE_TIME.saturating_sub(now.saturating_duration_since(since));
-        if left.is_zero() {
-            self.notice = None;
-            self.notice_shown = None;
-            return None;
-        }
-        Some(left)
+        let notice = expire(&mut self.notice, &mut self.notice_shown, now);
+        let error = expire(&mut self.tab.view.error, &mut self.error_shown, now);
+        notice.into_iter().chain(error).min()
     }
 
     /// A copy or move is already running: says so.
@@ -2632,6 +2688,9 @@ impl eframe::App for LumenApp {
             // After drawing: the icons the list just asked for go out this frame.
             self.file_icons.poll(&ctx);
             self.thumbnails.poll(&ctx);
+            if !matches!(event, Some(ListEvent::Band { .. } | ListEvent::Cells { .. })) {
+                self.tab.view.end_band();
+            }
             match event {
                 Some(ListEvent::Select(i)) => self.tab.view.select_row(i),
                 Some(ListEvent::Toggle(i)) => self.tab.view.toggle_pick(i),
@@ -2645,8 +2704,8 @@ impl eframe::App for LumenApp {
                     self.read_kids(&ctx);
                 }
                 Some(ListEvent::Extend(i)) => self.tab.view.extend_to(i),
-                Some(ListEvent::Band { start, end }) => self.tab.view.select_band(start, end),
-                Some(ListEvent::Cells { cells, cursor }) => self.tab.view.select_cells(&cells, cursor),
+                Some(ListEvent::Band { start, end, add }) => self.tab.view.select_band(start, end, add),
+                Some(ListEvent::Cells { cells, cursor, add }) => self.tab.view.select_cells(&cells, cursor, add),
                 Some(ListEvent::Activate(i)) => {
                     self.tab.view.select_row(i);
                     self.activate_selected(&ctx);
@@ -3787,6 +3846,20 @@ mod tests {
         assert_eq!(names_in(&trash), ["old"]);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_drop_into_a_recycle_bin_is_refused_on_windows() {
+        let (ctx, mut app, dir) = app_in("app-drop-recycle-bin");
+        assert!(app.trash.is_none(), "Windows has no trash place");
+        for dest in [r"C:\$Recycle.Bin", r"d:\$RECYCLE.BIN\S-1-5-21"] {
+            app.drop_into(&ctx, vec![dir.join("a.txt")], PathBuf::from(dest), Mode::Move);
+            assert!(app.batch.is_none() && app.job.is_none(), "nothing started for {dest}");
+            assert_eq!(app.tab.view.error.as_deref(), Some("Nothing can be dropped into the trash"));
+            app.tab.view.error = None;
+        }
+        assert_eq!(names_in(&dir), ["a.txt", "b.txt", "sub"]);
+    }
+
     #[test]
     fn a_drop_while_a_paste_runs_is_refused() {
         let (ctx, mut app, dir) = app_in("app-drop-busy");
@@ -4571,6 +4644,24 @@ mod tests {
     }
 
     #[test]
+    fn an_error_goes_away_after_a_few_seconds_and_a_new_one_starts_its_own_time() {
+        let (ctx, mut app, dir) = app_in("app-error-expiry");
+        let start = Instant::now();
+        app.trash = Some(dir.join("sub"));
+        app.drop_into(&ctx, vec![dir.join("a.txt")], dir.join("sub"), Mode::Move);
+        let told = Some("Nothing can be dropped into the trash");
+        assert_eq!(app.expire_notice(start), Some(NOTICE_TIME), "an error asks to be looked at again once its time is up");
+        assert_eq!(app.expire_notice(start + NOTICE_TIME / 2), Some(NOTICE_TIME / 2));
+        assert_eq!(app.tab.view.error.as_deref(), told, "still shown before its time");
+        app.tab.view.error = Some("Another operation is still running".into());
+        let later = start + NOTICE_TIME;
+        assert_eq!(app.expire_notice(later), Some(NOTICE_TIME), "a different error gets its full time");
+        assert_eq!(app.expire_notice(later + NOTICE_TIME), None);
+        assert_eq!(app.tab.view.error, None, "gone once its time is up");
+        assert_eq!(names_in(&dir), ["a.txt", "b.txt", "sub"]);
+    }
+
+    #[test]
     fn ctrl_d_bookmarks_the_current_folder_and_again_removes_it() {
         let (ctx, mut app, dir) = app_in("app-bookmark");
         app.handle_action(&ctx, Action::ToggleBookmark);
@@ -4907,20 +4998,71 @@ mod tests {
         let mut v = loaded_view();
         v.select_row(0);
         // Row i spans [i, i + 1) in row units.
-        v.select_band(1.5, 2.2);
+        v.select_band(1.5, 2.2, false);
         assert_eq!(selection_names(&v), ["a.txt", "b.txt"]);
         assert_eq!(v.selected, Some(2), "the cursor follows the pointer's end");
-        v.select_band(2.9, 0.1);
+        v.select_band(2.9, 0.1, false);
         assert_eq!(selection_names(&v), ["src", "a.txt", "b.txt"], "dragged upwards");
         assert_eq!(v.selected, Some(0));
-        v.select_band(1.2, 1.4);
+        v.select_band(1.2, 1.4, false);
         assert_eq!(selection_names(&v), ["a.txt"], "a short drag inside one row picks it");
         assert_eq!(v.picked_count(), 1);
-        v.select_band(-3.0, 9.0);
+        v.select_band(-3.0, 9.0, false);
         assert_eq!(selection_names(&v), ["src", "a.txt", "b.txt"], "clamped to the rows shown");
         assert_eq!(v.selected, Some(2));
         v.extend_to(1);
         assert_eq!(selection_names(&v), ["src", "a.txt"], "Shift+click ranges from where the band started");
+    }
+
+    fn five_files() -> View {
+        let mut v = View::default();
+        let names = ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"];
+        v.apply_listing(ok_listing("/x", names.iter().map(|n| entry(n, false)).collect()), None);
+        v
+    }
+
+    #[test]
+    fn a_shift_band_adds_its_rows_to_the_selection() {
+        let mut v = five_files();
+        v.select_band(0.5, 1.5, false);
+        v.end_band();
+        assert_eq!(selection_names(&v), ["a.txt", "b.txt"]);
+        v.select_band(3.5, 3.6, true);
+        assert_eq!(selection_names(&v), ["a.txt", "b.txt", "d.txt"], "the first frame of the band");
+        v.select_band(3.5, 4.5, true);
+        assert_eq!(selection_names(&v), ["a.txt", "b.txt", "d.txt", "e.txt"], "growing it keeps the earlier rows");
+        v.select_band(3.5, 3.6, true);
+        assert_eq!(selection_names(&v), ["a.txt", "b.txt", "d.txt"], "shrinking it lets go of what it no longer touches");
+        v.select_band(3.5, 7.0, true);
+        v.select_band(6.0, 7.0, true);
+        assert_eq!(selection_names(&v), ["a.txt", "b.txt"], "over no row it keeps what was there before it");
+        v.end_band();
+        v.select_band(2.5, 2.6, false);
+        assert_eq!(selection_names(&v), ["c.txt"], "without Shift a band still replaces the selection");
+    }
+
+    #[test]
+    fn a_shift_band_adds_to_the_cursor_row_when_nothing_is_picked() {
+        let mut v = five_files();
+        v.select_row(0);
+        v.select_band(2.5, 2.6, true);
+        assert_eq!(selection_names(&v), ["a.txt", "c.txt"]);
+        v.end_band();
+        v.unselect();
+        v.select_band(4.5, 4.6, true);
+        assert_eq!(selection_names(&v), ["e.txt"], "an unselected cursor is not added");
+    }
+
+    #[test]
+    fn a_shift_band_over_cards_adds_them_to_the_selection() {
+        let mut v = five_files();
+        v.select_cells(&[0], Some(0), false);
+        v.end_band();
+        v.select_cells(&[3, 4], Some(4), true);
+        assert_eq!(selection_names(&v), ["a.txt", "d.txt", "e.txt"]);
+        assert_eq!(v.selected, Some(4));
+        v.select_cells(&[], None, true);
+        assert_eq!(selection_names(&v), ["a.txt"], "over no card it keeps what was there before it");
     }
 
     #[test]
@@ -4929,14 +5071,14 @@ mod tests {
         v.select_all();
         v.select_row(1);
         v.select_all();
-        v.select_band(3.5, 5.0);
+        v.select_band(3.5, 5.0, false);
         assert_eq!(v.picked_count(), 0, "below the rows");
         assert_eq!(selection_names(&v), ["a.txt"], "like a click below the rows");
         v.select_all();
-        v.select_band(-2.0, -0.5);
+        v.select_band(-2.0, -0.5, false);
         assert_eq!(v.picked_count(), 0, "above the rows");
         let mut empty = View::default();
-        empty.select_band(0.0, 2.0);
+        empty.select_band(0.0, 2.0, false);
         assert_eq!(empty.selected, None);
     }
 
@@ -5638,11 +5780,11 @@ mod tests {
     #[test]
     fn a_band_over_cards_picks_those_cards_and_over_none_drops_the_picks() {
         let mut v = loaded_view(); // src, a.txt, b.txt
-        v.select_cells(&[0, 2, 9], Some(2));
+        v.select_cells(&[0, 2, 9], Some(2), false);
         assert_eq!(v.picked_count(), 2, "a cell past the rows is ignored");
         assert!(v.is_picked(0) && v.is_picked(2) && !v.is_picked(1));
         assert_eq!(v.selected, Some(2));
-        v.select_cells(&[], None);
+        v.select_cells(&[], None, false);
         assert_eq!(v.picked_count(), 0, "a band over no card drops the picks");
         assert_eq!(v.selected, Some(2), "the cursor stays");
     }
@@ -5890,7 +6032,7 @@ mod tests {
         v.select_all();
         assert_eq!(v.picked_count(), 1, "Ctrl+A on src's notes.txt picks what src holds, not the rest");
         assert!(v.is_picked(3));
-        v.select_band(1.2, 3.5);
+        v.select_band(1.2, 3.5, false);
         assert_eq!(v.picked_count(), 3, "a band picks the children it touches");
         assert!(v.is_picked(1) && v.is_picked(3) && !v.is_picked(4));
     }

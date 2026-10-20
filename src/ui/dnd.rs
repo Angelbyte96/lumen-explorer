@@ -203,7 +203,7 @@ pub fn set_trash(ctx: &egui::Context, trash: Option<&Path>) {
 }
 
 fn in_trash(ctx: &egui::Context, folder: &Path) -> bool {
-    ctx.data(|d| d.get_temp::<Arc<PathBuf>>(trash_id())).is_some_and(|trash| crate::places::in_trash(folder, &trash))
+    crate::places::in_recycle_bin(folder) || ctx.data(|d| d.get_temp::<Arc<PathBuf>>(trash_id())).is_some_and(|trash| crate::places::in_trash(folder, &trash))
 }
 
 /// Whether a carried drag is over a row, card or cell, and whether that one

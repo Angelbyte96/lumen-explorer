@@ -25,10 +25,11 @@ pub enum ListEvent {
     Unfold(usize),
     /// A band dragged from a row's empty part or below the rows, in row units
     /// (row `i` spans `[i, i + 1)`): sent on every frame the pointer drags it.
-    Band { start: f32, end: f32 },
+    /// `add`: Shift was held at the press, the rows join the selection.
+    Band { start: f32, end: f32, add: bool },
     /// A band dragged from the space around the cards (List, Icons): the cells
     /// it touches and the one under the pointer; sent on every frame it moves.
-    Cells { cells: Vec<usize>, cursor: Option<usize> },
+    Cells { cells: Vec<usize>, cursor: Option<usize>, add: bool },
     /// A click below the rows; `menu` for a right click.
     Empty { menu: bool },
     Activate(usize),
@@ -355,6 +356,8 @@ pub fn show(
 struct BandStart {
     at: f32,
     x: f32,
+    /// Shift was held at the press: the band adds to the selection.
+    add: bool,
 }
 
 fn band_id() -> egui::Id {
@@ -398,10 +401,12 @@ fn band_scroll(body: &mut egui::Ui) {
 /// `may_start`, drawn and reported while the pointer drags it, forgotten once
 /// the button is up. `unit` turns a height on screen into row units, `y` back.
 fn band(ui: &egui::Ui, pressed: bool, may_start: bool, unit: impl Fn(f32) -> f32, y: impl Fn(f32) -> f32) -> Option<ListEvent> {
-    let (origin, down, dragging, pointer) =
-        ui.input(|i| (i.pointer.press_origin(), i.pointer.primary_down(), i.pointer.is_decidedly_dragging(), i.pointer.latest_pos()));
+    let (origin, down, dragging, pointer, shift) = ui.input(|i| {
+        let p = &i.pointer;
+        (p.press_origin(), p.primary_down(), p.is_decidedly_dragging(), p.latest_pos(), i.modifiers.shift)
+    });
     if pressed {
-        let start = origin.filter(|_| may_start).map(|p| BandStart { at: unit(p.y), x: p.x });
+        let start = origin.filter(|_| may_start).map(|p| BandStart { at: unit(p.y), x: p.x, add: shift });
         ui.ctx().data_mut(|d| {
             if let Some(start) = start {
                 d.insert_temp(band_id(), start);
@@ -419,7 +424,7 @@ fn band(ui: &egui::Ui, pressed: bool, may_start: bool, unit: impl Fn(f32) -> f32
     let rect = egui::Rect::from_two_pos(egui::pos2(start.x, y(start.at)), pointer);
     let selection = ui.visuals().selection;
     ui.painter().rect(rect, 0.0, selection.bg_fill.gamma_multiply(0.3), selection.stroke, egui::StrokeKind::Inside);
-    Some(ListEvent::Band { start: start.at, end: unit(pointer.y) })
+    Some(ListEvent::Band { start: start.at, end: unit(pointer.y), add: start.add })
 }
 
 /// The width that shows every cell of `column` and its header whole, for
@@ -913,8 +918,18 @@ mod tests {
     /// event on each frame from the press to the release, and what was
     /// painted while the pointer was at `to`.
     fn drag(ctx: &egui::Context, view: &View, from: egui::Pos2, to: egui::Pos2) -> (Vec<Option<ListEvent>>, Vec<egui::epaint::ClippedShape>) {
+        drag_holding(ctx, view, from, to, egui::Modifiers::NONE)
+    }
+
+    fn drag_holding(
+        ctx: &egui::Context,
+        view: &View,
+        from: egui::Pos2,
+        to: egui::Pos2,
+        modifiers: egui::Modifiers,
+    ) -> (Vec<Option<ListEvent>>, Vec<egui::epaint::ClippedShape>) {
         let steps = vec![
-            vec![egui::Event::PointerMoved(from), button(from, true)],
+            vec![egui::Event::ModifiersChanged(modifiers), egui::Event::PointerMoved(from), button(from, true)],
             vec![egui::Event::PointerMoved(from + egui::vec2(0.0, 10.0 * (to.y - from.y).signum()))],
             vec![egui::Event::PointerMoved(to)],
             vec![button(to, false)],
@@ -942,7 +957,7 @@ mod tests {
     /// The band's start and end rows, when `event` is a band.
     fn band_rows(event: &Option<ListEvent>) -> Option<(f32, f32)> {
         match event {
-            Some(ListEvent::Band { start, end }) => Some((start.floor(), end.floor())),
+            Some(ListEvent::Band { start, end, .. }) => Some((start.floor(), end.floor())),
             _ => None,
         }
     }
@@ -967,6 +982,18 @@ mod tests {
         // Dragged back upwards: the start stays on the first row.
         let (events, _) = drag(&ctx, &view, to, from);
         assert_eq!(band_rows(&events[2]), Some((2.0, 0.0)));
+    }
+
+    #[test]
+    fn a_band_started_with_shift_held_adds_to_the_selection() {
+        let ctx = egui::Context::default();
+        let mut view = listed(&["a.txt", "b.txt", "c.txt"]);
+        let (first, third) = (row_rect(&ctx, &mut view, 0), row_rect(&ctx, &mut view, 2));
+        let (from, to) = (egui::pos2(500.0, first.center().y), egui::pos2(520.0, third.center().y));
+        let (events, _) = drag_holding(&ctx, &view, from, to, egui::Modifiers::SHIFT);
+        assert!(matches!(events[2], Some(ListEvent::Band { add: true, .. })), "Shift held at the press");
+        let (events, _) = drag(&ctx, &view, from, to);
+        assert!(matches!(events[2], Some(ListEvent::Band { add: false, .. })), "without Shift it replaces");
     }
 
     #[test]
