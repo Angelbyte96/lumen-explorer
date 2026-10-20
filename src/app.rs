@@ -1758,9 +1758,15 @@ impl LumenApp {
                 self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, column);
             }
             Command::FitAllColumns => {
-                for column in 0..self.columns.len() {
-                    self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, column);
+                let mut content = self.columns;
+                for (column, width) in content.iter_mut().enumerate() {
+                    *width = ui::file_list::fit_width(ctx, &self.tab.view, column);
                 }
+                // Inside the list's width when it is known: no sideways scroll.
+                self.columns = match ui::file_list::visible_width(ctx, &self.shown_columns) {
+                    Some(room) => ui::file_list::fit_all(&content, &self.shown_columns, room),
+                    None => content,
+                };
             }
             Command::RestoreColumns => {
                 self.columns = ui::file_list::DEFAULT_WIDTHS;
@@ -4406,6 +4412,37 @@ mod tests {
         assert_eq!(app.columns.to_vec(), all, "the menu's Size All Columns To Fit too");
         app.save_settings(false);
         assert_eq!(Config::load(&path).unwrap().columns, app.columns);
+    }
+
+    #[test]
+    fn fit_all_columns_with_a_long_name_stays_inside_the_lists_width() {
+        let (ctx, _, dir) = app_in("app-fit-all-inside");
+        let long = format!("{}.txt", "a very long name ".repeat(12));
+        std::fs::write(dir.join(&long), "x").unwrap();
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(dir.join("cfg/lumen/config"))));
+        let entries = fs::lister::read_entries(&dir).unwrap();
+        app.tab.view.apply_listing(Listing { id: 0, path: dir.clone(), result: Ok(entries), elapsed: Duration::ZERO }, None);
+        ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        let fit = |app: &LumenApp, column| ui::file_list::fit_width(&ctx, &app.tab.view, column);
+        assert!(fit(&app, 0) > 1000.0, "the long name needs {}", fit(&app, 0));
+        ui::file_list::remember_width(&ctx, 1000.0);
+        let room = ui::file_list::visible_width(&ctx, &app.shown_columns).unwrap();
+        app.run_command(&ctx, Command::FitAllColumns);
+        let total: f32 = app.columns.iter().sum();
+        assert!((total - room).abs() < 0.5, "the shown columns share the room: {total} in {room}");
+        assert_eq!((app.columns[1], app.columns[2]), (fit(&app, 1), fit(&app, 2)), "Type and Date Modified whole");
+        assert!(app.columns[0] < fit(&app, 0) && app.columns[0] >= ui::file_list::NAME_MIN);
+        // A hidden column takes no room.
+        app.run_command(&ctx, Command::RestoreColumns);
+        app.run_command(&ctx, Command::ToggleColumn(3));
+        let room = ui::file_list::visible_width(&ctx, &app.shown_columns).unwrap();
+        app.run_command(&ctx, Command::FitAllColumns);
+        let shown: f32 = app.columns.iter().enumerate().filter(|&(c, _)| c != 3).map(|(_, w)| w).sum();
+        assert!((shown - room).abs() < 0.5, "{shown} in {room}");
+        assert_eq!(app.columns[3], fit(&app, 3));
+        // A single column still fits its own content, whatever the room.
+        app.run_command(&ctx, Command::FitColumn(0));
+        assert_eq!(app.columns[0], fit(&app, 0));
     }
 
     #[test]
