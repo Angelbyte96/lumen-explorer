@@ -267,6 +267,112 @@ pub fn in_recycle_bin(path: &Path) -> bool {
     )
 }
 
+/// What a tab shows for "This PC" (Windows): the drives. Not a path on disk,
+/// only a marker the tab holds as its location, so nothing may treat it as a
+/// folder (a relative path would resolve against the working directory).
+pub const THIS_PC: &str = "This PC";
+
+pub fn this_pc() -> PathBuf {
+    PathBuf::from(THIS_PC)
+}
+
+/// Whether `path` is the This PC marker.
+pub fn is_this_pc(path: &Path) -> bool {
+    path == Path::new(THIS_PC)
+}
+
+/// Whether typed text names This PC (on Windows, where it exists).
+pub fn names_this_pc(text: &str) -> bool {
+    cfg!(windows) && text.trim().eq_ignore_ascii_case(THIS_PC)
+}
+
+/// `places` with This PC first when `windows`: the only system that has it.
+pub fn with_this_pc(mut places: Vec<Place>, windows: bool) -> Vec<Place> {
+    if windows {
+        places.insert(0, Place { label: THIS_PC.into(), path: this_pc(), trash: false, icon: "computer" });
+    }
+    places
+}
+
+/// What a drive is, as File Explorer names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriveKind {
+    Local,
+    Removable,
+    Network,
+    Cd,
+    Other,
+}
+
+impl DriveKind {
+    /// From `GetDriveTypeW`'s answer.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn from_win(raw: u32) -> Self {
+        match raw {
+            3 => Self::Local,
+            2 => Self::Removable,
+            4 => Self::Network,
+            5 => Self::Cd,
+            _ => Self::Other,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Local => "Local Disk",
+            Self::Removable => "Removable Disk",
+            Self::Network => "Network Drive",
+            Self::Cd => "CD Drive",
+            Self::Other => "Drive",
+        }
+    }
+}
+
+/// A drive's kind and file system ("NTFS", "FAT32"; empty when unknown).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriveInfo {
+    pub kind: DriveKind,
+    pub fs: String,
+}
+
+/// The kind and file system of the drive at `root` ("C:\"). Quick for the
+/// local and removable drives the side panel lists, which are the ones asked.
+#[cfg(windows)]
+pub fn drive_info(root: &Path) -> DriveInfo {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumeInformationW};
+    use windows_sys::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode};
+    let wide = wide(&root.to_string_lossy());
+    let mut fs = [0u16; 64];
+    let mut previous = 0;
+    // SAFETY: `previous` is a valid out-parameter; restored below.
+    unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, &mut previous) };
+    // SAFETY: `wide` is a NUL-terminated UTF-16 string that outlives the call.
+    let kind = DriveKind::from_win(unsafe { GetDriveTypeW(wide.as_ptr()) });
+    // SAFETY: `fs` is a writable buffer of the length passed; the other
+    // out-parameters are optional and null.
+    let ok = unsafe {
+        GetVolumeInformationW(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            fs.as_mut_ptr(),
+            fs.len() as u32,
+        )
+    };
+    // SAFETY: restores the mode read above; the old value is not needed.
+    unsafe { SetThreadErrorMode(previous, std::ptr::null_mut()) };
+    let len = fs.iter().position(|&c| c == 0).unwrap_or(fs.len());
+    DriveInfo { kind, fs: if ok == 0 { String::new() } else { String::from_utf16_lossy(&fs[..len]) } }
+}
+
+#[cfg(not(windows))]
+pub fn drive_info(_root: &Path) -> DriveInfo {
+    DriveInfo { kind: DriveKind::Local, fs: String::new() }
+}
+
 /// A mounted disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mount {
@@ -725,5 +831,64 @@ tmpfs /run tmpfs rw 0 0
         let usage = usage(Path::new("/")).expect("statvfs on /");
         assert!(usage.total > 0 && usage.free <= usage.total, "{usage:?}");
         assert_eq!(super::usage(Path::new("/no/such/folder")), None);
+    }
+}
+
+#[cfg(test)]
+mod this_pc_tests {
+    use super::*;
+
+    fn place(label: &str) -> Place {
+        Place { label: label.into(), path: PathBuf::from(format!("/home/u/{label}")), trash: false, icon: "folder" }
+    }
+
+    #[test]
+    fn on_windows_this_pc_is_the_first_place_with_the_computer_icon() {
+        let listed = with_this_pc(vec![place("u"), place("Downloads")], true);
+        let labels: Vec<&str> = listed.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["This PC", "u", "Downloads"]);
+        assert_eq!((listed[0].icon, listed[0].trash), ("computer", false));
+        assert!(is_this_pc(&listed[0].path));
+    }
+
+    #[test]
+    fn elsewhere_the_places_are_left_as_they_are() {
+        let listed = with_this_pc(vec![place("u")], false);
+        assert_eq!(listed, [place("u")]);
+    }
+
+    #[test]
+    fn only_the_marker_is_this_pc() {
+        assert!(is_this_pc(&this_pc()));
+        assert!(!is_this_pc(Path::new("/this pc")));
+        assert!(!is_this_pc(Path::new("C:\\")));
+        assert!(!is_this_pc(Path::new("")));
+    }
+
+    #[test]
+    fn typed_text_names_this_pc_on_windows_only_whatever_its_case() {
+        for text in ["This PC", "this pc", "  THIS PC "] {
+            assert_eq!(names_this_pc(text), cfg!(windows), "{text:?}");
+        }
+        for text in ["This", "This PC\\", "C:\\"] {
+            assert!(!names_this_pc(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn drive_types_are_named_as_file_explorer_does() {
+        let named: Vec<&str> = [3, 2, 4, 5].into_iter().map(|raw| DriveKind::from_win(raw).name()).collect();
+        assert_eq!(named, ["Local Disk", "Removable Disk", "Network Drive", "CD Drive"]);
+        assert_eq!(DriveKind::from_win(0), DriveKind::Other, "unknown");
+        assert_eq!(DriveKind::from_win(6), DriveKind::Other, "a RAM disk");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_system_drive_is_a_local_disk_with_a_file_system() {
+        let root = std::env::var("SystemDrive").map_or_else(|_| PathBuf::from("C:\\"), |d| PathBuf::from(format!("{d}\\")));
+        let info = drive_info(&root);
+        assert_eq!(info.kind, DriveKind::Local);
+        assert!(!info.fs.is_empty(), "{info:?}");
     }
 }

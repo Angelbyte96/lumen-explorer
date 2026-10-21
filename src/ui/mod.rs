@@ -1,6 +1,7 @@
 pub mod confirm;
 pub mod context_menu;
 pub mod dnd;
+pub mod drives_view;
 pub mod file_icons;
 pub mod file_list;
 pub mod grid;
@@ -172,6 +173,7 @@ mod tests {
             super::toolbar::SEPARATOR,
             super::sidebar::TOGGLE,
             super::sidebar::DISK,
+            super::sidebar::COMPUTER,
             super::sidebar::TRASH,
             super::tabs::NEW,
             super::tabs::CLOSE,
@@ -207,6 +209,7 @@ mod tests {
             ("menu.rs", include_str!("../menu.rs")),
             ("ui/context_menu.rs", include_str!("context_menu.rs")),
             ("ui/confirm.rs", include_str!("confirm.rs")),
+            ("ui/drives_view.rs", include_str!("drives_view.rs")),
             ("ui/theme.rs", include_str!("theme.rs")),
             ("ui/file_list.rs", include_str!("file_list.rs")),
             ("ui/path_popup.rs", include_str!("path_popup.rs")),

@@ -460,8 +460,7 @@ impl PathPopup {
                         }
                         ui.separator();
                         if button(ui, "up", toolbar::UP, "Parent folder").clicked() {
-                            let parent = folder.parent().unwrap_or(&folder).to_path_buf();
-                            self.set_text(initial_text(&parent), Cursor::End);
+                            self.set_text(initial_text(&parent_of(&folder)), Cursor::End);
                         }
                         if button(ui, "forward", toolbar::FORWARD, "Forward").clicked() {
                             event = Some(PopupEvent::Forward);
@@ -587,8 +586,19 @@ pub fn button_id(name: &str) -> egui::Id {
 /// The text the box starts with: the folder and a trailing separator, so its
 /// contents are listed at once.
 pub fn initial_text(current: &Path) -> String {
+    if crate::places::is_this_pc(current) {
+        return crate::places::THIS_PC.into();
+    }
     let text = current.display().to_string();
     if text.ends_with(std::path::MAIN_SEPARATOR) { text } else { text + std::path::MAIN_SEPARATOR_STR }
+}
+
+/// The folder above `folder`; the folder itself at the top, and for This PC.
+fn parent_of(folder: &Path) -> PathBuf {
+    if crate::places::is_this_pc(folder) {
+        return folder.to_path_buf();
+    }
+    folder.parent().unwrap_or(folder).to_path_buf()
 }
 
 /// Whether the text is a word with no path, searched in every folder.
@@ -596,7 +606,7 @@ fn is_bare_word(text: &str) -> bool {
     let text = text.trim();
     // "C:" names a drive on Windows; "." and ".." go to a folder, as before.
     let drive = cfg!(windows) && matches!(text.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic());
-    !text.is_empty() && !text.contains(['/', '\\']) && !text.starts_with('~') && !drive && !matches!(text, "." | "..")
+    !text.is_empty() && !text.contains(['/', '\\']) && !text.starts_with('~') && !drive && !matches!(text, "." | "..") && !crate::places::names_this_pc(text)
 }
 
 /// Splits the text after its last separator: the folder part (kept with its
@@ -976,6 +986,17 @@ mod tests {
         assert!(!is_bare_word("~/Do"));
         assert!(!is_bare_word(".."), "up one folder, as before");
         assert_eq!(is_bare_word("C:"), cfg!(not(windows)), "a bare drive is a path on Windows");
+    }
+
+    #[test]
+    fn the_box_names_this_pc_without_a_separator_and_does_not_search_for_it() {
+        let pc = crate::places::this_pc();
+        assert_eq!(initial_text(&pc), "This PC");
+        assert_eq!(is_bare_word("This PC"), cfg!(not(windows)), "on Windows it is the place, not a word to search");
+        assert!(is_bare_word("This"));
+        assert_eq!(parent_of(&pc), pc, "up from it stays on it");
+        assert_eq!(parent_of(Path::new("/home/u")), Path::new("/home"));
+        assert_eq!(parent_of(Path::new("/")), Path::new("/"));
     }
 
     #[test]
