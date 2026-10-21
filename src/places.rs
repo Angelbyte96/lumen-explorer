@@ -256,6 +256,17 @@ pub fn in_trash(path: &Path, trash: &Path) -> bool {
     path.starts_with(trash)
 }
 
+/// Windows: whether `path` is a drive's `$Recycle.Bin` or inside it.
+pub fn in_recycle_bin(path: &Path) -> bool {
+    use std::path::Component;
+    let mut parts = path.components();
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(Component::Prefix(_)), Some(Component::RootDir), Some(Component::Normal(name)))
+            if name.eq_ignore_ascii_case("$Recycle.Bin")
+    )
+}
+
 /// A mounted disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mount {
@@ -626,6 +637,17 @@ XDG_VIDEOS_DIR="$HOME/Vídeos"
         assert_eq!(trash_dir(home, Some(Path::new("/data"))), PathBuf::from("/data/Trash/files"));
         assert!(in_trash(Path::new("/home/u/.local/share/Trash/files/x.txt"), &trash_dir(home, None)));
         assert!(!in_trash(Path::new("/home/u/Descargas"), &trash_dir(home, None)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_recycle_bin_of_every_drive_counts_as_the_trash() {
+        for path in [r"C:\$Recycle.Bin", r"C:\$Recycle.Bin\S-1-5-21\$R1.png", r"d:\$RECYCLE.BIN"] {
+            assert!(in_recycle_bin(Path::new(path)), "{path}");
+        }
+        for path in [r"C:\", r"C:\Users\$Recycle.Bin", r"C:\Recycle.Bin", r"C:\Users\u\Downloads"] {
+            assert!(!in_recycle_bin(Path::new(path)), "{path}");
+        }
     }
 
     #[test]
