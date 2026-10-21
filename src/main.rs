@@ -24,6 +24,8 @@ mod ui;
 mod portal;
 #[cfg(target_os = "linux")]
 mod wayland_dnd;
+#[cfg(windows)]
+mod windows_drag;
 
 use eframe::egui;
 
