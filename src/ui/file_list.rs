@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use eframe::egui::{self, text::CCursorRange};
 use egui_extras::{Column, TableBuilder};
 
-use crate::app::{Scroll, Sort, SortColumn, View};
+use crate::app::{Scroll, SortColumn, View};
 use crate::format::{format_size, format_time};
 use crate::fs::Entry;
 use crate::fs::count::Totals;
@@ -140,12 +140,7 @@ pub fn show(
     // Set again below if the cursor row is drawn this frame.
     ui.ctx().data_mut(|d| d.remove::<egui::Rect>(cursor_row_id()));
 
-    // While a border is dragged, the widths the pointer gives now; the saved ones otherwise.
-    let pointer = ui.input(|i| i.pointer.latest_pos());
-    let widths = match (ui.ctx().data(|d| d.get_temp::<Drag>(drag_id())), pointer) {
-        (Some(drag), Some(pointer)) => drag.at(pointer.x),
-        _ => sizes.widths,
-    };
+    let widths = live_widths(ui, &sizes.widths);
     let mut cells = [egui::Rect::NOTHING; COLUMNS.len()];
     // From the rows: one drawn row's index and top, to turn a height on
     // screen into row units; and whether the button went down here on a
@@ -157,6 +152,7 @@ pub fn show(
     let mut over_folder = false;
     let pressed = ui.input(|i| i.pointer.primary_pressed());
     let whole = ui.available_rect_before_wrap();
+    remember_width(ui.ctx(), whole.width());
     focus_stop(ui, whole);
 
     egui::ScrollArea::horizontal().id_salt("lumen_list_columns").auto_shrink(false).show(ui, |ui| {
@@ -192,15 +188,11 @@ pub fn show(
                     let (label, column) = COLUMNS[i];
                     header.col(|ui| {
                         cells[i] = ui.max_rect();
-                        // The whole header, not only its label: a click sorts, a right click opens its menu.
-                        let cell = ui.interact(ui.max_rect(), egui::Id::new(("lumen_header", i)), egui::Sense::CLICK);
-                        let label = sort_header(ui, label, column, sort);
-                        if label.clicked() || cell.clicked() {
-                            event = Some(ListEvent::Sort(column));
-                        } else if label.secondary_clicked() || cell.secondary_clicked() {
-                            event = Some(ListEvent::HeaderMenu(i));
-                        } else if (label.middle_clicked() || cell.middle_clicked()) && i != 0 {
-                            event = Some(ListEvent::CloseColumn(i));
+                        match header_cell(ui, i, label, (sort.column == column).then_some(sort.descending)) {
+                            Some(HeaderClick::Sort) => event = Some(ListEvent::Sort(column)),
+                            Some(HeaderClick::Menu) => event = Some(ListEvent::HeaderMenu(i)),
+                            Some(HeaderClick::Close) if i != 0 => event = Some(ListEvent::CloseColumn(i)),
+                            _ => {}
                         }
                     });
                 }
@@ -316,7 +308,7 @@ pub fn show(
                 });
             });
         if let Some(resized) = column_borders(ui, &cells, &widths) {
-            event = Some(resized);
+            event = Some(ListEvent::Resized(resized));
         }
         // Everything under the header that is not a folder row (a file row, the
         // gaps between rows, the space below them) drops into the folder on screen.
@@ -432,9 +424,8 @@ fn band(ui: &egui::Ui, pressed: bool, may_start: bool, unit: impl Fn(f32) -> f32
 pub fn fit_width(ctx: &egui::Context, view: &View, column: usize) -> f32 {
     let style = ctx.global_style();
     let font = egui::TextStyle::Body.resolve(&style);
-    let measure = |text: String| ctx.fonts_mut(|f| f.layout_no_wrap(text, font.clone(), egui::Color32::WHITE).size().x);
-    // The header with room for the sort arrow, which may show up later.
-    let header = measure(format!("{} {SORT_DESCENDING}", COLUMNS[column].0)) + 2.0 * style.spacing.button_padding.x;
+    let measure = body_measure(ctx);
+    let header = header_width(ctx, COLUMNS[column].0);
     let icon = icon_side(ctx.fonts_mut(|f| f.row_height(&font))) + style.spacing.item_spacing.x;
     let widest = view
         .rows
@@ -452,12 +443,94 @@ pub fn fit_width(ctx: &egui::Context, view: &View, column: usize) -> f32 {
             }
         })
         .fold(header, f32::max);
-    // Whole points: the config keeps them so.
+    fitted(widest)
+}
+
+/// How wide `text` is in the body font.
+pub fn body_measure(ctx: &egui::Context) -> impl Fn(String) -> f32 + '_ {
+    let font = egui::TextStyle::Body.resolve(&ctx.global_style());
+    move |text| ctx.fonts_mut(|f| f.layout_no_wrap(text, font.clone(), egui::Color32::WHITE).size().x)
+}
+
+/// The width a header `label` needs, with room for the sort arrow, which may show up later.
+pub fn header_width(ctx: &egui::Context, label: &str) -> f32 {
+    body_measure(ctx)(format!("{label} {SORT_DESCENDING}")) + 2.0 * ctx.global_style().spacing.button_padding.x
+}
+
+/// The column width for a `widest` cell: some air, whole points (the config keeps them so).
+pub fn fitted(widest: f32) -> f32 {
     (widest + FIT_MARGIN).max(MIN_WIDTH).ceil()
 }
 
 /// Air left after the widest cell of a column sized to fit.
 const FIT_MARGIN: f32 = 6.0;
+
+/// Fit All Columns never takes Name below this (unless it is narrower to begin with).
+pub const NAME_MIN: f32 = 120.0;
+
+/// The width Folders, Files and Size shrink toward when the columns do not fit:
+/// about "Fol…" and some padding.
+pub const SMALL_MIN: f32 = 44.0;
+
+/// How wide the list was drawn, for Fit All Columns.
+fn list_width_id() -> egui::Id {
+    egui::Id::new("lumen_list_width")
+}
+
+/// Remembers the width the list has to draw its columns in.
+pub fn remember_width(ctx: &egui::Context, width: f32) {
+    ctx.data_mut(|d| d.insert_temp(list_width_id(), width));
+}
+
+/// The width the shown columns can share without scrolling sideways: the list's
+/// last drawn width less the gaps between columns. `None` before the list was drawn.
+pub fn visible_width(ctx: &egui::Context, shown: &Shown) -> Option<f32> {
+    let width = ctx.data(|d| d.get_temp::<f32>(list_width_id()))?;
+    let gaps = shown.iter().enumerate().filter(|&(c, &on)| on || c == 0).count().saturating_sub(1);
+    Some((width - gaps as f32 * ctx.global_style().spacing.item_spacing.x).floor().max(0.0))
+}
+
+/// The widths Fit All Columns gives: `content` is each column's fit width, and the
+/// shown columns end up adding up to `available`. Hidden ones keep their `content`.
+///
+/// When every shown column fits, each gets its content and Name the room left.
+/// Otherwise Folders, Files and Size shrink first (toward `SMALL_MIN`, in
+/// proportion to what they can give), then Name (toward `NAME_MIN`), and only
+/// then Type and Date Modified, which keep priority. Nothing goes below `MIN_WIDTH`.
+pub fn fit_all(content: &Widths, shown: &Shown, available: f32) -> Widths {
+    // Name is always shown.
+    let on = |c: &usize| *c == 0 || shown[*c];
+    let mut widths = *content;
+    let mut over = (0..COLUMNS.len()).filter(on).map(|c| content[c]).sum::<f32>() - available;
+    if over > 0.0 {
+        let small: Vec<usize> = (3..COLUMNS.len()).filter(on).collect();
+        let priority: Vec<usize> = (1..3).filter(on).collect();
+        over = squeeze(&mut widths, &small, SMALL_MIN, over);
+        over = squeeze(&mut widths, &[0], NAME_MIN, over);
+        squeeze(&mut widths, &priority, MIN_WIDTH, over);
+    }
+    // Whole points: the config keeps them so. Name takes what the others leave.
+    let others: f32 = (1..COLUMNS.len()).filter(on).map(|c| widths[c].floor()).sum();
+    for c in (1..COLUMNS.len()).filter(on) {
+        widths[c] = widths[c].floor();
+    }
+    widths[0] = (available.floor() - others).max(MIN_WIDTH);
+    widths
+}
+
+/// Takes `over` points off `columns` of `widths`, each giving in proportion to
+/// how far it is above `floor`; returns what they could not give.
+fn squeeze(widths: &mut Widths, columns: &[usize], floor: f32, over: f32) -> f32 {
+    let gives = |w: f32| w - w.min(floor);
+    let can: f32 = columns.iter().map(|&c| gives(widths[c])).sum();
+    let take = over.min(can);
+    if take > 0.0 {
+        for &c in columns {
+            widths[c] -= gives(widths[c]) * take / can;
+        }
+    }
+    over - take
+}
 
 /// A column border being dragged: which column, where the pointer and the
 /// column's width were when it was grabbed, and the widths before it.
@@ -485,9 +558,19 @@ fn drag_id() -> egui::Id {
 /// How far either side of a border the pointer grabs it.
 const BORDER_GRAB: f32 = 4.0;
 
+/// The widths to draw: while a border is dragged, the ones the pointer gives
+/// now; `saved` otherwise.
+pub fn live_widths(ui: &egui::Ui, saved: &Widths) -> Widths {
+    let pointer = ui.input(|i| i.pointer.latest_pos());
+    match (ui.ctx().data(|d| d.get_temp::<Drag>(drag_id())), pointer) {
+        (Some(drag), Some(pointer)) => drag.at(pointer.x),
+        _ => *saved,
+    }
+}
+
 /// The draggable border on the right of each header `cells` holds, drawn
 /// over the header. Returns the new widths when a border is let go.
-fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths: &Widths) -> Option<ListEvent> {
+pub fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths: &Widths) -> Option<Widths> {
     let gap = ui.spacing().item_spacing.x;
     let mut event = None;
     for (column, cell) in cells.iter().enumerate().filter(|(_, cell)| cell.is_positive()) {
@@ -513,7 +596,7 @@ fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths
         {
             ui.ctx().data_mut(|d| d.remove::<Drag>(drag_id()));
             let x = pointer.or_else(|| ui.input(|i| i.pointer.latest_pos())).map_or(drag.start_x, |p| p.x);
-            event = Some(ListEvent::Resized(drag.at(x)));
+            event = Some(drag.at(x));
         }
     }
     event
@@ -682,12 +765,39 @@ pub(crate) fn rename_field(ui: &mut egui::Ui, edit: &mut RenameEdit) -> Option<b
         .then(|| ui.input(|i| i.key_pressed(egui::Key::Enter)))
 }
 
-/// A header label that sorts on click; the active column shows its direction.
-fn sort_header(ui: &mut egui::Ui, label: &str, column: SortColumn, sort: Sort) -> egui::Response {
-    let arrow = match (sort.column == column, sort.descending) {
-        (false, _) => "",
-        (true, false) => SORT_ASCENDING,
-        (true, true) => SORT_DESCENDING,
+/// A click on a column's header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderClick {
+    /// Left click: sort by the column.
+    Sort,
+    /// Right click: the column's menu.
+    Menu,
+    /// Middle click: close the column.
+    Close,
+}
+
+/// The header cell `ui` is, for column `i`: the whole cell takes the click, not
+/// only its label. `direction` is `Some(descending)` when the table is sorted by it.
+pub fn header_cell(ui: &mut egui::Ui, i: usize, label: &str, direction: Option<bool>) -> Option<HeaderClick> {
+    let cell = ui.interact(ui.max_rect(), egui::Id::new(("lumen_header", i)), egui::Sense::CLICK);
+    let label = sort_header(ui, label, direction);
+    if label.clicked() || cell.clicked() {
+        Some(HeaderClick::Sort)
+    } else if label.secondary_clicked() || cell.secondary_clicked() {
+        Some(HeaderClick::Menu)
+    } else if label.middle_clicked() || cell.middle_clicked() {
+        Some(HeaderClick::Close)
+    } else {
+        None
+    }
+}
+
+/// A header label that sorts on click; the sorted column shows its direction.
+fn sort_header(ui: &mut egui::Ui, label: &str, direction: Option<bool>) -> egui::Response {
+    let arrow = match direction {
+        None => "",
+        Some(false) => SORT_ASCENDING,
+        Some(true) => SORT_DESCENDING,
     };
     let text = egui::RichText::new(format!("{label} {arrow}")).strong();
     ui.add(egui::Button::new(text).frame(false).sense(egui::Sense::CLICK))
@@ -2214,5 +2324,143 @@ mod tests {
             assert_eq!(crate::ui::dnd::take_drop(&ctx).map(|d| (d.drag.paths, d.target)), Some((paths(&["a.txt"]), PathBuf::from("/x"))));
         }
         crate::ui::dnd::set_outside(&ctx, None);
+    }
+
+    /// The widths of the shown columns added up.
+    fn total(widths: &Widths, shown: &Shown) -> f32 {
+        widths.iter().zip(shown).filter(|&(_, &on)| on).map(|(w, _)| w).sum()
+    }
+
+    #[test]
+    fn fit_all_gives_each_column_its_content_and_name_the_room_left_when_all_fit() {
+        let content = [200.0, 100.0, 140.0, 50.0, 50.0, 60.0];
+        let fitted = fit_all(&content, &ALL_SHOWN, 900.0);
+        assert_eq!(fitted, [500.0, 100.0, 140.0, 50.0, 50.0, 60.0]);
+        assert_eq!(fit_all(&content, &ALL_SHOWN, 600.0), content, "exactly the room: nothing to share");
+    }
+
+    #[test]
+    fn fit_all_with_a_very_long_name_keeps_type_and_date_whole_and_squeezes_the_small_columns() {
+        let content = [1400.0, 110.0, 150.0, 60.0, 60.0, 70.0];
+        let fitted = fit_all(&content, &ALL_SHOWN, 1000.0);
+        assert!((total(&fitted, &ALL_SHOWN) - 1000.0).abs() < 0.5, "adds up to the room: {fitted:?}");
+        assert_eq!((fitted[1], fitted[2]), (110.0, 150.0), "Type and Date Modified whole: {fitted:?}");
+        for c in 3..6 {
+            assert!(fitted[c] >= SMALL_MIN && fitted[c] < content[c], "column {c} squeezed but readable: {fitted:?}");
+        }
+        assert!(fitted[0] > 600.0 && fitted[0] < 1400.0, "Name takes the rest: {fitted:?}");
+    }
+
+    #[test]
+    fn fit_all_takes_from_the_small_columns_in_proportion_and_keeps_name_whole_for_a_little_overflow() {
+        let content = [500.0, 110.0, 150.0, 60.0, 60.0, 70.0];
+        let fitted = fit_all(&content, &ALL_SHOWN, 900.0);
+        assert!((total(&fitted, &ALL_SHOWN) - 900.0).abs() < 0.5, "{fitted:?}");
+        assert!(fitted[0] >= 500.0, "Name is not cut while the small columns can give: {fitted:?}");
+        assert_eq!((fitted[1], fitted[2]), (110.0, 150.0));
+        assert!(fitted[3..].iter().all(|&w| w >= SMALL_MIN), "{fitted:?}");
+        assert!(fitted[5] > fitted[3], "the wider column stays wider: {fitted:?}");
+    }
+
+    #[test]
+    fn fit_all_in_a_very_narrow_list_takes_name_to_its_minimum_then_squeezes_type_and_date() {
+        let content = [800.0, 150.0, 160.0, 60.0, 60.0, 60.0];
+        let fitted = fit_all(&content, &ALL_SHOWN, 400.0);
+        assert!((total(&fitted, &ALL_SHOWN) - 400.0).abs() < 0.5, "adds up to the room: {fitted:?}");
+        assert!(fitted[0] >= NAME_MIN && fitted[0] < NAME_MIN + 3.0, "Name at its minimum: {fitted:?}");
+        assert!(fitted[1] < 150.0 && fitted[2] < 160.0, "Type and Date give too: {fitted:?}");
+        assert!(fitted.iter().all(|&w| w >= MIN_WIDTH), "{fitted:?}");
+    }
+
+    #[test]
+    fn fit_all_ignores_hidden_columns() {
+        let content = [1400.0, 110.0, 150.0, 900.0, 60.0, 900.0];
+        let shown = [true, true, true, false, true, false];
+        let fitted = fit_all(&content, &shown, 700.0);
+        assert!((total(&fitted, &shown) - 700.0).abs() < 0.5, "{fitted:?}");
+        assert_eq!((fitted[3], fitted[5]), (900.0, 900.0), "hidden ones keep their fit width");
+        assert_eq!((fitted[1], fitted[2]), (110.0, 150.0));
+        assert!(fitted[0] > 380.0, "{fitted:?}");
+        let roomy = fit_all(&content, &shown, 3000.0);
+        assert_eq!(roomy, [3000.0 - 110.0 - 150.0 - 60.0, 110.0, 150.0, 900.0, 60.0, 900.0]);
+    }
+
+    #[test]
+    fn the_visible_width_is_the_lists_less_the_gaps_between_shown_columns() {
+        let ctx = egui::Context::default();
+        assert_eq!(visible_width(&ctx, &ALL_SHOWN), None, "not drawn yet");
+        remember_width(&ctx, 1000.0);
+        let gap = ctx.global_style().spacing.item_spacing.x;
+        assert_eq!(visible_width(&ctx, &ALL_SHOWN), Some((1000.0 - 5.0 * gap).floor()));
+        let two = [true, false, false, false, true, false];
+        assert_eq!(visible_width(&ctx, &two), Some((1000.0 - gap).floor()));
+    }
+
+    #[test]
+    fn the_list_remembers_its_width_and_columns_fitted_to_it_leave_nothing_off_screen() {
+        let ctx = egui::Context::default();
+        let long = format!("{}.txt", "A folder with a name that goes on and on ".repeat(5));
+        let view = listed(&["a.txt", &long]);
+        draw_list(&ctx, &view, &DEFAULT_WIDTHS, vec![]);
+        let room = visible_width(&ctx, &ALL_SHOWN).expect("drawn");
+        assert!(room > 600.0 && room < crate::ui::testing::SCREEN.width(), "{room}");
+        let mut content = [0.0; COLUMNS.len()];
+        for (c, width) in content.iter_mut().enumerate() {
+            *width = fit_width(&ctx, &view, c);
+        }
+        assert!(content.iter().sum::<f32>() > room, "the columns together overflow: {content:?}");
+        let fitted = fit_all(&content, &ALL_SHOWN, room);
+        let mut lefts = Vec::new();
+        for _ in 0..3 {
+            lefts = draw_list(&ctx, &view, &fitted, vec![]).lefts;
+        }
+        assert!(lefts.iter().all(Option::is_some), "every header in view: {lefts:?}");
+        let (screen, last) = (crate::ui::testing::SCREEN.right(), lefts[5].unwrap());
+        assert!(last < screen, "Size starts inside the window: {last} < {screen}");
+        // No sideways scroll: the columns plus the gaps are no wider than the list.
+        let list = ctx.data(|d| d.get_temp::<f32>(list_width_id())).unwrap();
+        let gaps = 5.0 * ctx.global_style().spacing.item_spacing.x;
+        assert!(fitted.iter().sum::<f32>() + gaps <= list + 0.5, "{fitted:?} in {list}");
+    }
+
+    /// Files last: the last column stretches to the list's edge, so Size sits before it to be cut.
+    const SIZE_BEFORE_FILES: Order = [0, 1, 2, 3, 5, 4];
+
+    /// The characters painted for the first text starting like `start`, with the columns `widths` wide.
+    fn painted_like(view: &View, widths: Widths, order: Order, start: &str) -> String {
+        let ctx = egui::Context::default();
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() }, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    show(ui, view, &[], Sizes { widths, order, ..Sizes::default() }, None, None, &FileIcons::default());
+                });
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text().starts_with(start) => {
+                    Some(t.galley.rows.iter().flat_map(|r| r.glyphs.iter().map(|g| g.chr)).collect())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{start} painted"))
+    }
+
+    #[test]
+    fn headers_and_cells_that_do_not_fit_their_column_end_in_an_ellipsis() {
+        let mut view = listed(&["a.txt"]);
+        view.entries[0].modified = Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000));
+        view.entries[0].size = Some(1_234_567_890);
+        let narrow = [200.0, 110.0, 50.0, 44.0, 44.0, 30.0];
+        assert!(painted_like(&view, narrow, SIZE_BEFORE_FILES, "Folders").ends_with('…'), "header cut");
+        assert!(painted_like(&view, narrow, SIZE_BEFORE_FILES, "2023").ends_with('…'), "date cut");
+        assert!(painted_like(&view, narrow, SIZE_BEFORE_FILES, "1.1").ends_with('…'), "size cut");
+        let roomy = [200.0, 110.0, 150.0, 90.0, 90.0, 90.0];
+        assert_eq!(painted_like(&view, roomy, SIZE_BEFORE_FILES, "Folders").trim_end(), "Folders");
+        assert_eq!(painted_like(&view, roomy, SIZE_BEFORE_FILES, "2023").len(), "2023-11-14 22:13".len(), "date whole");
     }
 }

@@ -21,7 +21,7 @@ use crate::places::{self, Bookmarks, Mount, Place, Recents, Usage, Visits};
 use crate::fs::ops::Renamed;
 use crate::fs::preview::Previewer;
 use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
-use crate::ui::drives_view::{self, DriveRow, DrivesEvent};
+use crate::ui::drives_view::{self, DriveRow, DriveSort, DrivesEvent};
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::ui::tabs::TabEvent;
 use crate::ui::toolbar::{Nav, ToolbarEvent};
@@ -768,8 +768,14 @@ pub enum NavKind {
 /// How long a newly picked view takes to fade in, in seconds: short, so the
 /// switch still feels instant.
 const VIEW_FADE: f64 = 0.12;
-/// How often the side panel reads the mounted disks again.
+/// How often the side panel reads the mounted disks again (free space moves).
 const DISKS_INTERVAL: Duration = Duration::from_secs(5);
+/// How often the drive letters are looked at, which is cheap: a drive plugged
+/// in or ejected shows up within about this.
+const MASK_INTERVAL: Duration = Duration::from_millis(500);
+/// How often the app wakes up, even idle, to ask the `DiskClock`: only where
+/// the drive letters can be looked up.
+const DISKS_WATCH: Duration = if cfg!(windows) { MASK_INTERVAL } else { DISKS_INTERVAL };
 
 /// Wait between the first change on disk and the reload. Later changes in that
 /// window ride along, so a long copy reloads a few times a second, not per file.
@@ -825,6 +831,33 @@ impl RefreshTimer {
     /// How long until the scheduled reload, to wake the UI then.
     pub fn wait(&self, now: Instant) -> Option<Duration> {
         self.due.map(|at| at.saturating_duration_since(now))
+    }
+}
+
+/// Decides when the side panel's disks are read again. Where the drive
+/// letters can be looked up (Windows) they are checked every `MASK_INTERVAL`
+/// and a change reads the disks at once; the free space is read every
+/// `DISKS_INTERVAL` all the same.
+#[derive(Default)]
+struct DiskClock {
+    mask: Option<u32>,
+    checked: Option<Instant>,
+}
+
+impl DiskClock {
+    /// Whether to read the disks now: `read` is when they last were, `mask`
+    /// looks up the drive letters (called at most once per `MASK_INTERVAL`).
+    fn due(&mut self, read: Option<Instant>, now: Instant, mask: impl FnOnce() -> Option<u32>) -> bool {
+        let mut changed = false;
+        if self.checked.is_none_or(|at| now.saturating_duration_since(at) >= MASK_INTERVAL) {
+            self.checked = Some(now);
+            if let Some(new) = mask() {
+                // The first mask seen is only remembered.
+                changed = self.mask.is_some_and(|old| places::drives_changed(old, new));
+                self.mask = Some(new);
+            }
+        }
+        changed || read.is_none_or(|at| now.saturating_duration_since(at) >= DISKS_INTERVAL)
     }
 }
 
@@ -1163,8 +1196,14 @@ pub struct LumenApp {
     trash: Option<PathBuf>,
     /// Mounted disks with their usage, and when they were read.
     disks: (Option<Instant>, Vec<(Mount, Option<Usage>)>),
+    /// When they are read again.
+    disk_clock: DiskClock,
     /// The This PC view's rows: `disks` with each drive's type and file system.
     drives: Vec<DriveRow>,
+    /// How the This PC view's headers sorted the drives, if one was clicked.
+    drive_sort: Option<DriveSort>,
+    /// The This PC view's column widths (not saved).
+    drive_columns: drives_view::Widths,
     sidebar_open: bool,
     /// The view and order of a folder with no saved rule.
     default_look: Look,
@@ -1258,7 +1297,10 @@ impl LumenApp {
             places: Vec::new(),
             trash: None,
             disks: (None, Vec::new()),
+            disk_clock: DiskClock::default(),
             drives: Vec::new(),
+            drive_sort: None,
+            drive_columns: drives_view::DEFAULT_WIDTHS,
             sidebar_open: true,
             default_look: Look::default(),
             folder_views: FolderViews::default(),
@@ -1409,10 +1451,11 @@ impl LumenApp {
         }
     }
 
-    /// Disks for the side panel, read again every few seconds so a plugged-in
-    /// USB stick shows up. Reading them is quick: local devices only.
+    /// Disks for the side panel, read again when a drive comes or goes (on
+    /// Windows) and every few seconds for the free space. Reading them is
+    /// quick: local devices only.
     fn refresh_disks(&mut self) {
-        if self.disks.0.is_some_and(|at| at.elapsed() < DISKS_INTERVAL) {
+        if !self.disk_clock.due(self.disks.0, Instant::now(), places::drive_mask) {
             return;
         }
         self.disks = (
@@ -1433,9 +1476,10 @@ impl LumenApp {
         places::is_this_pc(&self.tab.view.current)
     }
 
-    /// The This PC rows again, from the disks last read.
+    /// The This PC rows again, from the disks last read, sorted as the headers say.
     fn rebuild_drives(&mut self) {
         self.drives = drives_view::rows(&self.disks.1, places::drive_info);
+        drives_view::sort(&mut self.drives, self.drive_sort);
     }
 
     /// The drive picked in the This PC view, if it is still listed.
@@ -1451,15 +1495,31 @@ impl LumenApp {
         self.tab.drive = Some(self.drives[to(at, last).min(last)].path.clone());
     }
 
-    /// The This PC view's click, double click or right click on a drive.
+    /// The This PC view's click, double click or right click on a drive or a header.
     fn handle_drives(&mut self, ctx: &egui::Context, event: DrivesEvent) {
-        let (DrivesEvent::Select(i) | DrivesEvent::Open(i) | DrivesEvent::Menu(i)) = event;
+        let (DrivesEvent::Select(i) | DrivesEvent::Open(i) | DrivesEvent::Menu(i)) = event else {
+            match event {
+                DrivesEvent::Sort(column) => {
+                    self.drive_sort = Some(DriveSort::clicked(self.drive_sort, column));
+                    drives_view::sort(&mut self.drives, self.drive_sort);
+                }
+                DrivesEvent::HeaderMenu(column) => {
+                    // Where the right click was; mid-window if the pointer is gone.
+                    let pos = ctx.input(|i| i.pointer.interact_pos()).unwrap_or_else(|| ctx.content_rect().center());
+                    self.context_menu = Some(ContextMenu::new(crate::menu::drives_column_menu(column), pos));
+                    self.context_on_entry = false;
+                }
+                DrivesEvent::Resized(widths) => self.drive_columns = widths,
+                DrivesEvent::Select(_) | DrivesEvent::Open(_) | DrivesEvent::Menu(_) => {}
+            }
+            return;
+        };
         let Some(path) = self.drives.get(i).map(|drive| drive.path.clone()) else { return };
         self.tab.drive = Some(path.clone());
         match event {
-            DrivesEvent::Select(_) => {}
             DrivesEvent::Open(_) => self.navigate(ctx, path, None),
             DrivesEvent::Menu(_) => self.handle_sidebar(ctx, SidebarEvent::Menu(path)),
+            _ => {}
         }
     }
 
@@ -1754,13 +1814,31 @@ impl LumenApp {
                 let keep = self.tab.view.selected_entry().map(|e| e.path.clone());
                 self.reload(ctx, keep);
             }
+            // This PC has columns of its own, fitted by the list's rule.
+            Command::FitColumn(column) if self.on_this_pc() => {
+                self.drive_columns[column] = drives_view::fit_width(ctx, &self.drives, column);
+            }
+            Command::FitAllColumns if self.on_this_pc() => {
+                let content = std::array::from_fn(|column| drives_view::fit_width(ctx, &self.drives, column));
+                let shown = ui::file_list::ALL_SHOWN;
+                self.drive_columns = match ui::file_list::visible_width(ctx, &shown) {
+                    Some(room) => ui::file_list::fit_all(&content, &shown, room),
+                    None => content,
+                };
+            }
             Command::FitColumn(column) => {
                 self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, column);
             }
             Command::FitAllColumns => {
-                for column in 0..self.columns.len() {
-                    self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, column);
+                let mut content = self.columns;
+                for (column, width) in content.iter_mut().enumerate() {
+                    *width = ui::file_list::fit_width(ctx, &self.tab.view, column);
                 }
+                // Inside the list's width when it is known: no sideways scroll.
+                self.columns = match ui::file_list::visible_width(ctx, &self.shown_columns) {
+                    Some(room) => ui::file_list::fit_all(&content, &self.shown_columns, room),
+                    None => content,
+                };
             }
             Command::RestoreColumns => {
                 self.columns = ui::file_list::DEFAULT_WIDTHS;
@@ -2740,7 +2818,7 @@ impl eframe::App for LumenApp {
 
         if self.sidebar_open {
             self.refresh_disks();
-            ctx.request_repaint_after(DISKS_INTERVAL);
+            ctx.request_repaint_after(DISKS_WATCH);
             egui::Panel::left("sidebar")
                 .resizable(true)
                 .default_size(200.0)
@@ -2789,10 +2867,10 @@ impl eframe::App for LumenApp {
             let room = ui::status_bar::island_room(&ctx);
             ui::status_bar::above_islands(ui, room, |ui| {
             if self.on_this_pc() {
-                // The drives, read again every few seconds, instead of a folder's list.
+                // The drives, read again as they change, instead of a folder's list.
                 self.refresh_disks();
-                ctx.request_repaint_after(DISKS_INTERVAL);
-                if let Some(event) = ui::drives_view::show(ui, &self.drives, self.tab.drive.as_deref()) {
+                ctx.request_repaint_after(DISKS_WATCH);
+                if let Some(event) = ui::drives_view::show(ui, &self.drives, self.tab.drive.as_deref(), self.drive_sort, &self.drive_columns) {
                     self.handle_drives(&ctx, event);
                 }
                 return;
@@ -3075,6 +3153,7 @@ mod tests {
     use super::*;
     use crate::fs::lister::ListError;
     use crate::fs::preview::Content;
+    use crate::ui::drives_view::DriveColumn;
     use std::path::Path;
     use std::time::Instant;
 
@@ -4409,6 +4488,37 @@ mod tests {
     }
 
     #[test]
+    fn fit_all_columns_with_a_long_name_stays_inside_the_lists_width() {
+        let (ctx, _, dir) = app_in("app-fit-all-inside");
+        let long = format!("{}.txt", "a very long name ".repeat(12));
+        std::fs::write(dir.join(&long), "x").unwrap();
+        let mut app = LumenApp::with_config(&ctx, dir.clone(), false, crate::config::open(Some(dir.join("cfg/lumen/config"))));
+        let entries = fs::lister::read_entries(&dir).unwrap();
+        app.tab.view.apply_listing(Listing { id: 0, path: dir.clone(), result: Ok(entries), elapsed: Duration::ZERO }, None);
+        ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        let fit = |app: &LumenApp, column| ui::file_list::fit_width(&ctx, &app.tab.view, column);
+        assert!(fit(&app, 0) > 1000.0, "the long name needs {}", fit(&app, 0));
+        ui::file_list::remember_width(&ctx, 1000.0);
+        let room = ui::file_list::visible_width(&ctx, &app.shown_columns).unwrap();
+        app.run_command(&ctx, Command::FitAllColumns);
+        let total: f32 = app.columns.iter().sum();
+        assert!((total - room).abs() < 0.5, "the shown columns share the room: {total} in {room}");
+        assert_eq!((app.columns[1], app.columns[2]), (fit(&app, 1), fit(&app, 2)), "Type and Date Modified whole");
+        assert!(app.columns[0] < fit(&app, 0) && app.columns[0] >= ui::file_list::NAME_MIN);
+        // A hidden column takes no room.
+        app.run_command(&ctx, Command::RestoreColumns);
+        app.run_command(&ctx, Command::ToggleColumn(3));
+        let room = ui::file_list::visible_width(&ctx, &app.shown_columns).unwrap();
+        app.run_command(&ctx, Command::FitAllColumns);
+        let shown: f32 = app.columns.iter().enumerate().filter(|&(c, _)| c != 3).map(|(_, w)| w).sum();
+        assert!((shown - room).abs() < 0.5, "{shown} in {room}");
+        assert_eq!(app.columns[3], fit(&app, 3));
+        // A single column still fits its own content, whatever the room.
+        app.run_command(&ctx, Command::FitColumn(0));
+        assert_eq!(app.columns[0], fit(&app, 0));
+    }
+
+    #[test]
     fn columns_are_hidden_shown_again_restored_and_saved_but_name_stays() {
         let (ctx, _, dir) = app_in("app-hide-columns");
         let path = dir.join("cfg/lumen/config");
@@ -4835,7 +4945,7 @@ mod tests {
     }
 
     fn drive_row(path: PathBuf, name: &str) -> DriveRow {
-        DriveRow { path, name: name.into(), kind: "Local Disk", fs: "NTFS".into(), free: "1.0 GB".into(), size: "2.0 GB".into(), used: Some(0.5), percent: "50%".into() }
+        DriveRow { path, name: name.into(), kind: "Local Disk", fs: "NTFS".into(), free: "1.0 GB".into(), size: "2.0 GB".into(), used: Some(0.5), percent: "50%".into(), usage: None }
     }
 
     /// An app on This PC, listing two drives (folders `sub` and `drive2` of the fixture).
@@ -5019,6 +5129,130 @@ mod tests {
         app.run_command(&ctx, Command::Refresh);
         assert_eq!(app.disks.0, None, "read again on the next frame");
         assert_eq!(app.tab.lister.latest_id(), asked, "no folder listed");
+    }
+
+    /// `app_on_this_pc` with the fonts loaded, which fitting a column measures with.
+    fn app_on_this_pc_with_fonts(name: &str) -> (egui::Context, LumenApp, PathBuf) {
+        let (ctx, app, dir) = app_on_this_pc(name);
+        ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        (ctx, app, dir)
+    }
+
+    fn drive_names(app: &LumenApp) -> Vec<&str> {
+        app.drives.iter().map(|drive| drive.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_header_click_in_this_pc_sorts_the_drives_and_the_same_one_again_reverses_them() {
+        let (ctx, mut app, _) = app_on_this_pc("app-this-pc-sort");
+        assert_eq!(app.drive_sort, None);
+        assert_eq!(drive_names(&app), ["Windows (C:)", "Unidad de USB (D:)"], "letter order to begin with");
+        app.handle_drives(&ctx, DrivesEvent::Sort(DriveColumn::Name));
+        assert_eq!(drive_names(&app), ["Unidad de USB (D:)", "Windows (C:)"]);
+        assert_eq!(app.drive_sort, Some(DriveSort { column: DriveColumn::Name, descending: false }));
+        app.handle_drives(&ctx, DrivesEvent::Sort(DriveColumn::Name));
+        assert_eq!(drive_names(&app), ["Windows (C:)", "Unidad de USB (D:)"], "reversed");
+        assert_eq!(app.drive_sort.map(|s| s.descending), Some(true));
+        assert!(app.tab.drive.is_none(), "sorting picks nothing");
+        app.handle_drives(&ctx, DrivesEvent::Sort(DriveColumn::Type));
+        assert_eq!(app.drive_sort, Some(DriveSort { column: DriveColumn::Type, descending: false }), "another column starts ascending");
+        assert_eq!(app.tab.view.sort, Sort::default(), "the folders' sort is another thing");
+        assert_eq!(app.tab.view.current, places::this_pc());
+    }
+
+    #[test]
+    fn sorting_keeps_the_picked_drive_and_the_arrows_walk_the_new_order() {
+        let (ctx, mut app, dir) = app_on_this_pc("app-this-pc-sort-keys");
+        app.handle_action(&ctx, Action::Move(1));
+        assert_eq!(app.tab.drive, Some(dir.join("sub")), "the first, Windows");
+        app.handle_drives(&ctx, DrivesEvent::Sort(DriveColumn::Name));
+        assert_eq!(app.tab.drive, Some(dir.join("sub")), "still Windows, now second");
+        app.handle_action(&ctx, Action::Move(-1));
+        assert_eq!(app.tab.drive, Some(dir.join("drive2")), "the arrow goes up the sorted list to the USB");
+        app.handle_action(&ctx, Action::First);
+        assert_eq!(app.tab.drive, Some(dir.join("drive2")));
+    }
+
+    #[test]
+    fn the_drives_stay_sorted_when_they_are_read_again() {
+        let (_, mut app, dir) = app_in("app-this-pc-sort-reread");
+        let usage = Usage { total: 2 * 1024 * 1024 * 1024, free: 1024 * 1024 * 1024 };
+        let mount = |label: &str, name: &str| (Mount { label: label.into(), path: dir.join(name) }, Some(usage));
+        app.disks = (Some(Instant::now()), vec![mount("Windows (C:)", "c"), mount("Datos (E:)", "e")]);
+        app.drive_sort = Some(DriveSort { column: DriveColumn::Name, descending: false });
+        app.rebuild_drives();
+        assert_eq!(drive_names(&app), ["Datos (E:)", "Windows (C:)"]);
+        app.drive_sort = None;
+        app.rebuild_drives();
+        assert_eq!(drive_names(&app), ["Windows (C:)", "Datos (E:)"], "unsorted: as the disks come");
+    }
+
+    #[test]
+    fn a_dragged_border_in_this_pc_resizes_the_drive_columns_only() {
+        let (ctx, mut app, _) = app_on_this_pc("app-this-pc-resize");
+        let widths = [300.0, 90.0, 100.0, 110.0, 110.0, 150.0];
+        app.handle_drives(&ctx, DrivesEvent::Resized(widths));
+        assert_eq!(app.drive_columns, widths);
+        assert_eq!(app.columns, ui::file_list::DEFAULT_WIDTHS, "not the list's");
+    }
+
+    #[test]
+    fn size_column_to_fit_in_this_pc_fits_that_drive_column_and_leaves_the_lists() {
+        let (ctx, mut app, _) = app_on_this_pc_with_fonts("app-this-pc-fit-one");
+        app.drive_columns = [100.0; 6];
+        app.run_command(&ctx, Command::FitColumn(0));
+        assert_eq!(app.drive_columns[0], drives_view::fit_width(&ctx, &app.drives, 0));
+        assert_eq!(app.drive_columns[1..], [100.0; 5], "only that column");
+        assert_eq!(app.columns, ui::file_list::DEFAULT_WIDTHS, "the list's widths are not touched");
+    }
+
+    #[test]
+    fn ctrl_shift_f_in_this_pc_fits_every_drive_column_inside_the_visible_width() {
+        let (ctx, mut app, _) = app_on_this_pc_with_fonts("app-this-pc-fit-all");
+        ui::file_list::remember_width(&ctx, 1000.0);
+        let room = ui::file_list::visible_width(&ctx, &ui::file_list::ALL_SHOWN).unwrap();
+        app.drive_columns = [100.0; 6];
+        app.handle_action(&ctx, Action::FitColumns);
+        let fit = |column| drives_view::fit_width(&ctx, &app.drives, column);
+        assert_eq!(app.drive_columns[1..], std::array::from_fn::<f32, 5, _>(|c| fit(c + 1)), "each one its content");
+        let total: f32 = app.drive_columns.iter().sum();
+        assert!((total - room).abs() < 0.5, "Name takes the room left, no more: {total} in {room}");
+        assert!(app.drive_columns[0] >= fit(0));
+        assert_eq!(app.columns, ui::file_list::DEFAULT_WIDTHS, "the list's widths are not touched");
+        // Too many columns for the room: the rule of the list squeezes them to fit.
+        app.drives[0].name = "x".repeat(300);
+        ui::file_list::remember_width(&ctx, 600.0);
+        app.run_command(&ctx, Command::FitAllColumns);
+        let room = ui::file_list::visible_width(&ctx, &ui::file_list::ALL_SHOWN).unwrap();
+        let total: f32 = app.drive_columns.iter().sum();
+        assert!((total - room).abs() < 0.5, "inside the width: {total} in {room}");
+    }
+
+    #[test]
+    fn the_header_menu_in_this_pc_offers_the_two_fits_and_they_work() {
+        let (ctx, mut app, _) = app_on_this_pc_with_fonts("app-this-pc-header-menu");
+        app.handle_drives(&ctx, DrivesEvent::HeaderMenu(2));
+        assert_eq!(menu_labels(&app), ["Size Column To Fit", "Size All Columns To Fit"]);
+        assert_eq!(app.tab.drive, None, "no drive is picked by it");
+        assert!(!app.context_on_entry);
+        let fit = menu_item(&app, &Command::FitColumn(2)).map(|i| i.label.clone());
+        assert_eq!(fit.as_deref(), Some("Size Column To Fit"), "for the column clicked");
+        app.drive_columns = [100.0; 6];
+        app.run_command(&ctx, Command::FitColumn(2));
+        assert_eq!(app.drive_columns[2], drives_view::fit_width(&ctx, &app.drives, 2));
+    }
+
+    #[test]
+    fn on_a_folder_the_fits_still_fit_the_lists_columns_and_not_the_drives() {
+        let (ctx, mut app, _) = app_in("app-fit-not-on-this-pc");
+        ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        app.drive_columns = [100.0; 6];
+        app.columns = [100.0; 6];
+        app.run_command(&ctx, Command::FitColumn(0));
+        assert_eq!(app.columns[0], ui::file_list::fit_width(&ctx, &app.tab.view, 0));
+        assert_eq!(app.drive_columns, [100.0; 6]);
+        app.handle_action(&ctx, Action::FitColumns);
+        assert_eq!(app.drive_columns, [100.0; 6], "Ctrl+Shift+F neither");
     }
 
     #[test]
@@ -6112,6 +6346,62 @@ mod tests {
         assert!(t.take_due(t0 + REFRESH_DELAY));
         assert!(!t.take_due(t0 + REFRESH_DELAY * 2), "fires once");
         assert_eq!(t.wait(t0 + REFRESH_DELAY * 2), None);
+    }
+
+    /// `due` with these drive letters (`None`: not looked up); counts the lookups.
+    fn due_with(clock: &mut DiskClock, read: Option<Instant>, now: Instant, mask: Option<u32>, lookups: &std::cell::Cell<u32>) -> bool {
+        clock.due(read, now, || {
+            lookups.set(lookups.get() + 1);
+            mask
+        })
+    }
+
+    #[test]
+    fn the_disks_are_read_at_once_the_first_time_and_then_every_five_seconds() {
+        let (mut clock, t0, lookups) = (DiskClock::default(), Instant::now(), std::cell::Cell::new(0));
+        let at = |secs: f64| t0 + Duration::from_secs_f64(secs);
+        assert!(due_with(&mut clock, None, t0, Some(0b11), &lookups), "never read");
+        assert!(!due_with(&mut clock, Some(t0), at(1.0), Some(0b11), &lookups));
+        assert!(!due_with(&mut clock, Some(t0), at(4.9), Some(0b11), &lookups), "same drives, free space can wait");
+        assert!(due_with(&mut clock, Some(t0), at(5.0), Some(0b11), &lookups), "free space moves");
+    }
+
+    #[test]
+    fn a_drive_plugged_in_or_ejected_is_read_without_waiting_for_the_five_seconds() {
+        let (mut clock, t0, lookups) = (DiskClock::default(), Instant::now(), std::cell::Cell::new(0));
+        let at = |secs: f64| t0 + Duration::from_secs_f64(secs);
+        assert!(due_with(&mut clock, None, t0, Some(0b0100), &lookups));
+        assert!(!due_with(&mut clock, Some(t0), at(0.6), Some(0b0100), &lookups), "nothing changed");
+        assert!(due_with(&mut clock, Some(t0), at(1.2), Some(0b1100), &lookups), "D: plugged in");
+        assert!(!due_with(&mut clock, Some(at(1.2)), at(1.8), Some(0b1100), &lookups), "and noticed once");
+        assert!(due_with(&mut clock, Some(at(1.2)), at(2.4), Some(0b0100), &lookups), "D: ejected");
+    }
+
+    #[test]
+    fn the_first_look_at_the_drive_letters_is_no_change() {
+        let (mut clock, t0, lookups) = (DiskClock::default(), Instant::now(), std::cell::Cell::new(0));
+        // Read a moment ago by someone else (Refresh): the first mask seen is only remembered.
+        assert!(!due_with(&mut clock, Some(t0), t0, Some(0b11), &lookups));
+        assert!(due_with(&mut clock, Some(t0), t0 + Duration::from_millis(600), Some(0b111), &lookups));
+    }
+
+    #[test]
+    fn the_drive_letters_are_looked_at_twice_a_second_not_every_frame() {
+        let (mut clock, t0, lookups) = (DiskClock::default(), Instant::now(), std::cell::Cell::new(0));
+        for ms in [0, 16, 100, 499] {
+            due_with(&mut clock, Some(t0), t0 + Duration::from_millis(ms), Some(0b11), &lookups);
+        }
+        assert_eq!(lookups.get(), 1, "once in the first half second");
+        due_with(&mut clock, Some(t0), t0 + Duration::from_millis(500), Some(0b11), &lookups);
+        assert_eq!(lookups.get(), 2);
+    }
+
+    #[test]
+    fn without_drive_letters_only_the_five_seconds_count() {
+        let (mut clock, t0, lookups) = (DiskClock::default(), Instant::now(), std::cell::Cell::new(0));
+        assert!(!due_with(&mut clock, Some(t0), t0 + Duration::from_secs(1), None, &lookups));
+        assert!(!due_with(&mut clock, Some(t0), t0 + Duration::from_secs(4), None, &lookups));
+        assert!(due_with(&mut clock, Some(t0), t0 + Duration::from_secs(5), None, &lookups));
     }
 
     #[test]
