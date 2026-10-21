@@ -531,6 +531,27 @@ pub fn drive_letters(mask: u32) -> Vec<char> {
     ('A'..='Z').zip(0..26).filter(|&(_, bit)| mask & (1 << bit) != 0).map(|(letter, _)| letter).collect()
 }
 
+/// Whether the drive letters differ between two `GetLogicalDrives` masks:
+/// a drive was plugged in or ejected. Bits past Z mean nothing.
+pub fn drives_changed(old: u32, new: u32) -> bool {
+    // Bits 0 to 25 are A: to Z:.
+    (old ^ new) & 0x03FF_FFFF != 0
+}
+
+/// The drive letters in use now, as a `GetLogicalDrives` mask: a call as cheap
+/// as can be, unlike reading the disks. `None` where there are no drive letters.
+#[cfg(windows)]
+pub fn drive_mask() -> Option<u32> {
+    use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+    // SAFETY: no arguments; returns a bitmask.
+    Some(unsafe { GetLogicalDrives() })
+}
+
+#[cfg(not(windows))]
+pub fn drive_mask() -> Option<u32> {
+    None
+}
+
 #[cfg_attr(not(windows), allow(dead_code))]
 /// "Windows (C:)"; without a volume name, "Local Disk (D:)" or "USB Drive (F:)"
 /// as File Explorer says.
@@ -807,6 +828,29 @@ tmpfs /run tmpfs rw 0 0
         assert_eq!(drive_letters(0b1101), ['A', 'C', 'D']);
         assert_eq!(drive_letters(1 << 25), ['Z']);
         assert_eq!(drive_letters(u32::MAX), ('A'..='Z').collect::<Vec<_>>(), "bits past Z are ignored");
+    }
+
+    #[test]
+    fn a_drive_letter_coming_or_going_is_a_change() {
+        assert!(!drives_changed(0b1100, 0b1100));
+        assert!(drives_changed(0b0100, 0b1100), "plugged in");
+        assert!(drives_changed(0b1100, 0b0100), "ejected");
+        assert!(drives_changed(0b0110, 0b1010), "one gone while another came");
+        assert!(!drives_changed(0b1100, 0b1100 | 1 << 31), "bits past Z are not drives");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_system_drive_is_among_the_drive_letters_and_elsewhere_there_are_none() {
+        let mask = drive_mask().expect("Windows has drive letters");
+        let system = std::env::var("SystemDrive").ok().and_then(|d| d.chars().next()).unwrap_or('C');
+        assert!(drive_letters(mask).contains(&system.to_ascii_uppercase()), "{mask:b}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn elsewhere_there_are_no_drive_letters_to_look_up() {
+        assert_eq!(drive_mask(), None);
     }
 
     #[test]
