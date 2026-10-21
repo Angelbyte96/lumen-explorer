@@ -17,7 +17,7 @@ use crate::input::{self, Action, Confirm};
 use crate::menu::Command;
 #[cfg(not(windows))]
 use crate::menu;
-use crate::places::{self, Bookmarks, Mount, Place, Recents, Usage, Visits};
+use crate::places::{self, Bookmarks, Disk, DiskReader, DriveInfo, DriveKind, Mount, Place, Recents, Usage, Visits};
 use crate::fs::ops::Renamed;
 use crate::fs::preview::Previewer;
 use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
@@ -1207,6 +1207,10 @@ pub struct LumenApp {
     trash: Option<PathBuf>,
     /// Mounted disks with their usage, and when they were read.
     disks: (Option<Instant>, Vec<(Mount, Option<Usage>)>),
+    /// What each disk's last read found about its kind and file system.
+    disk_infos: HashMap<PathBuf, DriveInfo>,
+    /// The read of the disks under way on its own thread, if any.
+    disk_reader: DiskReader,
     /// When they are read again.
     disk_clock: DiskClock,
     /// The This PC view's rows: `disks` with each drive's type and file system.
@@ -1215,11 +1219,14 @@ pub struct LumenApp {
     drive_sort: Option<DriveSort>,
     /// The This PC view's column widths (not saved).
     drive_columns: drives_view::Widths,
+    /// Fits them while no border was dragged by hand.
+    drive_fit: ui::file_list::AutoFit,
     /// The Recycle Bin view's entries of every drive, ordered as `recycle_sort` says.
     recycled: Vec<Recycled>,
     recycle_sort: Option<RecycleSort>,
     /// The Recycle Bin view's column widths (not saved).
     recycle_columns: recycle_view::Widths,
+    recycle_fit: ui::file_list::AutoFit,
     /// The bins are to be read again as soon as they are shown.
     recycle_stale: bool,
     /// Whether the view was on screen last frame: showing it again reads the bins.
@@ -1320,13 +1327,17 @@ impl LumenApp {
             places: Vec::new(),
             trash: None,
             disks: (None, Vec::new()),
+            disk_infos: HashMap::new(),
+            disk_reader: DiskReader::default(),
             disk_clock: DiskClock::default(),
             drives: Vec::new(),
             drive_sort: None,
             drive_columns: drives_view::DEFAULT_WIDTHS,
+            drive_fit: ui::file_list::AutoFit::default(),
             recycled: Vec::new(),
             recycle_sort: Some(RecycleSort::NEWEST),
             recycle_columns: recycle_view::DEFAULT_WIDTHS,
+            recycle_fit: ui::file_list::AutoFit::default(),
             recycle_stale: false,
             recycle_shown: false,
             recycle_reader: recycle_bin::Reader::default(),
@@ -1481,24 +1492,66 @@ impl LumenApp {
         }
     }
 
-    /// Disks for the side panel, read again when a drive comes or goes (on
-    /// Windows) and every few seconds for the free space. Reading them is
-    /// quick: local devices only.
-    fn refresh_disks(&mut self) {
-        if !self.disk_clock.due(self.disks.0, Instant::now(), places::drive_mask) {
+    /// Fits This PC's columns to `width` while none was dragged by hand.
+    fn fit_this_pc(&mut self, ctx: &egui::Context, width: f32) {
+        if self.drives.is_empty() {
             return;
         }
-        self.disks = (
-            Some(Instant::now()),
-            places::disks()
-                .into_iter()
-                .map(|m| {
-                    let usage = places::usage(&m.path);
-                    (m, usage)
-                })
-                .collect(),
-        );
+        let (shown, drives) = (ui::file_list::ALL_SHOWN, &self.drives);
+        let room = ui::file_list::room(ctx, width, &shown);
+        let content = || std::array::from_fn(|column| drives_view::fit_width(ctx, drives, column));
+        if let Some(widths) = self.drive_fit.fit(drives_view::signature(drives), room, &shown, &drives_view::ROLES, content) {
+            self.drive_columns = widths;
+        }
+    }
+
+    /// Fits the Recycle Bin's columns to `width` while none was dragged by hand.
+    fn fit_recycle_bin(&mut self, ctx: &egui::Context, width: f32) {
+        if self.recycled.is_empty() {
+            return;
+        }
+        let (shown, rows, kept) = (recycle_view::SHOWN, &self.recycled, self.recycle_columns);
+        let room = ui::file_list::room(ctx, width, &shown);
+        // The list's six columns: the view's own four, the others unused.
+        let content = || std::array::from_fn(|column| if column < recycle_view::COLUMNS.len() { recycle_view::fit_width(ctx, rows, column) } else { kept[column] });
+        if let Some(widths) = self.recycle_fit.fit(recycle_view::signature(rows), room, &shown, &recycle_view::ROLES, content) {
+            self.recycle_columns = widths;
+        }
+    }
+
+    /// Disks for the side panel, read again when a drive comes or goes (on
+    /// Windows) and every few seconds for the free space.
+    fn refresh_disks(&mut self, ctx: &egui::Context) {
+        self.refresh_disks_with(ctx, places::read_disks);
+    }
+
+    /// `refresh_disks` with `read` as the read. The read runs on a thread of
+    /// its own, one at a time: a share that is down answers late, and until
+    /// it does the rows of the last read stay.
+    fn refresh_disks_with(&mut self, ctx: &egui::Context, read: impl FnOnce() -> Vec<Disk> + Send + 'static) {
+        if let Some(disks) = self.disk_reader.poll() {
+            self.apply_disks(disks);
+        }
+        // The clock is not asked while a read is out, so a drive change it would notice waits for it.
+        if self.disk_reader.is_running() || !self.disk_clock.due(self.disks.0, Instant::now(), places::drive_mask) {
+            return;
+        }
+        let ctx = ctx.clone();
+        self.disk_reader.start(move || ctx.request_repaint(), read);
+    }
+
+    /// Takes in the disks a read found, in place of the ones shown.
+    fn apply_disks(&mut self, disks: Vec<Disk>) {
+        self.disk_infos = disks.iter().map(|disk| (disk.mount.path.clone(), disk.info.clone())).collect();
+        self.disks = (Some(Instant::now()), disks.into_iter().map(|disk| (disk.mount, disk.usage)).collect());
         self.rebuild_drives();
+    }
+
+    /// The drives whose bins the Recycle Bin reads: a share's own bin is not
+    /// worth waiting for, and a share that is down would hold the read.
+    fn recycle_roots(&self) -> Vec<PathBuf> {
+        let local = |path: &PathBuf| self.disk_infos.get(path).is_none_or(|info| info.kind != DriveKind::Network);
+        self.disks.1.iter().map(|(mount, _)| mount.path.clone()).filter(local).collect()
     }
 
     /// Whether the tab shows This PC, whose location is no folder.
@@ -1508,7 +1561,8 @@ impl LumenApp {
 
     /// The This PC rows again, from the disks last read, sorted as the headers say.
     fn rebuild_drives(&mut self) {
-        self.drives = drives_view::rows(&self.disks.1, places::drive_info);
+        let infos = &self.disk_infos;
+        self.drives = drives_view::rows(&self.disks.1, |path| infos.get(path).cloned().unwrap_or_default());
         drives_view::sort(&mut self.drives, self.drive_sort);
     }
 
@@ -1537,10 +1591,14 @@ impl LumenApp {
             self.tab.recycle.keep(&self.recycled);
         }
         if shown && self.recycle_stale && !self.recycle_reader.is_running() {
-            self.recycle_stale = false;
             // The drives as they are now, though the side panel may be closed.
-            self.refresh_disks();
-            let roots: Vec<PathBuf> = self.disks.1.iter().map(|(mount, _)| mount.path.clone()).collect();
+            self.refresh_disks(ctx);
+            // No drive is known before the first read lands, which wakes the window to come back here.
+            if self.disks.0.is_none() {
+                return;
+            }
+            self.recycle_stale = false;
+            let roots = self.recycle_roots();
             let ctx = ctx.clone();
             self.recycle_reader.start(move || ctx.request_repaint(), move || recycle_bin::read_all(&roots, recycle_bin::current_sid().as_deref()));
         }
@@ -1570,7 +1628,10 @@ impl LumenApp {
                 self.context_menu = Some(ContextMenu::new(crate::menu::drives_column_menu(column), pointer(ctx)));
                 self.context_on_entry = false;
             }
-            RecycleEvent::Resized(widths) => self.recycle_columns = widths,
+            RecycleEvent::Resized(widths) => {
+                self.recycle_columns = widths;
+                self.recycle_fit.by_hand();
+            }
         }
     }
 
@@ -1672,7 +1733,10 @@ impl LumenApp {
                     self.context_menu = Some(ContextMenu::new(crate::menu::drives_column_menu(column), pos));
                     self.context_on_entry = false;
                 }
-                DrivesEvent::Resized(widths) => self.drive_columns = widths,
+                DrivesEvent::Resized(widths) => {
+                    self.drive_columns = widths;
+                    self.drive_fit.by_hand();
+                }
                 DrivesEvent::Select(_) | DrivesEvent::Open(_) | DrivesEvent::Menu(_) => {}
             }
             return;
@@ -1985,18 +2049,21 @@ impl LumenApp {
             // This PC has columns of its own, fitted by the list's rule.
             Command::FitColumn(column) if self.on_this_pc() => {
                 self.drive_columns[column] = drives_view::fit_width(ctx, &self.drives, column);
+                self.drive_fit.by_hand();
             }
             Command::FitAllColumns if self.on_this_pc() => {
                 let content = std::array::from_fn(|column| drives_view::fit_width(ctx, &self.drives, column));
                 let shown = ui::file_list::ALL_SHOWN;
                 self.drive_columns = match ui::file_list::visible_width(ctx, &shown) {
-                    Some(room) => ui::file_list::fit_all(&content, &shown, room),
+                    Some(room) => ui::file_list::fit_all(&content, &shown, &drives_view::ROLES, room),
                     None => content,
                 };
+                self.drive_fit.auto();
             }
             // So has the Recycle Bin: four columns, the list's first four for the rule.
             Command::FitColumn(column) if self.on_recycle_bin() => {
                 self.recycle_columns[column] = recycle_view::fit_width(ctx, &self.recycled, column);
+                self.recycle_fit.by_hand();
             }
             Command::FitAllColumns if self.on_recycle_bin() => {
                 let content = std::array::from_fn(|column| match column < recycle_view::COLUMNS.len() {
@@ -2005,9 +2072,10 @@ impl LumenApp {
                 });
                 let shown = recycle_view::SHOWN;
                 self.recycle_columns = match ui::file_list::visible_width(ctx, &shown) {
-                    Some(room) => ui::file_list::fit_all(&content, &shown, room),
+                    Some(room) => ui::file_list::fit_all(&content, &shown, &recycle_view::ROLES, room),
                     None => content,
                 };
+                self.recycle_fit.auto();
             }
             Command::FitColumn(column) => {
                 self.columns[column] = ui::file_list::fit_width(ctx, &self.tab.view, column);
@@ -2019,7 +2087,7 @@ impl LumenApp {
                 }
                 // Inside the list's width when it is known: no sideways scroll.
                 self.columns = match ui::file_list::visible_width(ctx, &self.shown_columns) {
-                    Some(room) => ui::file_list::fit_all(&content, &self.shown_columns, room),
+                    Some(room) => ui::file_list::fit_all(&content, &self.shown_columns, &ui::file_list::LIST_ROLES, room),
                     None => content,
                 };
             }
@@ -3014,7 +3082,7 @@ impl eframe::App for LumenApp {
         });
 
         if self.sidebar_open {
-            self.refresh_disks();
+            self.refresh_disks(&ctx);
             ctx.request_repaint_after(DISKS_WATCH);
             egui::Panel::left("sidebar")
                 .resizable(true)
@@ -3065,8 +3133,9 @@ impl eframe::App for LumenApp {
             ui::status_bar::above_islands(ui, room, |ui| {
             if self.on_this_pc() {
                 // The drives, read again as they change, instead of a folder's list.
-                self.refresh_disks();
+                self.refresh_disks(&ctx);
                 ctx.request_repaint_after(DISKS_WATCH);
+                self.fit_this_pc(&ctx, ui.available_rect_before_wrap().width());
                 if let Some(event) = ui::drives_view::show(ui, &self.drives, self.tab.drive.as_deref(), self.drive_sort, &self.drive_columns) {
                     self.handle_drives(&ctx, event);
                 }
@@ -3074,6 +3143,7 @@ impl eframe::App for LumenApp {
             }
             if self.on_recycle_bin() {
                 // The bins' entries, read when shown, instead of a folder's list.
+                self.fit_recycle_bin(&ctx, ui.available_rect_before_wrap().width());
                 let look = recycle_view::Look {
                     picks: &self.tab.recycle,
                     sort: self.recycle_sort,
@@ -5222,6 +5292,112 @@ mod tests {
         assert_eq!(rows, [("Windows (C:)", dir.as_path(), "1.0 GB", "50%")]);
     }
 
+    fn disk(label: &str, path: &str, kind: DriveKind, fs: &str, usage: Option<Usage>) -> Disk {
+        Disk { mount: Mount { label: label.into(), path: PathBuf::from(path) }, usage, info: DriveInfo { kind, fs: fs.into() } }
+    }
+
+    const GB: u64 = 1024 * 1024 * 1024;
+
+    /// The frames' calls to `refresh_disks_with` (never reading again) until the read in flight lands.
+    fn land_disks(ctx: &egui::Context, app: &mut LumenApp) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            app.refresh_disks_with(ctx, || panic!("no new read was due"));
+            if !app.disk_reader.is_running() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the disks were not read in time");
+    }
+
+    #[test]
+    fn a_slow_disk_read_never_blocks_the_frame_and_the_old_rows_stay_until_the_new_ones_land() {
+        let (ctx, mut app, _) = app_in("app-disks-slow");
+        app.apply_disks(vec![disk("Windows (C:)", "C:\\", DriveKind::Local, "NTFS", Some(Usage { total: 2 * GB, free: GB }))]);
+        app.disks.0 = None;
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let asked = Instant::now();
+        app.refresh_disks_with(&ctx, move || {
+            let _ = blocked.recv_timeout(Duration::from_secs(3));
+            vec![
+                disk("Windows (C:)", "C:\\", DriveKind::Local, "NTFS", Some(Usage { total: 2 * GB, free: GB })),
+                disk("Ubuntu (\\\\wsl$) (Z:)", "Z:\\", DriveKind::Network, "9P", Some(Usage { total: 1000 * GB, free: 990 * GB })),
+            ]
+        });
+        assert!(asked.elapsed() < Duration::from_secs(1), "the frame did not wait for the read");
+        assert!(app.disk_reader.is_running());
+        assert_eq!(drive_names(&app), ["Windows (C:)"], "the rows of the last read are still shown");
+        assert_eq!(app.disks.1.len(), 1, "and the side panel's");
+        app.refresh_disks_with(&ctx, || panic!("one read at a time"));
+        assert_eq!(drive_names(&app), ["Windows (C:)"]);
+
+        release.send(()).unwrap();
+        land_disks(&ctx, &mut app);
+        assert_eq!(drive_names(&app), ["Windows (C:)", "Ubuntu (\\\\wsl$) (Z:)"], "the late rows replace them");
+        assert_eq!(app.disks.1.len(), 2, "in the side panel too");
+        assert!(app.disks.0.is_some());
+    }
+
+    #[test]
+    fn only_one_disk_read_is_in_flight_however_often_the_clock_asks() {
+        let (ctx, mut app, _) = app_in("app-disks-one");
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let count = runs.clone();
+        app.refresh_disks_with(&ctx, move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = blocked.recv_timeout(Duration::from_secs(3));
+            vec![disk("Windows (C:)", "C:\\", DriveKind::Local, "NTFS", None)]
+        });
+        for _ in 0..3 {
+            app.disks.0 = None;
+            let count = runs.clone();
+            app.refresh_disks_with(&ctx, move || {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Vec::new()
+            });
+        }
+        release.send(()).unwrap();
+        land_disks(&ctx, &mut app);
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(drive_names(&app), ["Windows (C:)"], "the one read is what lands");
+    }
+
+    #[test]
+    fn network_drives_show_in_this_pc_with_their_type_file_system_and_space_or_without_numbers() {
+        let (_, mut app, _) = app_in("app-disks-network");
+        app.apply_disks(vec![
+            disk("Windows (C:)", "C:\\", DriveKind::Local, "NTFS", Some(Usage { total: 2 * GB, free: GB })),
+            disk("Ubuntu (\\\\wsl$) (Z:)", "Z:\\", DriveKind::Network, "9P", Some(Usage { total: 1000 * GB, free: 500 * GB })),
+            disk("Network Drive (Y:)", "Y:\\", DriveKind::Network, "", None),
+        ]);
+        let rows: Vec<(&str, &str, &str, &str, Option<f32>)> =
+            app.drives.iter().map(|r| (r.name.as_str(), r.kind, r.fs.as_str(), r.free.as_str(), r.used)).collect();
+        assert_eq!(
+            rows,
+            [
+                ("Windows (C:)", "Local Disk", "NTFS", "1.0 GB", Some(0.5)),
+                ("Ubuntu (\\\\wsl$) (Z:)", "Network Drive", "9P", "500.0 GB", Some(0.5)),
+                ("Network Drive (Y:)", "Network Drive", "", "", None),
+            ]
+        );
+        assert_eq!((app.drives[2].size.as_str(), app.drives[2].percent.as_str()), ("", ""), "no numbers, no bar");
+        let storage: Vec<&str> = app.disks.1.iter().map(|(mount, _)| mount.label.as_str()).collect();
+        assert_eq!(storage, ["Windows (C:)", "Ubuntu (\\\\wsl$) (Z:)", "Network Drive (Y:)"], "and in the side panel's Storage");
+    }
+
+    #[test]
+    fn the_recycle_bin_does_not_read_a_network_drive() {
+        let (_, mut app, _) = app_in("app-disks-bin-roots");
+        app.apply_disks(vec![
+            disk("Windows (C:)", "C:\\", DriveKind::Local, "NTFS", None),
+            disk("Ubuntu (\\\\wsl$) (Z:)", "Z:\\", DriveKind::Network, "9P", None),
+            disk("USB Drive (F:)", "F:\\", DriveKind::Removable, "FAT32", None),
+        ]);
+        assert_eq!(app.recycle_roots(), [PathBuf::from("C:\\"), PathBuf::from("F:\\")]);
+    }
+
     #[test]
     fn the_arrows_pick_a_drive_and_enter_opens_it() {
         let (ctx, mut app, dir) = app_on_this_pc("app-this-pc-keys");
@@ -5431,10 +5607,10 @@ mod tests {
         app.drive_columns = [100.0; 6];
         app.handle_action(&ctx, Action::FitColumns);
         let fit = |column| drives_view::fit_width(&ctx, &app.drives, column);
-        assert_eq!(app.drive_columns[1..], std::array::from_fn::<f32, 5, _>(|c| fit(c + 1)), "each one its content");
         let total: f32 = app.drive_columns.iter().sum();
-        assert!((total - room).abs() < 0.5, "Name takes the room left, no more: {total} in {room}");
-        assert!(app.drive_columns[0] >= fit(0));
+        assert!((total - room).abs() < 0.5, "the room is shared, no more: {total} in {room}");
+        assert!((0..6).all(|c| app.drive_columns[c] >= fit(c)), "none is cut: {:?}", app.drive_columns);
+        assert!(app.drive_columns[0] < room / 2.0, "and Name does not take it all: {:?}", app.drive_columns);
         assert_eq!(app.columns, ui::file_list::DEFAULT_WIDTHS, "the list's widths are not touched");
         // Too many columns for the room: the rule of the list squeezes them to fit.
         app.drives[0].name = "x".repeat(300);
@@ -5443,6 +5619,40 @@ mod tests {
         let room = ui::file_list::visible_width(&ctx, &ui::file_list::ALL_SHOWN).unwrap();
         let total: f32 = app.drive_columns.iter().sum();
         assert!((total - room).abs() < 0.5, "inside the width: {total} in {room}");
+    }
+
+    #[test]
+    fn this_pc_fits_its_columns_when_first_shown_and_again_when_the_window_resizes() {
+        let (ctx, mut app, _) = app_on_this_pc_with_fonts("app-this-pc-auto-fit");
+        app.fit_this_pc(&ctx, 1080.0);
+        let room = ui::file_list::room(&ctx, 1080.0, &ui::file_list::ALL_SHOWN);
+        assert!((app.drive_columns.iter().sum::<f32>() - room).abs() < 0.5, "{:?} in {room}", app.drive_columns);
+        assert!(app.drive_columns[0] < room / 2.0, "Name does not take the room: {:?}", app.drive_columns);
+        assert_ne!(app.drive_columns, drives_view::DEFAULT_WIDTHS);
+        app.fit_this_pc(&ctx, 900.0);
+        let room = ui::file_list::room(&ctx, 900.0, &ui::file_list::ALL_SHOWN);
+        assert!((app.drive_columns.iter().sum::<f32>() - room).abs() < 0.5, "resized: {:?} in {room}", app.drive_columns);
+        assert_eq!(app.columns, ui::file_list::DEFAULT_WIDTHS, "the list's widths are not touched");
+        assert_eq!(app.recycle_columns, recycle_view::DEFAULT_WIDTHS, "nor the Recycle Bin's");
+    }
+
+    #[test]
+    fn this_pc_keeps_widths_set_by_hand_until_fit_all_columns_gives_it_back_its_own() {
+        let (ctx, mut app, _) = app_on_this_pc_with_fonts("app-this-pc-auto-fit-by-hand");
+        app.fit_this_pc(&ctx, 1080.0);
+        let widths = [300.0, 90.0, 100.0, 110.0, 110.0, 150.0];
+        app.handle_drives(&ctx, DrivesEvent::Resized(widths));
+        app.fit_this_pc(&ctx, 700.0);
+        assert_eq!(app.drive_columns, widths, "a dragged border is not overwritten when the window resizes");
+        app.run_command(&ctx, Command::FitAllColumns);
+        app.fit_this_pc(&ctx, 700.0);
+        let room = ui::file_list::room(&ctx, 700.0, &ui::file_list::ALL_SHOWN);
+        assert!((app.drive_columns.iter().sum::<f32>() - room).abs() < 0.5, "Fit All Columns: {:?}", app.drive_columns);
+        // Fitting a single column is by hand too.
+        app.run_command(&ctx, Command::FitColumn(1));
+        let kept = app.drive_columns;
+        app.fit_this_pc(&ctx, 500.0);
+        assert_eq!(app.drive_columns, kept);
     }
 
     // ---- The Recycle Bin view ----
@@ -5486,6 +5696,29 @@ mod tests {
         land(&mut app);
         load_recycle(&ctx, &mut app);
         (ctx, app, dir)
+    }
+
+    #[test]
+    fn the_recycle_bin_waits_for_the_first_disk_read_instead_of_reading_no_drives() {
+        let (ctx, mut app, dir) = app_in("app-bin-waits-for-disks");
+        let c = dir.join("C");
+        recycled_on(&c, "GGG777", &dir.join("late.txt"), false, 1_800_000_000);
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let root = c.to_string_lossy().into_owned();
+        app.disk_reader.start(
+            || {},
+            move || {
+                let _ = blocked.recv_timeout(Duration::from_secs(10));
+                vec![disk("Windows (C:)", &root, DriveKind::Local, "NTFS", None)]
+            },
+        );
+        app.handle_sidebar(&ctx, SidebarEvent::Open(places::recycle_bin()));
+        land(&mut app);
+        app.poll_recycle(&ctx);
+        assert!(app.recycle_stale && !app.recycle_reader.is_running(), "no drive is known yet");
+        release.send(()).unwrap();
+        load_recycle(&ctx, &mut app);
+        assert_eq!(recycled_names(&app), ["late.txt"]);
     }
 
     fn recycled_names(app: &LumenApp) -> Vec<&str> {
@@ -5815,6 +6048,31 @@ mod tests {
         let fits: Vec<f32> = (0..4).map(|column| recycle_view::fit_width(&ctx, &app.recycled, column)).collect();
         assert_eq!(app.recycle_columns[..4], fits[..], "every column of the view, to its content");
         assert_eq!((app.columns, app.drive_columns), ([100.0; 6], [100.0; 6]), "the lists and the drives keep theirs");
+    }
+
+    #[test]
+    fn the_recycle_bin_fits_its_columns_when_first_shown_and_when_the_window_resizes_unless_dragged() {
+        let (ctx, mut app, _) = app_on_recycle_bin("app-bin-auto-fit");
+        ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        let shown = recycle_view::SHOWN;
+        let fitted = |app: &LumenApp, width| {
+            let room = ui::file_list::room(&ctx, width, &shown);
+            let total: f32 = app.recycle_columns[..4].iter().sum();
+            assert!((total - room).abs() < 0.5, "{:?} in {room}", app.recycle_columns);
+        };
+        app.fit_recycle_bin(&ctx, 1080.0);
+        fitted(&app, 1080.0);
+        assert_eq!(app.recycle_columns[4..], [0.0, 0.0], "the unused columns stay out");
+        app.fit_recycle_bin(&ctx, 760.0);
+        fitted(&app, 760.0);
+        assert_eq!((app.columns, app.drive_columns), (ui::file_list::DEFAULT_WIDTHS, drives_view::DEFAULT_WIDTHS), "the other views keep theirs");
+        let widths = [200.0, 220.0, 150.0, 90.0, 0.0, 0.0];
+        app.handle_recycle(&ctx, RecycleEvent::Resized(widths));
+        app.fit_recycle_bin(&ctx, 1200.0);
+        assert_eq!(app.recycle_columns, widths, "a dragged border is not overwritten");
+        app.run_command(&ctx, Command::FitAllColumns);
+        app.fit_recycle_bin(&ctx, 1200.0);
+        fitted(&app, 1200.0);
     }
 
     #[test]

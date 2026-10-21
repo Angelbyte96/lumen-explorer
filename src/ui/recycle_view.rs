@@ -35,11 +35,23 @@ pub const COLUMNS: [(&str, RecycleColumn); 4] = [
 /// the last two are unused.
 pub type Widths = file_list::Widths;
 
+/// Each column's role, in the list's six: Original Location is the long text that
+/// gives first, Date Deleted keeps priority, Size is a number.
+pub const ROLES: file_list::Roles = {
+    use file_list::Role::*;
+    [Name, Text, Short, Numeric, Short, Short]
+};
+
+/// A fingerprint of what the rows show, to tell when the columns need fitting again.
+pub fn signature(rows: &[Recycled]) -> u64 {
+    file_list::signature(rows.iter().map(cells))
+}
+
 /// The columns the view shows, in the list's six.
 pub const SHOWN: file_list::Shown = [true, true, true, true, false, false];
 
 /// The widths the view starts with.
-pub const DEFAULT_WIDTHS: Widths = [260.0, 300.0, 150.0, 90.0, 0.0, 0.0];
+pub const DEFAULT_WIDTHS: Widths = [260.0, 260.0, 150.0, 90.0, 0.0, 0.0];
 
 /// How the entries are ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,9 +303,12 @@ pub fn show(ui: &mut egui::Ui, rows: &[Recycled], look: &Look) -> Option<Recycle
                         // Not selectable, or the text would take the row's click.
                         ui.add(egui::Label::new(&texts[0]).selectable(false).truncate());
                     });
-                    for text in &texts[1..] {
-                        row.col(|ui| {
-                            ui.add(egui::Label::new(text).selectable(false).truncate());
+                    for (text, role) in texts[1..].iter().zip(&ROLES[1..]) {
+                        row.col(|ui| match role {
+                            file_list::Role::Numeric => file_list::number_cell(ui, text),
+                            _ => {
+                                ui.add(egui::Label::new(text).selectable(false).truncate());
+                            }
                         });
                     }
                     let response = row.response();
@@ -718,5 +733,48 @@ mod tests {
         let Some(RecycleEvent::Resized(new)) = released else { panic!("the widths are reported when let go: {released:?}") };
         assert!((new[0] - 310.0).abs() < 1.5, "Name is 50 wider: {new:?}");
         assert_eq!(new[1..], DEFAULT_WIDTHS[1..], "only the dragged column changes");
+    }
+
+    fn fitted_in(content: [f32; 4], room: f32) -> Widths {
+        let content = [content[0], content[1], content[2], content[3], 0.0, 0.0];
+        file_list::fit_all(&content, &SHOWN, &ROLES, room)
+    }
+
+    /// L18 (134426): Name cut, Original Location very wide, Date Deleted and Size cut.
+    #[test]
+    fn when_the_bin_does_not_fit_original_location_gives_first_and_date_size_and_name_stay_whole() {
+        let fitted = fitted_in([520.0, 640.0, 130.0, 70.0], 1000.0);
+        assert_eq!(fitted, [520.0, 280.0, 130.0, 70.0, 0.0, 0.0], "Original Location takes what is left");
+    }
+
+    #[test]
+    fn the_bin_squeezes_location_to_its_floor_then_size_then_name_and_date_last() {
+        let fitted = fitted_in([520.0, 640.0, 130.0, 70.0], 700.0);
+        assert_eq!(fitted, [406.0, file_list::TEXT_MIN, 130.0, file_list::SMALL_MIN, 0.0, 0.0], "Location at its floor, Size at 44, Name gives next");
+        let narrow = fitted_in([520.0, 640.0, 130.0, 70.0], 400.0);
+        assert!((narrow[..4].iter().sum::<f32>() - 400.0).abs() < 0.5, "{narrow:?}");
+        assert!(narrow[0] >= file_list::NAME_MIN && narrow[0] < file_list::NAME_MIN + 3.0, "Name at its minimum: {narrow:?}");
+        assert!(narrow[1] < file_list::TEXT_MIN && narrow[2] < 130.0, "Location and Date give at the end: {narrow:?}");
+        assert!(narrow[..4].iter().all(|&w| w >= file_list::MIN_WIDTH), "{narrow:?}");
+        assert_eq!(narrow[4..], [0.0, 0.0], "the unused columns stay out");
+    }
+
+    #[test]
+    fn when_the_bin_fits_the_spare_room_goes_to_every_column_not_all_to_location_or_name() {
+        let fitted = fitted_in([300.0, 700.0, 140.0, 70.0], 1300.0);
+        assert!((fitted[..4].iter().sum::<f32>() - 1300.0).abs() < 0.5, "{fitted:?}");
+        assert!(fitted[1] <= 700.0 + 90.0 * 700.0 / 1210.0 + 1.0, "Location: its content plus its share: {fitted:?}");
+        assert!(fitted[0] > 320.0 && fitted[2] > 145.0 && fitted[3] > 72.0, "the others grow too: {fitted:?}");
+    }
+
+    #[test]
+    fn size_is_right_aligned_and_the_text_columns_left_aligned() {
+        let ctx = egui::Context::default();
+        let rows = three();
+        let shapes = settled(&ctx, &rows, &Scene::default());
+        let right = crate::ui::testing::SCREEN.right();
+        assert!(right - text_rect(&shapes, "300 B").max.x < 24.0, "Size ends at the table's edge: {}", text_rect(&shapes, "300 B").max.x);
+        let place = text_rect(&shapes, "Original Location");
+        assert!((text_rect(&shapes, "C:\\Users\\Ana").min.x - place.min.x).abs() < 6.0, "Original Location starts at its header");
     }
 }
