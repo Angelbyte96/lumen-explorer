@@ -6,12 +6,13 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use crate::format::format_size;
-use crate::places::{Mount, Place, Usage};
+use crate::places::{self, Mount, Place, Usage};
 use crate::ui::file_icons::FileIcons;
 use crate::ui::icons;
 
 pub const TOGGLE: &str = "☰";
 pub const DISK: &str = "🖴";
+pub const COMPUTER: &str = "🖥";
 pub const TRASH: &str = "🗑";
 
 pub struct Sidebar<'a> {
@@ -101,15 +102,22 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
         let at = rows.len();
         let title = section(ui, "Places", true, |ui| {
             for place in sidebar.places {
-                let icon = if place.trash { ItemIcon::Glyph(TRASH) } else { ItemIcon::Folder };
+                let this_pc = places::is_this_pc(&place.path);
+                let icon = match (place.trash, this_pc) {
+                    (true, _) => ItemIcon::Glyph(TRASH),
+                    (_, true) => ItemIcon::Glyph(COMPUTER),
+                    _ => ItemIcon::Folder,
+                };
                 // Not the trash: a drop there would skip its bookkeeping (what it held, and where from).
-                let folder = (!place.trash).then_some(&place.path);
+                // Nor This PC, which is no folder to drop into.
+                let folder = (!place.trash && !this_pc).then_some(&place.path);
                 let response = drop_target(ui, folder, |ui| item(ui, icon, place.icon, &place.label, &place.path.display().to_string(), &place.path, sidebar.current, sidebar.icons));
                 rows.push(Row { rect: response.rect, kind: RowKind::Item(place.path.clone()) });
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(place.path.clone()));
                 }
-                if response.secondary_clicked() {
+                // This PC has no menu: it is not a path the shell can be asked about.
+                if response.secondary_clicked() && !this_pc {
                     event = Some(SidebarEvent::Menu(place.path.clone()));
                 }
             }
@@ -283,7 +291,7 @@ fn item(ui: &mut egui::Ui, icon: ItemIcon, theme: &'static str, label: &str, hin
     let own = {
         let _ = theme;
         match icon {
-            ItemIcon::Glyph(TRASH) => None,
+            ItemIcon::Glyph(TRASH | COMPUTER) => None,
             _ => icons.folder_texture(path),
         }
     };
@@ -886,6 +894,30 @@ mod tests {
         let (_, shapes) = run(&ctx, vec![], side(&panel));
         assert!(!shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "Remove bookmark")), "egui's own bookmark menu is gone");
         let _ = std::fs::remove_dir_all(&panel.dir);
+    }
+
+    #[test]
+    fn this_pc_opens_with_a_click_shows_a_computer_and_has_no_menu_and_takes_no_drops() {
+        let panel = Drop { places: [Place { label: "This PC".into(), path: places::this_pc(), trash: false, icon: "computer" }, panel_place("Trash"), panel_place("Gone")], ..drop_panel("side-this-pc") };
+        let ctx = egui::Context::default();
+        let at = row_of(&ctx, &panel, "This PC");
+        let (_, shapes) = run(&ctx, vec![], side(&panel));
+        let glyphs = |text: &str| shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == text)).count();
+        assert_eq!((glyphs(COMPUTER), glyphs("This PC")), (1, 1), "a computer, not a folder");
+        assert_eq!(crate::ui::testing::click(&ctx, at, side(&panel)), Some(SidebarEvent::Open(places::this_pc())));
+        let secondary = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: NONE };
+        run(&ctx, vec![egui::Event::PointerMoved(at)], side(&panel));
+        run(&ctx, vec![secondary(true)], side(&panel));
+        assert_eq!(run(&ctx, vec![secondary(false)], side(&panel)).0, None, "no menu for what is no path");
+        let shapes = lift(&ctx, &[panel.dir.join("f.txt")], at, NONE, side(&panel));
+        assert!(lit(&ctx, &shapes).is_empty(), "nothing is dropped into it");
+        let_go(&ctx, at, NONE, side(&panel));
+        assert_eq!(taken(&ctx), None);
+        let _ = std::fs::remove_dir_all(&panel.dir);
+    }
+
+    fn panel_place(label: &str) -> Place {
+        Place { label: label.into(), path: PathBuf::from(format!("/nowhere/{label}")), trash: false, icon: "folder" }
     }
 
     #[test]

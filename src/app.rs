@@ -21,6 +21,7 @@ use crate::places::{self, Bookmarks, Mount, Place, Recents, Usage, Visits};
 use crate::fs::ops::Renamed;
 use crate::fs::preview::Previewer;
 use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
+use crate::ui::drives_view::{self, DriveRow, DrivesEvent};
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::ui::tabs::TabEvent;
 use crate::ui::toolbar::{Nav, ToolbarEvent};
@@ -1067,6 +1068,8 @@ pub struct Tab {
     rename_after_load: Option<PathBuf>,
     /// Error to show once the pending reload lands (a reload clears errors).
     error_after_load: Option<String>,
+    /// The drive selected in the This PC view.
+    drive: Option<PathBuf>,
 }
 
 impl Tab {
@@ -1090,6 +1093,7 @@ impl Tab {
             look_for: like.and_then(|like| like.look_for.clone()),
             rename_after_load: None,
             error_after_load: None,
+            drive: None,
         }
     }
 }
@@ -1159,6 +1163,8 @@ pub struct LumenApp {
     trash: Option<PathBuf>,
     /// Mounted disks with their usage, and when they were read.
     disks: (Option<Instant>, Vec<(Mount, Option<Usage>)>),
+    /// The This PC view's rows: `disks` with each drive's type and file system.
+    drives: Vec<DriveRow>,
     sidebar_open: bool,
     /// The view and order of a folder with no saved rule.
     default_look: Look,
@@ -1252,6 +1258,7 @@ impl LumenApp {
             places: Vec::new(),
             trash: None,
             disks: (None, Vec::new()),
+            drives: Vec::new(),
             sidebar_open: true,
             default_look: Look::default(),
             folder_views: FolderViews::default(),
@@ -1281,7 +1288,7 @@ impl LumenApp {
                 .map_or_else(|| home.join(".config"), PathBuf::from);
             let user_dirs = std::fs::read_to_string(config_home.join("user-dirs.dirs")).ok();
             let trash_place = cfg!(unix).then_some(trash.as_path());
-            app.places = places::places(&home, user_dirs.as_deref(), trash_place);
+            app.places = places::with_this_pc(places::places(&home, user_dirs.as_deref(), trash_place), cfg!(windows));
             #[cfg(not(windows))]
             {
                 let folders = app.places.iter().map(|p| (p.path.clone(), p.icon.to_owned())).collect();
@@ -1418,6 +1425,42 @@ impl LumenApp {
                 })
                 .collect(),
         );
+        self.rebuild_drives();
+    }
+
+    /// Whether the tab shows This PC, whose location is no folder.
+    fn on_this_pc(&self) -> bool {
+        places::is_this_pc(&self.tab.view.current)
+    }
+
+    /// The This PC rows again, from the disks last read.
+    fn rebuild_drives(&mut self) {
+        self.drives = drives_view::rows(&self.disks.1, places::drive_info);
+    }
+
+    /// The drive picked in the This PC view, if it is still listed.
+    fn picked_drive(&self) -> Option<PathBuf> {
+        self.tab.drive.clone().filter(|path| self.drives.iter().any(|drive| drive.path == *path))
+    }
+
+    /// An arrow, Home or End in the This PC view: `to` is given the picked
+    /// row (if any) and the last one, and returns the row to pick.
+    fn move_drive(&mut self, to: impl FnOnce(Option<usize>, usize) -> usize) {
+        let Some(last) = self.drives.len().checked_sub(1) else { return };
+        let at = self.picked_drive().and_then(|path| self.drives.iter().position(|drive| drive.path == path));
+        self.tab.drive = Some(self.drives[to(at, last).min(last)].path.clone());
+    }
+
+    /// The This PC view's click, double click or right click on a drive.
+    fn handle_drives(&mut self, ctx: &egui::Context, event: DrivesEvent) {
+        let (DrivesEvent::Select(i) | DrivesEvent::Open(i) | DrivesEvent::Menu(i)) = event;
+        let Some(path) = self.drives.get(i).map(|drive| drive.path.clone()) else { return };
+        self.tab.drive = Some(path.clone());
+        match event {
+            DrivesEvent::Select(_) => {}
+            DrivesEvent::Open(_) => self.navigate(ctx, path, None),
+            DrivesEvent::Menu(_) => self.handle_sidebar(ctx, SidebarEvent::Menu(path)),
+        }
     }
 
     fn handle_sidebar(&mut self, ctx: &egui::Context, event: SidebarEvent) {
@@ -1434,6 +1477,9 @@ impl LumenApp {
     /// Right click on a side panel item: the menu for that path, not for the
     /// list's selection.
     fn open_place_menu(&mut self, path: PathBuf, pos: egui::Pos2) {
+        if places::is_this_pc(&path) {
+            return;
+        }
         let bookmarked = self.bookmarks.contains(&path);
         #[cfg(not(windows))]
         {
@@ -1544,6 +1590,9 @@ impl LumenApp {
 
     /// Right click on the list's empty space: the menu for the folder itself.
     fn open_background_menu(&mut self, pos: egui::Pos2) {
+        if self.on_this_pc() {
+            return;
+        }
         #[cfg(not(windows))]
         let items = {
             let templates = self.templates.as_deref().map(places::templates).unwrap_or_default();
@@ -1680,6 +1729,9 @@ impl LumenApp {
                     Some((path, true)) if self.context_on_entry => path,
                     _ => self.tab.view.current.clone(),
                 };
+                if places::is_this_pc(&folder) {
+                    return;
+                }
                 #[cfg(not(windows))]
                 if let Err(err) = crate::apps::open_terminal(&folder) {
                     self.tab.view.error = Some(err);
@@ -1696,6 +1748,8 @@ impl LumenApp {
                 let _ = offset;
             }
             Command::Sort(column) => self.tab.view.sort_by(column),
+            // This PC lists no folder: the drives are read again instead.
+            Command::Refresh if self.on_this_pc() => self.disks.0 = None,
             Command::Refresh => {
                 let keep = self.tab.view.selected_entry().map(|e| e.path.clone());
                 self.reload(ctx, keep);
@@ -1743,7 +1797,7 @@ impl LumenApp {
 
     fn go_parent(&mut self, ctx: &egui::Context) {
         let current = self.tab.view.current.clone();
-        if let Some(parent) = current.parent() {
+        if let Some(parent) = current.parent().filter(|_| !self.on_this_pc()) {
             let select = came_from(&current, parent);
             self.navigate(ctx, parent.to_path_buf(), select);
         }
@@ -1828,6 +1882,9 @@ impl LumenApp {
 
     /// New ▸ Empty File or a template: created here, then renamed in place.
     fn new_file(&mut self, ctx: &egui::Context, template: Option<&Path>) {
+        if self.on_this_pc() {
+            return;
+        }
         match fs::ops::create_file(&self.tab.view.current, template) {
             Ok(path) => {
                 self.path_popup.mark_stale();
@@ -1839,6 +1896,9 @@ impl LumenApp {
     }
 
     fn new_folder(&mut self, ctx: &egui::Context) {
+        if self.on_this_pc() {
+            return;
+        }
         match fs::ops::create_folder(&self.tab.view.current) {
             Ok(path) => {
                 self.path_popup.mark_stale();
@@ -1894,6 +1954,9 @@ impl LumenApp {
     /// Copies or moves `paths` into `dest` as a paste does (the same
     /// questions, progress and cancel), leaving the clipboard alone.
     fn drop_into(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>, dest: PathBuf, mode: Mode) {
+        if places::is_this_pc(&dest) {
+            return;
+        }
         // Moved in by hand it would have no record to be restored from.
         if places::in_recycle_bin(&dest) || self.trash.as_deref().is_some_and(|trash| places::in_trash(&dest, trash)) {
             self.tab.view.error = Some("Nothing can be dropped into the trash".into());
@@ -1921,7 +1984,7 @@ impl LumenApp {
     /// Pastes the clipboard into `dest`: the folder on screen, or a folder's
     /// own Paste in the Windows menu.
     fn paste_into(&mut self, ctx: &egui::Context, dest: PathBuf) {
-        if self.busy() {
+        if places::is_this_pc(&dest) || self.busy() {
             return;
         }
         let Some(Clip { paths, mode }) = self.clipboard.clone() else {
@@ -2108,7 +2171,8 @@ impl LumenApp {
 
     /// Titles of every tab, in bar order.
     fn tab_labels(&self) -> Vec<String> {
-        self.tab_folders().iter().map(|folder| ui::tabs::tab_label(folder)).collect()
+        let label = |folder: &PathBuf| if places::is_this_pc(folder) { places::THIS_PC.to_owned() } else { ui::tabs::tab_label(folder) };
+        self.tab_folders().iter().map(label).collect()
     }
 
     /// The folder each tab shows (the active tab's is in `self.tab`).
@@ -2177,6 +2241,9 @@ impl LumenApp {
     /// Ctrl+D or the star: bookmarks the folder on screen, or removes it.
     /// Ctrl+D (the folder on screen) or the menu (the folder clicked).
     fn toggle_bookmark(&mut self, folder: PathBuf) {
+        if places::is_this_pc(&folder) {
+            return;
+        }
         let name = file_name(&folder).unwrap_or_else(|| folder.display().to_string());
         self.notice = Some(if self.bookmarks.toggle(&folder) {
             format!("Added “{name}” to bookmarks")
@@ -2327,6 +2394,10 @@ impl LumenApp {
     fn keep_rule(&mut self) {
         let look = self.shown_look();
         let Some((folder, kept)) = &mut self.tab.look_for else { return };
+        // No folder to keep a rule for.
+        if places::is_this_pc(folder) {
+            return;
+        }
         if look != *kept {
             *kept = look;
             self.folder_views.update(folder, look);
@@ -2357,7 +2428,7 @@ impl LumenApp {
         self.tab.history.settle(self.tab.pending_nav, &from, to.as_deref());
         if to.is_some() {
             self.watcher.watch(&self.tab.view.current);
-            if self.tab.pending_nav != NavKind::Refresh {
+            if self.tab.pending_nav != NavKind::Refresh && !self.on_this_pc() {
                 self.recents.visit(&self.tab.view.current);
                 self.visits.visit(&self.tab.view.current, unix_now());
             }
@@ -2450,6 +2521,24 @@ impl LumenApp {
 
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
         match action {
+            // The This PC view has drives, not entries: the keys move over those.
+            Action::Move(delta) if self.on_this_pc() => self.move_drive(|at, last| match at {
+                Some(at) => at.saturating_add_signed(delta).min(last),
+                None if delta < 0 => last,
+                None => 0,
+            }),
+            Action::First if self.on_this_pc() => self.move_drive(|_, _| 0),
+            Action::Last if self.on_this_pc() => self.move_drive(|_, last| last),
+            Action::Activate if self.on_this_pc() => {
+                if let Some(path) = self.picked_drive() {
+                    self.navigate(ctx, path, None);
+                }
+            }
+            Action::Menu if self.on_this_pc() => {
+                if let Some(path) = self.picked_drive() {
+                    self.open_place_menu(path, ctx.content_rect().center() - egui::vec2(170.0, 120.0));
+                }
+            }
             Action::FocusPathBar => self.path_popup.open(),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
             Action::ZoomIn => self.tab.view_size = self.tab.view_size.bigger(),
@@ -2699,6 +2788,15 @@ impl eframe::App for LumenApp {
             // Room at the bottom for the floating islands, so they never hide a row.
             let room = ui::status_bar::island_room(&ctx);
             ui::status_bar::above_islands(ui, room, |ui| {
+            if self.on_this_pc() {
+                // The drives, read again every few seconds, instead of a folder's list.
+                self.refresh_disks();
+                ctx.request_repaint_after(DISKS_INTERVAL);
+                if let Some(event) = ui::drives_view::show(ui, &self.drives, self.tab.drive.as_deref()) {
+                    self.handle_drives(&ctx, event);
+                }
+                return;
+            }
             let scroll = self.tab.view.scroll.take();
             let cut = self.cut_paths().to_vec();
             let opacity = self.list_opacity(ctx.input(|i| i.time));
@@ -2783,7 +2881,7 @@ impl eframe::App for LumenApp {
             &Status {
                 filter: self.tab.view.filter(),
                 caret: !self.path_popup.is_open() && self.rename.is_none(),
-                item_count: self.tab.view.rows.len(),
+                item_count: if self.on_this_pc() { self.drives.len() } else { self.tab.view.rows.len() },
                 hidden_count: self.tab.view.hidden_count(),
                 show_hidden: self.tab.view.show_hidden,
                 loading: self.tab.lister.is_pending(self.tab.shown_id),
@@ -4734,6 +4832,193 @@ mod tests {
         assert!(menu_item(&app, &Command::OpenPlace(drive)).is_some(), "{:?}", menu_labels(&app));
         let items = app.context_menu.as_ref().expect("menu open").items();
         assert!(items.iter().any(|item| matches!(item.kind, crate::menu::Kind::Run(Command::Shell(_)))), "the shell's items: {:?}", menu_labels(&app));
+    }
+
+    fn drive_row(path: PathBuf, name: &str) -> DriveRow {
+        DriveRow { path, name: name.into(), kind: "Local Disk", fs: "NTFS".into(), free: "1.0 GB".into(), size: "2.0 GB".into(), used: Some(0.5), percent: "50%".into() }
+    }
+
+    /// An app on This PC, listing two drives (folders `sub` and `drive2` of the fixture).
+    fn app_on_this_pc(name: &str) -> (egui::Context, LumenApp, PathBuf) {
+        let (ctx, mut app, dir) = app_in(name);
+        std::fs::create_dir(dir.join("drive2")).unwrap();
+        app.drives = vec![drive_row(dir.join("sub"), "Windows (C:)"), drive_row(dir.join("drive2"), "Unidad de USB (D:)")];
+        app.handle_sidebar(&ctx, SidebarEvent::Open(places::this_pc()));
+        land(&mut app);
+        (ctx, app, dir)
+    }
+
+    #[test]
+    fn this_pc_opens_in_the_tab_is_titled_so_and_back_and_forward_come_to_it() {
+        let (ctx, mut app, dir) = app_in("app-this-pc-history");
+        let pc = places::this_pc();
+        assert!(!app.on_this_pc());
+        app.handle_sidebar(&ctx, SidebarEvent::Open(pc.clone()));
+        assert_eq!(app.tab.lister.last_requested(), Some(pc.clone()), "in the current tab");
+        land(&mut app);
+        assert_eq!((app.tabs.len(), app.tab.view.current.clone()), (1, pc.clone()));
+        assert!(app.on_this_pc());
+        assert_eq!(app.tab_labels(), ["This PC"]);
+        assert_eq!(app.tab.history.back_target(), Some(&dir));
+        assert!(app.tab.view.error.is_none() && app.tab.view.entries.is_empty());
+        assert!(!app.recents.paths().contains(&pc) && app.visits.list().iter().all(|v| v.path != pc), "not a folder to come back to");
+        app.handle_toolbar(&ctx, ToolbarEvent::Go(dir.join("sub")));
+        land(&mut app);
+        assert_eq!(app.tab.view.current, dir.join("sub"));
+        assert!(!app.on_this_pc());
+        app.handle_action(&ctx, Action::Back);
+        assert_eq!(app.tab.lister.last_requested(), Some(pc.clone()));
+        land(&mut app);
+        assert!(app.on_this_pc(), "back shows This PC again");
+        app.handle_action(&ctx, Action::Forward);
+        land(&mut app);
+        assert_eq!(app.tab.view.current, dir.join("sub"));
+        app.handle_action(&ctx, Action::Back);
+        land(&mut app);
+        app.handle_action(&ctx, Action::Back);
+        assert_eq!(app.tab.lister.last_requested(), Some(dir), "and back again, to where it was opened from");
+    }
+
+    #[test]
+    fn this_pc_is_the_first_place_on_windows_only() {
+        let (_, app, _) = app_in("app-this-pc-place");
+        assert_eq!(app.places.first().is_some_and(|p| places::is_this_pc(&p.path)), cfg!(windows));
+    }
+
+    #[test]
+    fn the_drive_rows_come_from_the_disks_the_side_panel_lists() {
+        let (_, mut app, dir) = app_in("app-this-pc-rows");
+        let usage = Usage { total: 2 * 1024 * 1024 * 1024, free: 1024 * 1024 * 1024 };
+        app.disks = (Some(Instant::now()), vec![(Mount { label: "Windows (C:)".into(), path: dir.clone() }, Some(usage))]);
+        app.rebuild_drives();
+        let rows: Vec<(&str, &Path, &str, &str)> = app.drives.iter().map(|r| (r.name.as_str(), r.path.as_path(), r.free.as_str(), r.percent.as_str())).collect();
+        assert_eq!(rows, [("Windows (C:)", dir.as_path(), "1.0 GB", "50%")]);
+    }
+
+    #[test]
+    fn the_arrows_pick_a_drive_and_enter_opens_it() {
+        let (ctx, mut app, dir) = app_on_this_pc("app-this-pc-keys");
+        assert_eq!(app.tab.drive, None);
+        app.handle_action(&ctx, Action::Move(1));
+        assert_eq!(app.tab.drive, Some(dir.join("sub")), "the first one");
+        app.handle_action(&ctx, Action::Move(1));
+        assert_eq!(app.tab.drive, Some(dir.join("drive2")));
+        app.handle_action(&ctx, Action::Move(1));
+        assert_eq!(app.tab.drive, Some(dir.join("drive2")), "stops at the last");
+        app.handle_action(&ctx, Action::Move(-1));
+        assert_eq!(app.tab.drive, Some(dir.join("sub")));
+        app.handle_action(&ctx, Action::Last);
+        assert_eq!(app.tab.drive, Some(dir.join("drive2")));
+        app.handle_action(&ctx, Action::First);
+        assert_eq!(app.tab.drive, Some(dir.join("sub")));
+        app.handle_action(&ctx, Action::Activate);
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub")), "Enter opens the drive");
+        land(&mut app);
+        assert!(!app.on_this_pc());
+    }
+
+    #[test]
+    fn enter_with_no_drive_picked_opens_nothing() {
+        let (ctx, mut app, _) = app_on_this_pc("app-this-pc-enter");
+        let asked = app.tab.lister.latest_id();
+        app.handle_action(&ctx, Action::Activate);
+        assert_eq!(app.tab.lister.latest_id(), asked);
+    }
+
+    #[test]
+    fn the_views_events_select_open_and_ask_for_the_drives_menu() {
+        let (ctx, mut app, dir) = app_on_this_pc("app-this-pc-events");
+        app.handle_drives(&ctx, DrivesEvent::Select(1));
+        assert_eq!(app.tab.drive, Some(dir.join("drive2")));
+        app.handle_drives(&ctx, DrivesEvent::Menu(0));
+        assert_eq!(app.tab.drive, Some(dir.join("sub")), "a right click picks the row too");
+        wait_for_menu(&mut app);
+        assert!(menu_item(&app, &Command::OpenPlace(dir.join("sub"))).is_some(), "the side panel's menu for the drive: {:?}", menu_labels(&app));
+        assert!(menu_item(&app, &Command::Cut).is_none() && menu_item(&app, &Command::Paste).is_none());
+        app.context_menu = None;
+        #[cfg(windows)]
+        {
+            app.shell_menu = None;
+        }
+        app.handle_drives(&ctx, DrivesEvent::Open(1));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("drive2")));
+    }
+
+    #[test]
+    fn a_menu_key_on_a_picked_drive_opens_its_menu() {
+        let (ctx, mut app, dir) = app_on_this_pc("app-this-pc-menu-key");
+        app.handle_action(&ctx, Action::Menu);
+        assert!(app.context_menu.is_none() && !app.menu_asked(), "no drive picked: no menu");
+        app.handle_action(&ctx, Action::Move(1));
+        app.handle_action(&ctx, Action::Menu);
+        wait_for_menu(&mut app);
+        assert!(menu_item(&app, &Command::OpenPlace(dir.join("sub"))).is_some(), "{:?}", menu_labels(&app));
+    }
+
+    /// Whether a menu is open or on its way.
+    impl LumenApp {
+        fn menu_asked(&self) -> bool {
+            #[cfg(windows)]
+            return self.menu_pending.is_some();
+            #[cfg(not(windows))]
+            false
+        }
+    }
+
+    #[test]
+    fn no_folder_action_runs_on_this_pc_because_it_is_no_folder() {
+        let (ctx, mut app, dir) = app_in("app-this-pc-guards");
+        pick(&mut app, &["a.txt"]);
+        app.handle_action(&ctx, Action::Copy);
+        assert!(app.clipboard.is_some());
+        app.handle_sidebar(&ctx, SidebarEvent::Open(places::this_pc()));
+        land(&mut app);
+        let pc = places::this_pc();
+        let before = names_in(&dir);
+        let output_before = ctx.output(|o| o.commands.len());
+        let asked = app.tab.lister.latest_id();
+        app.notice = None;
+
+        app.handle_action(&ctx, Action::Paste);
+        app.run_command(&ctx, Command::Paste);
+        app.run_command(&ctx, Command::PasteInto);
+        app.paste_into(&ctx, pc.clone());
+        app.handle_action(&ctx, Action::NewFolder);
+        app.run_command(&ctx, Command::NewFile(None));
+        app.drop_into(&ctx, vec![dir.join("a.txt")], pc.clone(), Mode::Copy);
+        app.drop_into(&ctx, vec![dir.join("a.txt")], pc.clone(), Mode::Move);
+        assert!(app.batch.is_none() && app.job.is_none() && app.dialog.is_none(), "nothing started");
+        assert!(app.tab.rename_after_load.is_none() && app.rename.is_none());
+        assert!(app.tab.view.error.is_none() && app.notice.is_none(), "not even tried: {:?} {:?}", app.tab.view.error, app.notice);
+        assert_eq!(names_in(&dir), before, "nothing created or moved");
+        assert!(!Path::new("This PC").exists(), "and nothing next to the program");
+
+        app.handle_action(&ctx, Action::Menu);
+        assert!(app.context_menu.is_none() && !app.menu_asked(), "no menu for the empty space");
+        app.run_command(&ctx, Command::OpenTerminal);
+        app.handle_action(&ctx, Action::CopyPath);
+        assert_eq!(ctx.output(|o| o.commands.len()), output_before, "no path copied");
+        app.handle_action(&ctx, Action::ToggleBookmark);
+        app.handle_toolbar(&ctx, ToolbarEvent::ToggleBookmark);
+        assert!(app.bookmarks.paths().is_empty(), "This PC is not bookmarked");
+        app.handle_sidebar(&ctx, SidebarEvent::Menu(pc.clone()));
+        assert!(app.context_menu.is_none() && !app.menu_asked(), "nor given a place menu");
+
+        app.handle_action(&ctx, Action::Up);
+        app.handle_toolbar(&ctx, ToolbarEvent::Up);
+        app.handle_action(&ctx, Action::GoParent);
+        assert_eq!(app.tab.lister.latest_id(), asked, "there is nothing above it");
+        assert_eq!(app.tab.view.current, pc);
+    }
+
+    #[test]
+    fn refresh_on_this_pc_reads_the_drives_again_instead_of_a_folder() {
+        let (ctx, mut app, _) = app_on_this_pc("app-this-pc-refresh");
+        app.disks.0 = Some(Instant::now());
+        let asked = app.tab.lister.latest_id();
+        app.run_command(&ctx, Command::Refresh);
+        assert_eq!(app.disks.0, None, "read again on the next frame");
+        assert_eq!(app.tab.lister.latest_id(), asked, "no folder listed");
     }
 
     #[test]

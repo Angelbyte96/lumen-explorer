@@ -67,6 +67,9 @@ pub struct Crumb {
 /// The crumbs for `path`. Inside the home folder they start at it, named after
 /// it, like File Pilot; elsewhere they start at the root ("/").
 pub fn crumbs(path: &Path, home: Option<&Path>) -> Vec<Crumb> {
+    if crate::places::is_this_pc(path) {
+        return vec![Crumb { label: crate::places::THIS_PC.into(), path: path.to_path_buf() }];
+    }
     let named = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
     let (base, label) = match home {
         Some(home) if path.starts_with(home) && named(home).is_some() => {
@@ -90,6 +93,11 @@ pub fn crumbs(path: &Path, home: Option<&Path>) -> Vec<Crumb> {
     crumbs
 }
 
+/// Whether the Up button has a folder to go to from `path`.
+fn can_go_up(path: &Path) -> bool {
+    path.parent().is_some() && !crate::places::is_this_pc(path)
+}
+
 pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
     let mut event = None;
     ui.horizontal(|ui| {
@@ -103,7 +111,7 @@ pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
         let buttons = [
             (BACK, nav.can_back, "Back (Alt+Left)", ToolbarEvent::Back),
             (FORWARD, nav.can_forward, "Forward (Alt+Right)", ToolbarEvent::Forward),
-            (UP, nav.current.parent().is_some(), "Up to the parent folder (Alt+Up)", ToolbarEvent::Up),
+            (UP, can_go_up(nav.current), "Up to the parent folder (Alt+Up)", ToolbarEvent::Up),
         ];
         for (glyph, enabled, hint, on_click) in buttons {
             let button = egui::Button::new(egui::RichText::new(glyph).size(16.0)).frame(false);
@@ -254,6 +262,16 @@ mod tests {
 
     fn c(label: &str, path: &str) -> (String, PathBuf) {
         (label.into(), PathBuf::from(path))
+    }
+
+    #[test]
+    fn this_pc_is_one_crumb_with_no_parent_to_go_up_to() {
+        let pc = crate::places::this_pc();
+        assert_eq!(labels("This PC", Some("/home/u")), [c("This PC", "This PC")]);
+        assert_eq!(crumbs(&pc, None).len(), 1);
+        assert!(!can_go_up(&pc));
+        assert!(can_go_up(Path::new("/home/u")));
+        assert!(!can_go_up(Path::new("/")), "the root has none");
     }
 
     #[test]
