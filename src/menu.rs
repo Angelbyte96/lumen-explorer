@@ -34,6 +34,8 @@ pub enum Command {
     Rename,
     Trash,
     DeleteForever,
+    /// The Recycle Bin view: put the picked entries back where they were.
+    Restore,
     /// Bookmark the selected folder, or remove its bookmark.
     ToggleBookmark,
     Count,
@@ -124,6 +126,7 @@ impl MenuIcon {
             Command::Rename => Self::Rename,
             Command::Trash => Self::Trash,
             Command::DeleteForever => Self::Delete,
+            Command::Restore => return None,
             Command::ToggleBookmark | Command::ToggleBookmarkOf(_) => Self::Bookmark,
             Command::Count => Self::Size,
             Command::NewFolder => Self::NewFolder,
@@ -510,6 +513,14 @@ pub fn drives_column_menu(column: usize) -> Vec<Item> {
     ]
 }
 
+/// Right click on entries of the Recycle Bin view.
+pub fn recycle_menu() -> Vec<Item> {
+    vec![
+        Item::run("Restore", None, true, Command::Restore),
+        Item::run("Delete Permanently", Some("Delete"), true, Command::DeleteForever),
+    ]
+}
+
 /// The menu for the folder's empty space. `can_paste`: the clipboard holds
 /// something; `templates`: the files New ▸ offers copies of.
 pub fn background_menu(can_paste: bool, sort: Sort, templates: &[std::path::PathBuf]) -> Vec<Item> {
@@ -860,6 +871,17 @@ pub(crate) mod tests {
         assert!(!enabled(&size, "Shift Column Right"), "Size is last");
         let moved = column_menu(5, &shown, &[0, 1, 2, 3, 5, 4]);
         assert!(enabled(&moved, "Shift Column Right"), "follows the order");
+    }
+
+    #[test]
+    fn the_recycle_bin_menu_restores_or_deletes_for_good_and_nothing_else() {
+        assert_eq!(
+            lines(&recycle_menu()),
+            [
+                ("Restore", None, Some(&Command::Restore), true, None),
+                ("Delete Permanently", Some("Delete"), Some(&Command::DeleteForever), true, None),
+            ]
+        );
     }
 
     #[test]

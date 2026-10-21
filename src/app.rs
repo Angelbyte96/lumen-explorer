@@ -21,7 +21,9 @@ use crate::places::{self, Bookmarks, Mount, Place, Recents, Usage, Visits};
 use crate::fs::ops::Renamed;
 use crate::fs::preview::Previewer;
 use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
+use crate::recycle_bin::{self, Recycled};
 use crate::ui::drives_view::{self, DriveRow, DriveSort, DrivesEvent};
+use crate::ui::recycle_view::{self, Picks, RecycleEvent, RecycleSort};
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::ui::tabs::TabEvent;
 use crate::ui::toolbar::{Nav, ToolbarEvent};
@@ -955,13 +957,15 @@ enum Dialog {
     Replace(RenameEdit),
     /// Pasting onto an existing name.
     Paste { source: PathBuf, target: PathBuf, mode: Mode },
+    /// The Recycle Bin view's Delete: the picked entries, gone for good.
+    Purge { items: Vec<Recycled>, subject: ui::confirm::Subject },
 }
 
 impl Dialog {
     fn title(&self) -> &'static str {
         match self {
             Self::Trash { .. } => "Move to Trash",
-            Self::Delete { .. } => "Delete Permanently",
+            Self::Delete { .. } | Self::Purge { .. } => "Delete Permanently",
             Self::Replace(_) | Self::Paste { .. } => "Replace",
         }
     }
@@ -969,14 +973,14 @@ impl Dialog {
     /// What a trash or delete removes, shown under the message.
     fn subject(&self) -> Option<&ui::confirm::Subject> {
         match self {
-            Self::Trash { subject, .. } | Self::Delete { subject, .. } => Some(subject),
+            Self::Trash { subject, .. } | Self::Delete { subject, .. } | Self::Purge { subject, .. } => Some(subject),
             Self::Replace(_) | Self::Paste { .. } => None,
         }
     }
 
     /// It cannot be undone.
     fn danger(&self) -> bool {
-        matches!(self, Self::Delete { .. })
+        matches!(self, Self::Delete { .. } | Self::Purge { .. })
     }
 
     fn message(&self) -> String {
@@ -987,6 +991,10 @@ impl Dialog {
             },
             Self::Delete { paths, .. } => match paths.as_slice() {
                 [one] => format!("Permanently delete “{}”? This cannot be undone.", file_name(one).unwrap_or_default()),
+                many => format!("Permanently delete {} items? This cannot be undone.", many.len()),
+            },
+            Self::Purge { items, .. } => match items.as_slice() {
+                [one] => format!("Permanently delete “{}”? This cannot be undone.", one.name),
                 many => format!("Permanently delete {} items? This cannot be undone.", many.len()),
             },
             Self::Replace(edit) => format!(
@@ -1003,7 +1011,7 @@ impl Dialog {
     fn yes_label(&self) -> &'static str {
         match self {
             Self::Trash { .. } => "Move to Trash",
-            Self::Delete { .. } => "Delete",
+            Self::Delete { .. } | Self::Purge { .. } => "Delete",
             Self::Replace(_) | Self::Paste { .. } => "Replace",
         }
     }
@@ -1012,7 +1020,7 @@ impl Dialog {
     fn hint(&self) -> &'static str {
         match self {
             Self::Paste { .. } => "Enter to replace · Esc to skip",
-            Self::Delete { .. } => "Enter to delete · Esc to cancel",
+            Self::Delete { .. } | Self::Purge { .. } => "Enter to delete · Esc to cancel",
             Self::Trash { .. } | Self::Replace(_) => "Enter to confirm · Esc to cancel",
         }
     }
@@ -1021,7 +1029,7 @@ impl Dialog {
     fn no_label(&self) -> &'static str {
         match self {
             Self::Paste { .. } => "Skip",
-            Self::Trash { .. } | Self::Delete { .. } | Self::Replace(_) => "Cancel",
+            Self::Trash { .. } | Self::Delete { .. } | Self::Purge { .. } | Self::Replace(_) => "Cancel",
         }
     }
 }
@@ -1103,6 +1111,8 @@ pub struct Tab {
     error_after_load: Option<String>,
     /// The drive selected in the This PC view.
     drive: Option<PathBuf>,
+    /// The entries picked in the Recycle Bin view.
+    recycle: Picks,
 }
 
 impl Tab {
@@ -1127,6 +1137,7 @@ impl Tab {
             rename_after_load: None,
             error_after_load: None,
             drive: None,
+            recycle: Picks::default(),
         }
     }
 }
@@ -1204,6 +1215,18 @@ pub struct LumenApp {
     drive_sort: Option<DriveSort>,
     /// The This PC view's column widths (not saved).
     drive_columns: drives_view::Widths,
+    /// The Recycle Bin view's entries of every drive, ordered as `recycle_sort` says.
+    recycled: Vec<Recycled>,
+    recycle_sort: Option<RecycleSort>,
+    /// The Recycle Bin view's column widths (not saved).
+    recycle_columns: recycle_view::Widths,
+    /// The bins are to be read again as soon as they are shown.
+    recycle_stale: bool,
+    /// Whether the view was on screen last frame: showing it again reads the bins.
+    recycle_shown: bool,
+    recycle_reader: recycle_bin::Reader,
+    /// A row to bring into view after a key moved the cursor.
+    recycle_scroll: Option<usize>,
     sidebar_open: bool,
     /// The view and order of a folder with no saved rule.
     default_look: Look,
@@ -1301,6 +1324,13 @@ impl LumenApp {
             drives: Vec::new(),
             drive_sort: None,
             drive_columns: drives_view::DEFAULT_WIDTHS,
+            recycled: Vec::new(),
+            recycle_sort: Some(RecycleSort::NEWEST),
+            recycle_columns: recycle_view::DEFAULT_WIDTHS,
+            recycle_stale: false,
+            recycle_shown: false,
+            recycle_reader: recycle_bin::Reader::default(),
+            recycle_scroll: None,
             sidebar_open: true,
             default_look: Look::default(),
             folder_views: FolderViews::default(),
@@ -1330,7 +1360,7 @@ impl LumenApp {
                 .map_or_else(|| home.join(".config"), PathBuf::from);
             let user_dirs = std::fs::read_to_string(config_home.join("user-dirs.dirs")).ok();
             let trash_place = cfg!(unix).then_some(trash.as_path());
-            app.places = places::with_this_pc(places::places(&home, user_dirs.as_deref(), trash_place), cfg!(windows));
+            app.places = places::with_recycle_bin(places::with_this_pc(places::places(&home, user_dirs.as_deref(), trash_place), cfg!(windows)), cfg!(windows));
             #[cfg(not(windows))]
             {
                 let folders = app.places.iter().map(|p| (p.path.clone(), p.icon.to_owned())).collect();
@@ -1482,6 +1512,139 @@ impl LumenApp {
         drives_view::sort(&mut self.drives, self.drive_sort);
     }
 
+    /// Whether the tab shows the Recycle Bin, whose location is no folder either.
+    fn on_recycle_bin(&self) -> bool {
+        places::is_recycle_bin(&self.tab.view.current)
+    }
+
+    /// Whether the tab shows a marker (This PC, the Recycle Bin), where no folder action applies.
+    fn on_marker(&self) -> bool {
+        places::is_marker(&self.tab.view.current)
+    }
+
+    /// Each frame: reads the bins when the view is shown (again) or was told to
+    /// refresh, on a thread of its own, and takes in what a read found.
+    fn poll_recycle(&mut self, ctx: &egui::Context) {
+        let shown = self.on_recycle_bin();
+        // Shown again: anything may have been recycled or restored meanwhile.
+        if shown && !self.recycle_shown {
+            self.recycle_stale = true;
+        }
+        self.recycle_shown = shown;
+        if let Some(mut rows) = self.recycle_reader.poll() {
+            recycle_view::sort(&mut rows, self.recycle_sort);
+            self.recycled = rows;
+            self.tab.recycle.keep(&self.recycled);
+        }
+        if shown && self.recycle_stale && !self.recycle_reader.is_running() {
+            self.recycle_stale = false;
+            // The drives as they are now, though the side panel may be closed.
+            self.refresh_disks();
+            let roots: Vec<PathBuf> = self.disks.1.iter().map(|(mount, _)| mount.path.clone()).collect();
+            let ctx = ctx.clone();
+            self.recycle_reader.start(move || ctx.request_repaint(), move || recycle_bin::read_all(&roots, recycle_bin::current_sid().as_deref()));
+        }
+    }
+
+    /// The Recycle Bin view's click, right click or header click.
+    fn handle_recycle(&mut self, ctx: &egui::Context, event: RecycleEvent) {
+        // Where the right click was; mid-window if the pointer is gone.
+        let pointer = |ctx: &egui::Context| ctx.input(|i| i.pointer.interact_pos()).unwrap_or_else(|| ctx.content_rect().center());
+        match event {
+            RecycleEvent::Select(row) => self.tab.recycle.select(&self.recycled, row),
+            RecycleEvent::Toggle(row) => self.tab.recycle.toggle(&self.recycled, row),
+            RecycleEvent::Extend(row) => self.tab.recycle.extend(&self.recycled, row),
+            RecycleEvent::Menu(row) => {
+                // A row among the picks keeps them; any other becomes the pick.
+                if self.recycled.get(row).is_some_and(|item| !self.tab.recycle.is_picked(item)) {
+                    self.tab.recycle.select(&self.recycled, row);
+                }
+                self.open_recycle_menu(pointer(ctx));
+            }
+            RecycleEvent::Sort(column) => {
+                self.recycle_sort = Some(RecycleSort::clicked(self.recycle_sort, column));
+                recycle_view::sort(&mut self.recycled, self.recycle_sort);
+            }
+            RecycleEvent::HeaderMenu(column) => {
+                // The same two fits as This PC: its columns are fixed too.
+                self.context_menu = Some(ContextMenu::new(crate::menu::drives_column_menu(column), pointer(ctx)));
+                self.context_on_entry = false;
+            }
+            RecycleEvent::Resized(widths) => self.recycle_columns = widths,
+        }
+    }
+
+    /// The menu for the picked entries, if any are picked.
+    fn open_recycle_menu(&mut self, pos: egui::Pos2) {
+        if self.tab.recycle.count() > 0 {
+            self.context_menu = Some(ContextMenu::new(crate::menu::recycle_menu(), pos));
+            self.context_on_entry = false;
+        }
+    }
+
+    /// An arrow, Home or End in the Recycle Bin view: moves the cursor, and the view follows it.
+    fn move_recycle(&mut self, to: impl FnOnce(&mut Picks, &[Recycled])) {
+        to(&mut self.tab.recycle, &self.recycled);
+        self.recycle_scroll = self.tab.recycle.cursor_row(&self.recycled);
+    }
+
+    /// The picked entries, copied out of the view.
+    fn picked_recycled(&self) -> Vec<Recycled> {
+        self.tab.recycle.of(&self.recycled).into_iter().cloned().collect()
+    }
+
+    /// The picked entries' total size, for the status bar; a folder with no size in its record is uncounted.
+    fn picked_recycled_size(&self) -> PickedSize {
+        let mut size = PickedSize::default();
+        for item in self.tab.recycle.of(&self.recycled) {
+            if item.is_dir && item.size == 0 {
+                size.uncounted += 1;
+            } else {
+                size.bytes += item.size;
+            }
+        }
+        size
+    }
+
+    /// Restore: the picked entries go back where they were.
+    fn restore_picked(&mut self) {
+        let items = self.picked_recycled();
+        if items.is_empty() {
+            return;
+        }
+        let done = recycle_bin::restore_all(&items.iter().collect::<Vec<_>>());
+        self.tab.view.error = done.error;
+        if done.count > 0 {
+            self.notice = Some(recycle_bin::restored_notice(done.count));
+            // Folders may have come back.
+            self.path_popup.mark_stale();
+        }
+        self.forget_recycled(&items);
+    }
+
+    /// Delete in the Recycle Bin view: asks, then deletes the picked entries for good.
+    fn ask_purge(&mut self) {
+        let items = self.picked_recycled();
+        if !items.is_empty() {
+            self.dialog = Some(Dialog::Purge { subject: ui::confirm::Subject::recycled(&items), items });
+        }
+    }
+
+    /// The answer was yes: `items` are deleted for good.
+    fn purge_recycled(&mut self, items: &[Recycled]) {
+        let done = recycle_bin::purge_all(&items.iter().collect::<Vec<_>>());
+        self.tab.view.error = done.error;
+        self.forget_recycled(items);
+    }
+
+    /// `items` were restored or deleted: those no longer in the bin leave the
+    /// view at once, and the bins are read again to be sure.
+    fn forget_recycled(&mut self, items: &[Recycled]) {
+        self.recycled.retain(|row| !items.iter().any(|item| item.data == row.data) || std::fs::symlink_metadata(&row.data).is_ok());
+        self.tab.recycle.keep(&self.recycled);
+        self.recycle_stale = true;
+    }
+
     /// The drive picked in the This PC view, if it is still listed.
     fn picked_drive(&self) -> Option<PathBuf> {
         self.tab.drive.clone().filter(|path| self.drives.iter().any(|drive| drive.path == *path))
@@ -1537,7 +1700,7 @@ impl LumenApp {
     /// Right click on a side panel item: the menu for that path, not for the
     /// list's selection.
     fn open_place_menu(&mut self, path: PathBuf, pos: egui::Pos2) {
-        if places::is_this_pc(&path) {
+        if places::is_marker(&path) {
             return;
         }
         let bookmarked = self.bookmarks.contains(&path);
@@ -1650,7 +1813,7 @@ impl LumenApp {
 
     /// Right click on the list's empty space: the menu for the folder itself.
     fn open_background_menu(&mut self, pos: egui::Pos2) {
-        if self.on_this_pc() {
+        if self.on_marker() {
             return;
         }
         #[cfg(not(windows))]
@@ -1773,6 +1936,9 @@ impl LumenApp {
                 }
             }
             Command::Rename => self.start_rename(),
+            Command::Restore => self.restore_picked(),
+            // In the Recycle Bin both mean the same: delete the picked entries for good.
+            Command::Trash | Command::DeleteForever if self.on_recycle_bin() => self.ask_purge(),
             Command::Trash => self.ask_trash(),
             Command::DeleteForever => self.ask_delete_forever(),
             Command::ToggleBookmark => {
@@ -1789,7 +1955,7 @@ impl LumenApp {
                     Some((path, true)) if self.context_on_entry => path,
                     _ => self.tab.view.current.clone(),
                 };
-                if places::is_this_pc(&folder) {
+                if places::is_marker(&folder) {
                     return;
                 }
                 #[cfg(not(windows))]
@@ -1810,6 +1976,8 @@ impl LumenApp {
             Command::Sort(column) => self.tab.view.sort_by(column),
             // This PC lists no folder: the drives are read again instead.
             Command::Refresh if self.on_this_pc() => self.disks.0 = None,
+            // The Recycle Bin lists no folder either: its bins are read again.
+            Command::Refresh if self.on_recycle_bin() => self.recycle_stale = true,
             Command::Refresh => {
                 let keep = self.tab.view.selected_entry().map(|e| e.path.clone());
                 self.reload(ctx, keep);
@@ -1822,6 +1990,21 @@ impl LumenApp {
                 let content = std::array::from_fn(|column| drives_view::fit_width(ctx, &self.drives, column));
                 let shown = ui::file_list::ALL_SHOWN;
                 self.drive_columns = match ui::file_list::visible_width(ctx, &shown) {
+                    Some(room) => ui::file_list::fit_all(&content, &shown, room),
+                    None => content,
+                };
+            }
+            // So has the Recycle Bin: four columns, the list's first four for the rule.
+            Command::FitColumn(column) if self.on_recycle_bin() => {
+                self.recycle_columns[column] = recycle_view::fit_width(ctx, &self.recycled, column);
+            }
+            Command::FitAllColumns if self.on_recycle_bin() => {
+                let content = std::array::from_fn(|column| match column < recycle_view::COLUMNS.len() {
+                    true => recycle_view::fit_width(ctx, &self.recycled, column),
+                    false => self.recycle_columns[column],
+                });
+                let shown = recycle_view::SHOWN;
+                self.recycle_columns = match ui::file_list::visible_width(ctx, &shown) {
                     Some(room) => ui::file_list::fit_all(&content, &shown, room),
                     None => content,
                 };
@@ -1875,7 +2058,7 @@ impl LumenApp {
 
     fn go_parent(&mut self, ctx: &egui::Context) {
         let current = self.tab.view.current.clone();
-        if let Some(parent) = current.parent().filter(|_| !self.on_this_pc()) {
+        if let Some(parent) = current.parent().filter(|_| !self.on_marker()) {
             let select = came_from(&current, parent);
             self.navigate(ctx, parent.to_path_buf(), select);
         }
@@ -1960,7 +2143,7 @@ impl LumenApp {
 
     /// New ▸ Empty File or a template: created here, then renamed in place.
     fn new_file(&mut self, ctx: &egui::Context, template: Option<&Path>) {
-        if self.on_this_pc() {
+        if self.on_marker() {
             return;
         }
         match fs::ops::create_file(&self.tab.view.current, template) {
@@ -1974,7 +2157,7 @@ impl LumenApp {
     }
 
     fn new_folder(&mut self, ctx: &egui::Context) {
-        if self.on_this_pc() {
+        if self.on_marker() {
             return;
         }
         match fs::ops::create_folder(&self.tab.view.current) {
@@ -2036,7 +2219,7 @@ impl LumenApp {
             return;
         }
         // Moved in by hand it would have no record to be restored from.
-        if places::in_recycle_bin(&dest) || self.trash.as_deref().is_some_and(|trash| places::in_trash(&dest, trash)) {
+        if places::is_recycle_bin(&dest) || places::in_recycle_bin(&dest) || self.trash.as_deref().is_some_and(|trash| places::in_trash(&dest, trash)) {
             self.tab.view.error = Some("Nothing can be dropped into the trash".into());
             return;
         }
@@ -2062,7 +2245,7 @@ impl LumenApp {
     /// Pastes the clipboard into `dest`: the folder on screen, or a folder's
     /// own Paste in the Windows menu.
     fn paste_into(&mut self, ctx: &egui::Context, dest: PathBuf) {
-        if places::is_this_pc(&dest) || self.busy() {
+        if places::is_marker(&dest) || self.busy() {
             return;
         }
         let Some(Clip { paths, mode }) = self.clipboard.clone() else {
@@ -2233,7 +2416,7 @@ impl LumenApp {
                     self.rename = Some(edit);
                 }
                 Dialog::Paste { .. } => self.next_paste(ctx),
-                Dialog::Trash { .. } | Dialog::Delete { .. } => {}
+                Dialog::Trash { .. } | Dialog::Delete { .. } | Dialog::Purge { .. } => {}
             }
             return;
         }
@@ -2244,12 +2427,13 @@ impl LumenApp {
             Dialog::Paste { source, target, mode } => {
                 self.start_job(ctx, source, target, mode, true);
             }
+            Dialog::Purge { items, .. } => self.purge_recycled(&items),
         }
     }
 
     /// Titles of every tab, in bar order.
     fn tab_labels(&self) -> Vec<String> {
-        let label = |folder: &PathBuf| if places::is_this_pc(folder) { places::THIS_PC.to_owned() } else { ui::tabs::tab_label(folder) };
+        let label = |folder: &PathBuf| places::marker_label(folder).map_or_else(|| ui::tabs::tab_label(folder), str::to_owned);
         self.tab_folders().iter().map(label).collect()
     }
 
@@ -2319,7 +2503,7 @@ impl LumenApp {
     /// Ctrl+D or the star: bookmarks the folder on screen, or removes it.
     /// Ctrl+D (the folder on screen) or the menu (the folder clicked).
     fn toggle_bookmark(&mut self, folder: PathBuf) {
-        if places::is_this_pc(&folder) {
+        if places::is_marker(&folder) {
             return;
         }
         let name = file_name(&folder).unwrap_or_else(|| folder.display().to_string());
@@ -2473,7 +2657,7 @@ impl LumenApp {
         let look = self.shown_look();
         let Some((folder, kept)) = &mut self.tab.look_for else { return };
         // No folder to keep a rule for.
-        if places::is_this_pc(folder) {
+        if places::is_marker(folder) {
             return;
         }
         if look != *kept {
@@ -2505,8 +2689,10 @@ impl LumenApp {
         }
         self.tab.history.settle(self.tab.pending_nav, &from, to.as_deref());
         if to.is_some() {
+            // Opening the Recycle Bin again, even from itself, reads the bins again.
+            self.recycle_stale |= self.on_recycle_bin();
             self.watcher.watch(&self.tab.view.current);
-            if self.tab.pending_nav != NavKind::Refresh && !self.on_this_pc() {
+            if self.tab.pending_nav != NavKind::Refresh && !self.on_marker() {
                 self.recents.visit(&self.tab.view.current);
                 self.visits.visit(&self.tab.view.current, unix_now());
             }
@@ -2617,6 +2803,16 @@ impl LumenApp {
                     self.open_place_menu(path, ctx.content_rect().center() - egui::vec2(170.0, 120.0));
                 }
             }
+            // The Recycle Bin view has entries of its own: the keys move over those.
+            Action::Move(delta) if self.on_recycle_bin() => self.move_recycle(|picks, rows| picks.step(rows, delta, false)),
+            Action::Extend(delta) if self.on_recycle_bin() => self.move_recycle(|picks, rows| picks.step(rows, delta, true)),
+            Action::First if self.on_recycle_bin() => self.move_recycle(|picks, rows| picks.edge(rows, false)),
+            Action::Last if self.on_recycle_bin() => self.move_recycle(|picks, rows| picks.edge(rows, true)),
+            Action::SelectAll if self.on_recycle_bin() => self.tab.recycle.select_all(&self.recycled),
+            // Delete there is the only delete: the entries are in the trash already.
+            Action::Trash | Action::DeleteForever if self.on_recycle_bin() => self.ask_purge(),
+            Action::Menu if self.on_recycle_bin() => self.open_recycle_menu(ctx.content_rect().center() - egui::vec2(170.0, 120.0)),
+            Action::Cancel if self.on_recycle_bin() && self.tab.recycle.count() > 0 => self.tab.recycle.clear(),
             Action::FocusPathBar => self.path_popup.open(),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
             Action::ZoomIn => self.tab.view_size = self.tab.view_size.bigger(),
@@ -2752,6 +2948,7 @@ impl eframe::App for LumenApp {
         self.read_kids(&ctx);
 
         self.refresh_if_changed(&ctx);
+        self.poll_recycle(&ctx);
         self.poll_count();
         #[cfg(windows)]
         self.read_pending_menu(&ctx);
@@ -2875,6 +3072,20 @@ impl eframe::App for LumenApp {
                 }
                 return;
             }
+            if self.on_recycle_bin() {
+                // The bins' entries, read when shown, instead of a folder's list.
+                let look = recycle_view::Look {
+                    picks: &self.tab.recycle,
+                    sort: self.recycle_sort,
+                    widths: &self.recycle_columns,
+                    loading: self.recycle_stale || self.recycle_reader.is_running(),
+                    scroll_to: self.recycle_scroll.take(),
+                };
+                if let Some(event) = recycle_view::show(ui, &self.recycled, &look) {
+                    self.handle_recycle(&ctx, event);
+                }
+                return;
+            }
             let scroll = self.tab.view.scroll.take();
             let cut = self.cut_paths().to_vec();
             let opacity = self.list_opacity(ctx.input(|i| i.time));
@@ -2959,7 +3170,13 @@ impl eframe::App for LumenApp {
             &Status {
                 filter: self.tab.view.filter(),
                 caret: !self.path_popup.is_open() && self.rename.is_none(),
-                item_count: if self.on_this_pc() { self.drives.len() } else { self.tab.view.rows.len() },
+                item_count: if self.on_this_pc() {
+                    self.drives.len()
+                } else if self.on_recycle_bin() {
+                    self.recycled.len()
+                } else {
+                    self.tab.view.rows.len()
+                },
                 hidden_count: self.tab.view.hidden_count(),
                 show_hidden: self.tab.view.show_hidden,
                 loading: self.tab.lister.is_pending(self.tab.shown_id),
@@ -2975,8 +3192,8 @@ impl eframe::App for LumenApp {
                 notice: self.notice.as_deref(),
                 folder_count: self.tab.view.folder_count(),
                 selected: self.tab.view.selected,
-                picked: self.tab.view.picked_count(),
-                picked_size: self.tab.view.picked_size(),
+                picked: if self.on_recycle_bin() { self.tab.recycle.count() } else { self.tab.view.picked_count() },
+                picked_size: if self.on_recycle_bin() { self.picked_recycled_size() } else { self.tab.view.picked_size() },
                 counting: self.counting.as_ref().map(|c| {
                     let name = file_name(&c.path).unwrap_or_default();
                     ui::status_bar::counting_text(&name, &c.progress)
@@ -5226,6 +5443,378 @@ mod tests {
         let room = ui::file_list::visible_width(&ctx, &ui::file_list::ALL_SHOWN).unwrap();
         let total: f32 = app.drive_columns.iter().sum();
         assert!((total - room).abs() < 0.5, "inside the width: {total} in {room}");
+    }
+
+    // ---- The Recycle Bin view ----
+
+    /// The folder every bin of the fixture holds its SID's entries in: the real
+    /// SID where there is one (Windows), else any (all are scanned).
+    fn bin_sid() -> String {
+        recycle_bin::current_sid().unwrap_or_else(|| "S-1-5-21-1-2-3-1001".into())
+    }
+
+    /// Fake drive `root` has `original` in its Recycle Bin, deleted at `unix`.
+    fn recycled_on(root: &Path, id: &str, original: &Path, folder: bool, unix: u64) {
+        let bin = root.join("$Recycle.Bin").join(bin_sid());
+        recycle_bin::tests::recycle_at(&bin, id, &original.display().to_string(), 7, folder, unix);
+    }
+
+    /// Reads the bins the way the frames do, until the read is done.
+    fn load_recycle(ctx: &egui::Context, app: &mut LumenApp) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            app.poll_recycle(ctx);
+            if app.recycle_shown && !app.recycle_stale && !app.recycle_reader.is_running() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the bins were not read in time");
+    }
+
+    /// An app on the Recycle Bin, over two fake drives (`C` and `D` of the fixture)
+    /// holding `Work` (a folder, newest), `pic.png` and `Docs/notes.txt` (oldest).
+    fn app_on_recycle_bin(name: &str) -> (egui::Context, LumenApp, PathBuf) {
+        let (ctx, mut app, dir) = app_in(name);
+        let (c, d) = (dir.join("C"), dir.join("D"));
+        recycled_on(&c, "AAA111", &dir.join("Docs").join("notes.txt"), false, 1_600_000_000);
+        recycled_on(&c, "BBB222", &dir.join("Work"), true, 1_700_000_000);
+        recycled_on(&d, "CCC333", &dir.join("pic.png"), false, 1_650_000_000);
+        let mount = |label: &str, path: &Path| (Mount { label: label.into(), path: path.to_path_buf() }, None);
+        app.disks = (Some(Instant::now()), vec![mount("Windows (C:)", &c), mount("Data (D:)", &d)]);
+        app.handle_sidebar(&ctx, SidebarEvent::Open(places::recycle_bin()));
+        land(&mut app);
+        load_recycle(&ctx, &mut app);
+        (ctx, app, dir)
+    }
+
+    fn recycled_names(app: &LumenApp) -> Vec<&str> {
+        app.recycled.iter().map(|item| item.name.as_str()).collect()
+    }
+
+    #[test]
+    fn the_recycle_bin_opens_in_the_tab_is_titled_so_and_back_and_forward_come_to_it() {
+        let (ctx, mut app, dir) = app_in("app-bin-history");
+        let bin = places::recycle_bin();
+        assert!(!app.on_recycle_bin());
+        app.handle_sidebar(&ctx, SidebarEvent::Open(bin.clone()));
+        assert_eq!(app.tab.lister.last_requested(), Some(bin.clone()), "in the current tab");
+        land(&mut app);
+        assert_eq!((app.tabs.len(), app.tab.view.current.clone()), (1, bin.clone()));
+        assert!(app.on_recycle_bin() && !app.on_this_pc());
+        assert_eq!(app.tab_labels(), ["Recycle Bin"]);
+        assert_eq!(app.tab.history.back_target(), Some(&dir));
+        assert!(app.tab.view.error.is_none() && app.tab.view.entries.is_empty());
+        assert!(!app.recents.paths().contains(&bin) && app.visits.list().iter().all(|v| v.path != bin), "not a folder to come back to");
+        app.handle_toolbar(&ctx, ToolbarEvent::Go(dir.join("sub")));
+        land(&mut app);
+        assert!(!app.on_recycle_bin());
+        app.handle_action(&ctx, Action::Back);
+        assert_eq!(app.tab.lister.last_requested(), Some(bin.clone()));
+        land(&mut app);
+        assert!(app.on_recycle_bin(), "back shows the Recycle Bin again");
+        app.handle_action(&ctx, Action::Forward);
+        land(&mut app);
+        assert_eq!(app.tab.view.current, dir.join("sub"));
+    }
+
+    #[test]
+    fn the_recycle_bin_is_the_last_place_on_windows_only() {
+        let (_, app, _) = app_in("app-bin-place");
+        assert_eq!(app.places.last().is_some_and(|p| places::is_recycle_bin(&p.path)), cfg!(windows));
+        assert!(app.places.iter().filter(|p| places::is_recycle_bin(&p.path)).count() <= 1);
+    }
+
+    #[test]
+    fn no_folder_action_runs_in_the_recycle_bin_because_it_is_no_folder() {
+        let (ctx, mut app, dir) = app_in("app-bin-guards");
+        pick(&mut app, &["a.txt"]);
+        app.handle_action(&ctx, Action::Copy);
+        assert!(app.clipboard.is_some());
+        app.handle_sidebar(&ctx, SidebarEvent::Open(places::recycle_bin()));
+        land(&mut app);
+        let bin = places::recycle_bin();
+        let before = names_in(&dir);
+        let output_before = ctx.output(|o| o.commands.len());
+        let asked = app.tab.lister.latest_id();
+        app.notice = None;
+
+        app.handle_action(&ctx, Action::Paste);
+        app.run_command(&ctx, Command::Paste);
+        app.run_command(&ctx, Command::PasteInto);
+        app.paste_into(&ctx, bin.clone());
+        app.handle_action(&ctx, Action::NewFolder);
+        app.run_command(&ctx, Command::NewFile(None));
+        assert!(app.batch.is_none() && app.job.is_none() && app.dialog.is_none(), "nothing started");
+        assert!(app.tab.rename_after_load.is_none() && app.rename.is_none());
+        assert!(app.tab.view.error.is_none() && app.notice.is_none(), "not even tried: {:?} {:?}", app.tab.view.error, app.notice);
+        assert_eq!(names_in(&dir), before, "nothing created");
+        assert!(!Path::new("Recycle Bin").exists(), "and nothing next to the program");
+
+        // A drop is refused with the trash's own message.
+        for mode in [Mode::Copy, Mode::Move] {
+            app.tab.view.error = None;
+            app.drop_into(&ctx, vec![dir.join("a.txt")], bin.clone(), mode);
+            assert_eq!(app.tab.view.error.as_deref(), Some("Nothing can be dropped into the trash"));
+        }
+        assert!(app.batch.is_none() && app.job.is_none() && app.dialog.is_none());
+        assert_eq!(names_in(&dir), before, "nothing moved");
+        app.tab.view.error = None;
+
+        app.handle_action(&ctx, Action::Menu);
+        assert!(app.context_menu.is_none() && !app.menu_asked(), "no menu for the empty space");
+        app.run_command(&ctx, Command::OpenTerminal);
+        app.handle_action(&ctx, Action::CopyPath);
+        assert_eq!(ctx.output(|o| o.commands.len()), output_before, "no path copied");
+        app.handle_action(&ctx, Action::ToggleBookmark);
+        app.handle_toolbar(&ctx, ToolbarEvent::ToggleBookmark);
+        assert!(app.bookmarks.paths().is_empty(), "the Recycle Bin is not bookmarked");
+        app.handle_sidebar(&ctx, SidebarEvent::Menu(bin.clone()));
+        assert!(app.context_menu.is_none() && !app.menu_asked(), "nor given a place menu");
+
+        app.handle_action(&ctx, Action::Up);
+        app.handle_toolbar(&ctx, ToolbarEvent::Up);
+        app.handle_action(&ctx, Action::GoParent);
+        assert_eq!(app.tab.lister.latest_id(), asked, "there is nothing above it");
+        assert_eq!(app.tab.view.current, bin);
+    }
+
+    #[test]
+    fn the_bins_of_every_drive_are_read_when_shown_newest_first_with_where_they_came_from() {
+        let (_, app, dir) = app_on_recycle_bin("app-bin-read");
+        assert_eq!(recycled_names(&app), ["Work", "pic.png", "notes.txt"], "the latest deleted first");
+        let places: Vec<&str> = app.recycled.iter().map(|item| item.location.as_str()).collect();
+        let (here, docs) = (dir.display().to_string(), dir.join("Docs").display().to_string());
+        assert_eq!(places, [here.as_str(), here.as_str(), docs.as_str()]);
+        assert_eq!(app.recycled.iter().map(|i| i.is_dir).collect::<Vec<_>>(), [true, false, false]);
+    }
+
+    #[test]
+    fn the_bins_are_read_again_on_refresh_and_when_the_view_is_shown_again_but_not_every_frame() {
+        let (ctx, mut app, dir) = app_on_recycle_bin("app-bin-reread");
+        recycled_on(&dir.join("D"), "DDD444", &dir.join("late.txt"), false, 1_800_000_000);
+        app.poll_recycle(&ctx);
+        app.poll_recycle(&ctx);
+        assert_eq!(app.recycled.len(), 3, "a frame on its own does not read");
+        app.run_command(&ctx, Command::Refresh);
+        load_recycle(&ctx, &mut app);
+        assert_eq!(recycled_names(&app), ["late.txt", "Work", "pic.png", "notes.txt"], "Refresh reads them again");
+        assert!(!app.tab.lister.is_pending(app.tab.shown_id), "and lists no folder");
+
+        recycled_on(&dir.join("C"), "EEE555", &dir.join("later.txt"), false, 1_900_000_000);
+        app.handle_toolbar(&ctx, ToolbarEvent::Go(dir.join("sub")));
+        land(&mut app);
+        app.poll_recycle(&ctx);
+        app.handle_action(&ctx, Action::Back);
+        land(&mut app);
+        load_recycle(&ctx, &mut app);
+        assert_eq!(app.recycled.first().map(|i| i.name.as_str()), Some("later.txt"), "shown again: read again");
+    }
+
+    #[test]
+    fn clicking_the_recycle_bin_place_while_in_it_reads_the_bins_again() {
+        let (ctx, mut app, dir) = app_on_recycle_bin("app-bin-reclick");
+        recycled_on(&dir.join("C"), "FFF666", &dir.join("again.txt"), false, 1_800_000_000);
+        app.handle_sidebar(&ctx, SidebarEvent::Open(places::recycle_bin()));
+        land(&mut app);
+        load_recycle(&ctx, &mut app);
+        assert_eq!(app.recycled.first().map(|i| i.name.as_str()), Some("again.txt"));
+    }
+
+    #[test]
+    fn a_bin_with_nothing_in_it_reads_as_empty_and_is_not_read_over_and_over() {
+        let (ctx, mut app, dir) = app_in("app-bin-empty");
+        app.disks = (Some(Instant::now()), vec![(Mount { label: "Windows (C:)".into(), path: dir.join("C") }, None)]);
+        app.handle_sidebar(&ctx, SidebarEvent::Open(places::recycle_bin()));
+        land(&mut app);
+        load_recycle(&ctx, &mut app);
+        assert!(app.recycled.is_empty());
+        app.poll_recycle(&ctx);
+        assert!(!app.recycle_reader.is_running() && !app.recycle_stale);
+    }
+
+    #[test]
+    fn clicks_arrows_and_select_all_pick_entries_and_escape_drops_the_picks() {
+        let (ctx, mut app, _) = app_on_recycle_bin("app-bin-picks");
+        let picked = |app: &LumenApp| app.tab.recycle.of(&app.recycled).iter().map(|i| i.name.clone()).collect::<Vec<_>>();
+        app.handle_recycle(&ctx, RecycleEvent::Select(1));
+        assert_eq!(picked(&app), ["pic.png"]);
+        app.handle_recycle(&ctx, RecycleEvent::Toggle(2));
+        assert_eq!(picked(&app), ["pic.png", "notes.txt"]);
+        app.handle_recycle(&ctx, RecycleEvent::Extend(0));
+        assert_eq!(picked(&app), ["Work", "pic.png", "notes.txt"], "from where Ctrl+click left the anchor to the click");
+        app.handle_recycle(&ctx, RecycleEvent::Select(0));
+        app.handle_action(&ctx, Action::Move(1));
+        assert_eq!((picked(&app), app.recycle_scroll), (["pic.png".to_owned()].to_vec(), Some(1)), "the arrow moves and brings the row into view");
+        app.handle_action(&ctx, Action::Extend(1));
+        assert_eq!(picked(&app), ["pic.png", "notes.txt"]);
+        app.handle_action(&ctx, Action::First);
+        assert_eq!(picked(&app), ["Work"]);
+        app.handle_action(&ctx, Action::Last);
+        assert_eq!(picked(&app), ["notes.txt"]);
+        app.handle_action(&ctx, Action::SelectAll);
+        assert_eq!(picked(&app).len(), 3);
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(picked(&app).is_empty(), "Escape drops them");
+    }
+
+    #[test]
+    fn enter_opens_nothing_in_the_recycle_bin() {
+        let (ctx, mut app, _) = app_on_recycle_bin("app-bin-enter");
+        app.handle_recycle(&ctx, RecycleEvent::Select(0));
+        let asked = app.tab.lister.latest_id();
+        app.handle_action(&ctx, Action::Activate);
+        assert_eq!(app.tab.lister.latest_id(), asked);
+        assert!(app.tab.view.error.is_none() && app.dialog.is_none() && app.rename.is_none());
+    }
+
+    #[test]
+    fn restore_puts_the_picked_entries_back_and_says_how_many() {
+        let (ctx, mut app, dir) = app_on_recycle_bin("app-bin-restore");
+        app.handle_recycle(&ctx, RecycleEvent::Select(0));
+        app.handle_recycle(&ctx, RecycleEvent::Toggle(2));
+        app.run_command(&ctx, Command::Restore);
+        assert!(dir.join("Work").join("inner.txt").exists(), "the folder with what it held");
+        assert_eq!(std::fs::read_to_string(dir.join("Docs").join("notes.txt")).unwrap(), "content", "its folder made again");
+        assert_eq!(app.notice.as_deref(), Some("2 items restored"));
+        assert_eq!(app.tab.view.error, None);
+        assert_eq!(recycled_names(&app), ["pic.png"], "gone from the view at once");
+        assert_eq!(app.tab.recycle.count(), 0);
+        load_recycle(&ctx, &mut app);
+        assert_eq!(recycled_names(&app), ["pic.png"], "and from the bin");
+        assert!(!dir.join("pic.png").exists(), "what was not picked stays");
+        app.handle_recycle(&ctx, RecycleEvent::Select(0));
+        app.run_command(&ctx, Command::Restore);
+        assert_eq!(app.notice.as_deref(), Some("1 item restored"));
+        assert!(dir.join("pic.png").exists() && app.recycled.is_empty());
+        app.notice = None;
+        app.run_command(&ctx, Command::Restore);
+        assert_eq!(app.notice, None, "nothing picked: nothing said");
+    }
+
+    #[test]
+    fn restoring_onto_a_taken_name_keeps_both_and_a_failure_shows_in_the_red_line() {
+        let (ctx, mut app, dir) = app_on_recycle_bin("app-bin-restore-taken");
+        std::fs::write(dir.join("pic.png"), "newer").unwrap();
+        app.handle_recycle(&ctx, RecycleEvent::Select(1));
+        app.run_command(&ctx, Command::Restore);
+        assert_eq!(std::fs::read_to_string(dir.join("pic.png")).unwrap(), "newer", "never overwritten");
+        assert_eq!(std::fs::read_to_string(dir.join("pic (restored).png")).unwrap(), "content");
+        assert_eq!(app.notice.as_deref(), Some("1 item restored"));
+
+        // Docs is a file now: notes.txt has no folder to go back to.
+        std::fs::write(dir.join("Docs"), "a file").unwrap();
+        app.notice = None;
+        let row = app.recycled.iter().position(|i| i.name == "notes.txt").unwrap();
+        app.handle_recycle(&ctx, RecycleEvent::Select(row));
+        app.run_command(&ctx, Command::Restore);
+        assert!(app.tab.view.error.as_deref().is_some_and(|e| e.starts_with("Cannot restore notes.txt: ")), "{:?}", app.tab.view.error);
+        assert_eq!(app.notice, None, "nothing was restored");
+        assert_eq!(recycled_names(&app).len(), 2, "it stays listed");
+        assert_eq!(app.tab.recycle.count(), 1, "and picked");
+    }
+
+    #[test]
+    fn delete_in_the_recycle_bin_asks_first_and_then_deletes_for_good() {
+        let (ctx, mut app, dir) = app_on_recycle_bin("app-bin-purge");
+        app.handle_action(&ctx, Action::Trash);
+        assert!(app.dialog.is_none(), "nothing picked: nothing to ask");
+        app.handle_recycle(&ctx, RecycleEvent::Select(0));
+        app.handle_action(&ctx, Action::Trash);
+        let dialog = app.dialog.as_ref().expect("Delete asks, as Shift+Delete does elsewhere");
+        assert_eq!(dialog.title(), "Delete Permanently");
+        assert_eq!(dialog.message(), "Permanently delete “Work”? This cannot be undone.");
+        assert!(dialog.danger() && dialog.subject().is_some_and(|s| s.name == "Work"));
+        assert_eq!((dialog.yes_label(), dialog.no_label(), dialog.hint()), ("Delete", "Cancel", "Enter to delete · Esc to cancel"));
+        let bin_files = |app: &LumenApp| app.recycled.iter().map(|i| (i.data.exists(), i.info.exists())).collect::<Vec<_>>();
+        app.answer_dialog(&ctx, Confirm::No);
+        assert_eq!(bin_files(&app), [(true, true); 3], "No: nothing deleted");
+        let work = app.recycled[0].clone();
+
+        app.handle_action(&ctx, Action::DeleteForever);
+        assert!(matches!(app.dialog, Some(Dialog::Purge { .. })), "Shift+Delete asks the same");
+        app.answer_dialog(&ctx, Confirm::Yes);
+        assert!(!work.data.exists() && !work.info.exists(), "the content and the record are gone");
+        assert_eq!(recycled_names(&app), ["pic.png", "notes.txt"]);
+        assert!(!dir.join("Work").exists(), "deleted, not restored");
+        assert_eq!(app.tab.view.error, None);
+
+        app.handle_action(&ctx, Action::SelectAll);
+        app.run_command(&ctx, Command::DeleteForever);
+        assert_eq!(app.dialog.as_ref().map(|d| d.message()), Some("Permanently delete 2 items? This cannot be undone.".to_owned()));
+        app.answer_dialog(&ctx, Confirm::Yes);
+        load_recycle(&ctx, &mut app);
+        assert!(app.recycled.is_empty() && read_bins(&dir).is_empty(), "every bin is empty now");
+    }
+
+    /// What the fixture's two bins hold.
+    fn read_bins(dir: &Path) -> Vec<Recycled> {
+        recycle_bin::read_all(&[dir.join("C"), dir.join("D")], Some(&bin_sid()))
+    }
+
+    #[test]
+    fn a_right_click_picks_its_row_unless_picked_and_offers_restore_and_delete_permanently() {
+        let (ctx, mut app, _) = app_on_recycle_bin("app-bin-menu");
+        app.handle_recycle(&ctx, RecycleEvent::Select(0));
+        app.handle_recycle(&ctx, RecycleEvent::Menu(2));
+        assert_eq!(menu_labels(&app), ["Restore", "Delete Permanently"]);
+        assert_eq!(app.tab.recycle.of(&app.recycled).iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["notes.txt"], "a row outside the picks becomes the pick");
+        assert!(menu_item(&app, &Command::Restore).is_some() && menu_item(&app, &Command::DeleteForever).is_some());
+        app.context_menu = None;
+        app.handle_recycle(&ctx, RecycleEvent::Extend(0));
+        app.handle_recycle(&ctx, RecycleEvent::Menu(1));
+        assert_eq!(app.tab.recycle.count(), 3, "a row among the picks keeps them all");
+        assert!(app.context_menu.is_some());
+    }
+
+    #[test]
+    fn the_menu_key_opens_the_menu_for_the_picks_and_nothing_without_any() {
+        let (ctx, mut app, _) = app_on_recycle_bin("app-bin-menu-key");
+        app.handle_action(&ctx, Action::Menu);
+        assert!(app.context_menu.is_none(), "nothing picked: no menu");
+        app.handle_recycle(&ctx, RecycleEvent::Select(1));
+        app.handle_action(&ctx, Action::Menu);
+        assert_eq!(menu_labels(&app), ["Restore", "Delete Permanently"]);
+    }
+
+    #[test]
+    fn a_header_click_sorts_the_entries_and_again_reverses_them_and_the_borders_resize() {
+        let (ctx, mut app, _) = app_on_recycle_bin("app-bin-sort");
+        app.handle_recycle(&ctx, RecycleEvent::Sort(recycle_view::RecycleColumn::Name));
+        assert_eq!(recycled_names(&app), ["notes.txt", "pic.png", "Work"]);
+        app.handle_recycle(&ctx, RecycleEvent::Sort(recycle_view::RecycleColumn::Name));
+        assert_eq!(recycled_names(&app), ["Work", "pic.png", "notes.txt"]);
+        app.handle_recycle(&ctx, RecycleEvent::Sort(recycle_view::RecycleColumn::Deleted));
+        assert_eq!(recycled_names(&app), ["notes.txt", "pic.png", "Work"], "another column starts ascending");
+        app.handle_recycle(&ctx, RecycleEvent::Select(0));
+        app.handle_recycle(&ctx, RecycleEvent::Sort(recycle_view::RecycleColumn::Name));
+        assert_eq!(app.tab.recycle.of(&app.recycled).iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["notes.txt"], "the pick follows its entry");
+        app.handle_recycle(&ctx, RecycleEvent::Resized([1.0, 2.0, 3.0, 4.0, 0.0, 0.0]));
+        assert_eq!(app.recycle_columns, [1.0, 2.0, 3.0, 4.0, 0.0, 0.0]);
+        assert_eq!((app.columns, app.drive_columns), (ui::file_list::DEFAULT_WIDTHS, drives_view::DEFAULT_WIDTHS), "the other views keep theirs");
+        // A fresh read keeps the order the headers gave.
+        app.run_command(&ctx, Command::Refresh);
+        load_recycle(&ctx, &mut app);
+        assert_eq!(recycled_names(&app), ["notes.txt", "pic.png", "Work"]);
+    }
+
+    #[test]
+    fn the_header_menu_and_the_fit_commands_in_the_recycle_bin_fit_its_columns_only() {
+        let (ctx, mut app, _) = app_on_recycle_bin("app-bin-fit");
+        ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        app.handle_recycle(&ctx, RecycleEvent::HeaderMenu(1));
+        assert_eq!(menu_labels(&app), ["Size Column To Fit", "Size All Columns To Fit"]);
+        assert!(!app.context_on_entry);
+        assert_eq!(app.tab.recycle.count(), 0, "no entry is picked by it");
+        app.recycle_columns = [100.0; 6];
+        app.columns = [100.0; 6];
+        app.drive_columns = [100.0; 6];
+        app.run_command(&ctx, Command::FitColumn(1));
+        assert_eq!(app.recycle_columns[1], recycle_view::fit_width(&ctx, &app.recycled, 1));
+        app.run_command(&ctx, Command::FitAllColumns);
+        let fits: Vec<f32> = (0..4).map(|column| recycle_view::fit_width(&ctx, &app.recycled, column)).collect();
+        assert_eq!(app.recycle_columns[..4], fits[..], "every column of the view, to its content");
+        assert_eq!((app.columns, app.drive_columns), ([100.0; 6], [100.0; 6]), "the lists and the drives keep theirs");
     }
 
     #[test]

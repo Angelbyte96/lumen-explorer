@@ -586,16 +586,16 @@ pub fn button_id(name: &str) -> egui::Id {
 /// The text the box starts with: the folder and a trailing separator, so its
 /// contents are listed at once.
 pub fn initial_text(current: &Path) -> String {
-    if crate::places::is_this_pc(current) {
-        return crate::places::THIS_PC.into();
+    if let Some(label) = crate::places::marker_label(current) {
+        return label.into();
     }
     let text = current.display().to_string();
     if text.ends_with(std::path::MAIN_SEPARATOR) { text } else { text + std::path::MAIN_SEPARATOR_STR }
 }
 
-/// The folder above `folder`; the folder itself at the top, and for This PC.
+/// The folder above `folder`; the folder itself at the top, and for a marker.
 fn parent_of(folder: &Path) -> PathBuf {
-    if crate::places::is_this_pc(folder) {
+    if crate::places::is_marker(folder) {
         return folder.to_path_buf();
     }
     folder.parent().unwrap_or(folder).to_path_buf()
@@ -606,7 +606,7 @@ fn is_bare_word(text: &str) -> bool {
     let text = text.trim();
     // "C:" names a drive on Windows; "." and ".." go to a folder, as before.
     let drive = cfg!(windows) && matches!(text.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic());
-    !text.is_empty() && !text.contains(['/', '\\']) && !text.starts_with('~') && !drive && !matches!(text, "." | "..") && !crate::places::names_this_pc(text)
+    !text.is_empty() && !text.contains(['/', '\\']) && !text.starts_with('~') && !drive && !matches!(text, "." | "..") && crate::places::named_marker(text).is_none()
 }
 
 /// Splits the text after its last separator: the folder part (kept with its
@@ -997,6 +997,15 @@ mod tests {
         assert_eq!(parent_of(&pc), pc, "up from it stays on it");
         assert_eq!(parent_of(Path::new("/home/u")), Path::new("/home"));
         assert_eq!(parent_of(Path::new("/")), Path::new("/"));
+    }
+
+    #[test]
+    fn the_box_names_the_recycle_bin_the_same_way() {
+        let bin = crate::places::recycle_bin();
+        assert_eq!(initial_text(&bin), "Recycle Bin");
+        assert_eq!(is_bare_word("Recycle Bin"), cfg!(not(windows)));
+        assert!(is_bare_word("Recycle"));
+        assert_eq!(parent_of(&bin), bin, "up from it stays on it");
     }
 
     #[test]

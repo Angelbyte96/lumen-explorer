@@ -18,6 +18,7 @@ mod input;
 mod menu;
 mod shell_menu;
 mod places;
+mod recycle_bin;
 mod ui;
 #[cfg(target_os = "linux")]
 mod portal;

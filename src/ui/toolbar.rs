@@ -67,8 +67,8 @@ pub struct Crumb {
 /// The crumbs for `path`. Inside the home folder they start at it, named after
 /// it, like File Pilot; elsewhere they start at the root ("/").
 pub fn crumbs(path: &Path, home: Option<&Path>) -> Vec<Crumb> {
-    if crate::places::is_this_pc(path) {
-        return vec![Crumb { label: crate::places::THIS_PC.into(), path: path.to_path_buf() }];
+    if let Some(label) = crate::places::marker_label(path) {
+        return vec![Crumb { label: label.into(), path: path.to_path_buf() }];
     }
     let named = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
     let (base, label) = match home {
@@ -95,7 +95,7 @@ pub fn crumbs(path: &Path, home: Option<&Path>) -> Vec<Crumb> {
 
 /// Whether the Up button has a folder to go to from `path`.
 fn can_go_up(path: &Path) -> bool {
-    path.parent().is_some() && !crate::places::is_this_pc(path)
+    path.parent().is_some() && !crate::places::is_marker(path)
 }
 
 pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
@@ -272,6 +272,14 @@ mod tests {
         assert!(!can_go_up(&pc));
         assert!(can_go_up(Path::new("/home/u")));
         assert!(!can_go_up(Path::new("/")), "the root has none");
+    }
+
+    #[test]
+    fn the_recycle_bin_is_one_crumb_with_no_parent_to_go_up_to() {
+        let bin = crate::places::recycle_bin();
+        assert_eq!(labels("Recycle Bin", Some("/home/u")), [c("Recycle Bin", "Recycle Bin")]);
+        assert_eq!(crumbs(&bin, None).len(), 1);
+        assert!(!can_go_up(&bin));
     }
 
     #[test]
