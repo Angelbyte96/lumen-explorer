@@ -286,6 +286,51 @@ pub fn names_this_pc(text: &str) -> bool {
     cfg!(windows) && text.trim().eq_ignore_ascii_case(THIS_PC)
 }
 
+/// What a tab shows for the Recycle Bin (Windows): the entries of every
+/// drive's `$Recycle.Bin`. A marker like `THIS_PC`, not a folder on disk.
+pub const RECYCLE_BIN: &str = "Recycle Bin";
+
+pub fn recycle_bin() -> PathBuf {
+    PathBuf::from(RECYCLE_BIN)
+}
+
+/// Whether `path` is the Recycle Bin marker.
+pub fn is_recycle_bin(path: &Path) -> bool {
+    path == Path::new(RECYCLE_BIN)
+}
+
+/// Whether `path` is a marker (This PC, the Recycle Bin) and not a folder:
+/// nothing may be made, pasted, dropped, watched or listed there.
+pub fn is_marker(path: &Path) -> bool {
+    is_this_pc(path) || is_recycle_bin(path)
+}
+
+/// The title a marker shows in a tab, the path bar and the crumbs.
+pub fn marker_label(path: &Path) -> Option<&'static str> {
+    if is_this_pc(path) {
+        Some(THIS_PC)
+    } else {
+        is_recycle_bin(path).then_some(RECYCLE_BIN)
+    }
+}
+
+/// The marker typed text names, on Windows (where they exist), whatever its case.
+pub fn named_marker(text: &str) -> Option<PathBuf> {
+    if names_this_pc(text) {
+        Some(this_pc())
+    } else {
+        (cfg!(windows) && text.trim().eq_ignore_ascii_case(RECYCLE_BIN)).then(recycle_bin)
+    }
+}
+
+/// `places` with the Recycle Bin last when `windows`: after the user folders.
+pub fn with_recycle_bin(mut places: Vec<Place>, windows: bool) -> Vec<Place> {
+    if windows {
+        places.push(Place { label: RECYCLE_BIN.into(), path: recycle_bin(), trash: false, icon: "user-trash" });
+    }
+    places
+}
+
 /// `places` with This PC first when `windows`: the only system that has it.
 pub fn with_this_pc(mut places: Vec<Place>, windows: bool) -> Vec<Place> {
     if windows {
@@ -917,6 +962,55 @@ mod this_pc_tests {
         for text in ["This", "This PC\\", "C:\\"] {
             assert!(!names_this_pc(text), "{text:?}");
         }
+    }
+
+    #[test]
+    fn only_the_marker_is_the_recycle_bin_and_it_is_not_this_pc() {
+        assert!(is_recycle_bin(&recycle_bin()));
+        assert!(!is_recycle_bin(Path::new("/recycle bin")));
+        assert!(!is_recycle_bin(Path::new("C:\\$Recycle.Bin")), "that is a folder on disk");
+        assert!(!is_recycle_bin(&this_pc()) && !is_this_pc(&recycle_bin()));
+        assert!(!is_recycle_bin(Path::new("")));
+    }
+
+    #[test]
+    fn both_markers_are_no_folder_and_nothing_else_is() {
+        assert!(is_marker(&this_pc()) && is_marker(&recycle_bin()));
+        for path in ["C:\\", "/", "", "Recycle", "C:\\$Recycle.Bin", "Recycle Bin\\x"] {
+            assert!(!is_marker(Path::new(path)), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn a_marker_is_titled_by_its_name() {
+        assert_eq!(marker_label(&this_pc()), Some("This PC"));
+        assert_eq!(marker_label(&recycle_bin()), Some("Recycle Bin"));
+        assert_eq!(marker_label(Path::new("/home")), None);
+    }
+
+    #[test]
+    fn typed_text_names_a_marker_on_windows_only_whatever_its_case() {
+        for (text, marker) in [("This PC", this_pc()), ("  this pc ", this_pc()), ("Recycle Bin", recycle_bin()), ("recycle BIN", recycle_bin()), (" RECYCLE BIN  ", recycle_bin())] {
+            assert_eq!(named_marker(text), cfg!(windows).then_some(marker), "{text:?}");
+        }
+        for text in ["Recycle", "Recycle Bin\\", "C:\\$Recycle.Bin", "", "Bin"] {
+            assert_eq!(named_marker(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn on_windows_the_recycle_bin_is_the_last_place_with_a_trash_icon_but_not_the_trash() {
+        let listed = with_recycle_bin(with_this_pc(vec![place("u"), place("Downloads")], true), true);
+        let labels: Vec<&str> = listed.iter().map(|p| p.label.as_str()).collect();
+        assert_eq!(labels, ["This PC", "u", "Downloads", "Recycle Bin"]);
+        let bin = listed.last().unwrap();
+        assert_eq!((bin.icon, bin.trash), ("user-trash", false));
+        assert!(is_recycle_bin(&bin.path));
+    }
+
+    #[test]
+    fn elsewhere_the_places_get_no_recycle_bin() {
+        assert_eq!(with_recycle_bin(vec![place("u")], false), [place("u")]);
     }
 
     #[test]

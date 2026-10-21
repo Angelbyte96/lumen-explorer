@@ -102,22 +102,24 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
         let at = rows.len();
         let title = section(ui, "Places", true, |ui| {
             for place in sidebar.places {
-                let this_pc = places::is_this_pc(&place.path);
-                let icon = match (place.trash, this_pc) {
-                    (true, _) => ItemIcon::Glyph(TRASH),
-                    (_, true) => ItemIcon::Glyph(COMPUTER),
-                    _ => ItemIcon::Folder,
+                let marker = places::is_marker(&place.path);
+                let icon = if place.trash || places::is_recycle_bin(&place.path) {
+                    ItemIcon::Glyph(TRASH)
+                } else if marker {
+                    ItemIcon::Glyph(COMPUTER)
+                } else {
+                    ItemIcon::Folder
                 };
                 // Not the trash: a drop there would skip its bookkeeping (what it held, and where from).
-                // Nor This PC, which is no folder to drop into.
-                let folder = (!place.trash && !this_pc).then_some(&place.path);
+                // Nor This PC or the Recycle Bin, which are no folders to drop into.
+                let folder = (!place.trash && !marker).then_some(&place.path);
                 let response = drop_target(ui, folder, |ui| item(ui, icon, place.icon, &place.label, &place.path.display().to_string(), &place.path, sidebar.current, sidebar.icons));
                 rows.push(Row { rect: response.rect, kind: RowKind::Item(place.path.clone()) });
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(place.path.clone()));
                 }
-                // This PC has no menu: it is not a path the shell can be asked about.
-                if response.secondary_clicked() && !this_pc {
+                // A marker has no menu: it is not a path the shell can be asked about.
+                if response.secondary_clicked() && !marker {
                     event = Some(SidebarEvent::Menu(place.path.clone()));
                 }
             }
@@ -905,6 +907,27 @@ mod tests {
         let glyphs = |text: &str| shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == text)).count();
         assert_eq!((glyphs(COMPUTER), glyphs("This PC")), (1, 1), "a computer, not a folder");
         assert_eq!(crate::ui::testing::click(&ctx, at, side(&panel)), Some(SidebarEvent::Open(places::this_pc())));
+        let secondary = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: NONE };
+        run(&ctx, vec![egui::Event::PointerMoved(at)], side(&panel));
+        run(&ctx, vec![secondary(true)], side(&panel));
+        assert_eq!(run(&ctx, vec![secondary(false)], side(&panel)).0, None, "no menu for what is no path");
+        let shapes = lift(&ctx, &[panel.dir.join("f.txt")], at, NONE, side(&panel));
+        assert!(lit(&ctx, &shapes).is_empty(), "nothing is dropped into it");
+        let_go(&ctx, at, NONE, side(&panel));
+        assert_eq!(taken(&ctx), None);
+        let _ = std::fs::remove_dir_all(&panel.dir);
+    }
+
+    #[test]
+    fn the_recycle_bin_opens_with_a_click_shows_a_bin_and_has_no_menu_and_takes_no_drops() {
+        let bin = Place { label: "Recycle Bin".into(), path: places::recycle_bin(), trash: false, icon: "user-trash" };
+        let panel = Drop { places: [bin, panel_place("Trash"), panel_place("Gone")], ..drop_panel("side-recycle-bin") };
+        let ctx = egui::Context::default();
+        let at = row_of(&ctx, &panel, "Recycle Bin");
+        let (_, shapes) = run(&ctx, vec![], side(&panel));
+        let glyphs = |text: &str| shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == text)).count();
+        assert_eq!((glyphs(TRASH), glyphs("Recycle Bin")), (1, 1), "a bin, not a folder");
+        assert_eq!(crate::ui::testing::click(&ctx, at, side(&panel)), Some(SidebarEvent::Open(places::recycle_bin())));
         let secondary = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: NONE };
         run(&ctx, vec![egui::Event::PointerMoved(at)], side(&panel));
         run(&ctx, vec![secondary(true)], side(&panel));

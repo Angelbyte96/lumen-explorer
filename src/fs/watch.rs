@@ -63,8 +63,8 @@ impl Watcher {
         if self.watched.as_deref() == Some(path) {
             return;
         }
-        // This PC is no folder, and as a relative path it could name one.
-        if crate::places::is_this_pc(path) {
+        // A marker (This PC, the Recycle Bin) is no folder, and as a relative path it could name one.
+        if crate::places::is_marker(path) {
             self.forget();
             // Nothing to refresh there: news from the folder left behind are dropped.
             self.changed.store(false, Ordering::SeqCst);
@@ -185,6 +185,19 @@ mod tests {
         // News from the folder that came in just before leaving it.
         w.changed.store(true, Ordering::SeqCst);
         w.watch(&crate::places::this_pc());
+        assert_eq!(w.watched, None);
+        std::fs::write(dir.join("x"), "").unwrap();
+        std::thread::sleep(SETTLE);
+        assert!(!w.take_changed(), "the folder left is no longer watched");
+    }
+
+    #[test]
+    fn the_recycle_bin_is_watched_as_nothing_too() {
+        let dir = fresh_fixture("watch-recycle-bin");
+        let (mut w, _woke) = watcher();
+        w.watch(&dir);
+        w.changed.store(true, Ordering::SeqCst);
+        w.watch(&crate::places::recycle_bin());
         assert_eq!(w.watched, None);
         std::fs::write(dir.join("x"), "").unwrap();
         std::thread::sleep(SETTLE);

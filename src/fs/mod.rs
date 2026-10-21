@@ -34,8 +34,8 @@ pub fn resolve_input_path(input: &str, current: &Path, home: Option<&Path>) -> P
     if input.is_empty() {
         return current.to_path_buf();
     }
-    if crate::places::names_this_pc(input) {
-        return crate::places::this_pc();
+    if let Some(marker) = crate::places::named_marker(input) {
+        return marker;
     }
     let rooted = if cfg!(windows) { with_drive_root(input) } else { None };
     let input = rooted.as_deref().unwrap_or(input);
@@ -48,7 +48,7 @@ pub fn resolve_input_path(input: &str, current: &Path, home: Option<&Path>) -> P
     };
     let absolute = if expanded.is_absolute() {
         expanded
-    } else if crate::places::is_this_pc(current) {
+    } else if crate::places::is_marker(current) {
         // No folder to be relative to.
         return current.to_path_buf();
     } else {
@@ -142,6 +142,15 @@ mod tests {
         assert_eq!(resolve_input_path("~/docs", &pc, Some(Path::new(home))), Path::new(home).join("docs"));
         let typed = resolve_input_path("this pc", Path::new("/usr"), None);
         assert_eq!(typed, if cfg!(windows) { pc } else { PathBuf::from("/usr/this pc") }, "its name goes back to it, on Windows");
+    }
+
+    #[test]
+    fn the_recycle_bin_is_no_folder_either_and_its_name_goes_to_it_on_windows() {
+        let bin = crate::places::recycle_bin();
+        assert_eq!(resolve_input_path("docs", &bin, None), bin, "stays where it is");
+        assert_eq!(resolve_input_path("../docs", &bin, None), bin);
+        let typed = resolve_input_path("recycle bin", Path::new("/usr"), None);
+        assert_eq!(typed, if cfg!(windows) { bin } else { PathBuf::from("/usr/recycle bin") });
     }
 
     #[test]
