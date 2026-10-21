@@ -150,6 +150,7 @@ mod tests {
         let dir = fresh_fixture("watch-recycle-bin");
         let (mut w, _woke) = watcher();
         w.watch(&dir);
+        w.changed.store(true, Ordering::SeqCst);
         w.watch(&crate::places::recycle_bin());
         assert_eq!(w.watched, None);
         std::fs::write(dir.join("x"), "").unwrap();
