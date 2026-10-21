@@ -1861,6 +1861,7 @@ mod tests {
         let mut output = ctx.run_ui(
             egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
             |root| {
+                crate::ui::shift_tab_from_list(root.ctx());
                 egui::Panel::top("before").show(root, |ui| before = ui.button("before").id);
                 egui::CentralPanel::default().show(root, |ui| {
                     rect = ui.max_rect();
@@ -1889,6 +1890,19 @@ mod tests {
         between_buttons(&ctx, &view, vec![back]);
         between_buttons(&ctx, &view, vec![]);
         assert_eq!(ctx.memory(|m| m.focused()), Some(focus_id()), "Shift+Tab comes back to the list");
+    }
+
+    #[test]
+    fn shift_tab_with_nothing_focused_starts_from_the_list() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a", "b", "c", "d"]);
+        let (before, _, _, _) = between_buttons(&ctx, &view, vec![]);
+        between_buttons(&ctx, &view, vec![]);
+        assert_eq!(ctx.memory(|m| m.focused()), None, "a click on a row leaves nothing focused");
+        let back = egui::Event::Key { key: egui::Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT };
+        between_buttons(&ctx, &view, vec![back]);
+        between_buttons(&ctx, &view, vec![]);
+        assert_eq!(ctx.memory(|m| m.focused()), Some(before), "the first Shift+Tab goes to what comes before the list");
     }
 
     #[test]
