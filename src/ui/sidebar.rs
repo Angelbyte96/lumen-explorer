@@ -1,5 +1,5 @@
 //! The left panel: Bookmarks, Places, Storage and Recents, each collapsible.
-//! A click on an item opens it in the list.
+//! A click on an item opens it in the list; a right click asks for its menu.
 
 use std::path::{Path, PathBuf};
 
@@ -27,7 +27,8 @@ pub struct Sidebar<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarEvent {
     Open(PathBuf),
-    RemoveBookmark(PathBuf),
+    /// Right click on a row: the menu for that path.
+    Menu(PathBuf),
 }
 
 /// "120.0 GB free of 465.0 GB".
@@ -91,12 +92,9 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(path.clone()));
                 }
-                response.context_menu(|ui| {
-                    if ui.button("Remove bookmark").clicked() {
-                        event = Some(SidebarEvent::RemoveBookmark(path.clone()));
-                        ui.close();
-                    }
-                });
+                if response.secondary_clicked() {
+                    event = Some(SidebarEvent::Menu(path.clone()));
+                }
             }
         });
         rows.insert(at, title);
@@ -111,6 +109,9 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(place.path.clone()));
                 }
+                if response.secondary_clicked() {
+                    event = Some(SidebarEvent::Menu(place.path.clone()));
+                }
             }
         });
         rows.insert(at, title);
@@ -123,6 +124,9 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
                 rows.push(Row { rect: response.rect, kind: RowKind::Item(mount.path.clone()) });
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(mount.path.clone()));
+                }
+                if response.secondary_clicked() {
+                    event = Some(SidebarEvent::Menu(mount.path.clone()));
                 }
                 if let Some(usage) = usage {
                     let bar = egui::ProgressBar::new(used_fraction(usage)).desired_height(4.0);
@@ -138,6 +142,9 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
                 rows.push(Row { rect: response.rect, kind: RowKind::Item(path.clone()) });
                 if response.clicked() {
                     event = Some(SidebarEvent::Open(path.clone()));
+                }
+                if response.secondary_clicked() {
+                    event = Some(SidebarEvent::Menu(path.clone()));
                 }
             }
         });
@@ -841,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn without_a_drag_a_click_still_opens_the_item_and_a_right_click_its_menu_and_nothing_lights() {
+    fn without_a_drag_a_click_still_opens_the_item_and_nothing_lights() {
         let panel = drop_panel("dnd-side-plain");
         let ctx = egui::Context::default();
         let home = row_of(&ctx, &panel, "Home");
@@ -852,12 +859,32 @@ mod tests {
         assert!(lit(&ctx, &shapes).is_empty(), "hovering a row lights nothing");
         assert_eq!(taken(&ctx), None, "and nothing was dropped");
 
-        let bookmark = row_of(&ctx, &panel, "bm");
-        let secondary = |pressed| egui::Event::PointerButton { pos: bookmark, button: egui::PointerButton::Secondary, pressed, modifiers: NONE };
-        run(&ctx, vec![egui::Event::PointerMoved(bookmark), secondary(true), secondary(false)], side(&panel));
-        let (_, menu) = run(&ctx, vec![], side(&panel));
-        let drawn = menu.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "Remove bookmark"));
-        assert!(drawn, "the bookmark's menu opens");
+        let _ = std::fs::remove_dir_all(&panel.dir);
+    }
+
+    #[test]
+    fn a_right_click_on_a_bookmark_a_place_a_disk_or_a_recent_asks_for_the_menu_of_that_path() {
+        let panel = drop_panel("side-menu");
+        let ctx = egui::Context::default();
+        // Recents starts closed.
+        let header = row_of(&ctx, &panel, "Recents");
+        crate::ui::testing::click(&ctx, header, side(&panel));
+        for _ in 0..20 {
+            run(&ctx, vec![], side(&panel));
+        }
+        let right_click = |at| {
+            let secondary = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: NONE };
+            run(&ctx, vec![egui::Event::PointerMoved(at)], side(&panel));
+            run(&ctx, vec![secondary(true)], side(&panel));
+            run(&ctx, vec![secondary(false)], side(&panel)).0
+        };
+        // The trash and a place whose folder is gone are rows too.
+        for (text, sub) in [("bm", "bm"), ("Home", "home"), ("Trash", "trash"), ("Gone", "gone"), ("Disk", "disk"), ("Unmounted", "unmounted"), ("rec", "rec")] {
+            let at = row_of(&ctx, &panel, text);
+            assert_eq!(right_click(at), Some(SidebarEvent::Menu(panel.dir.join(sub))), "{text}");
+        }
+        let (_, shapes) = run(&ctx, vec![], side(&panel));
+        assert!(!shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "Remove bookmark")), "egui's own bookmark menu is gone");
         let _ = std::fs::remove_dir_all(&panel.dir);
     }
 

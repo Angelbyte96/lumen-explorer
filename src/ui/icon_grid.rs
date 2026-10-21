@@ -159,9 +159,9 @@ pub fn show(
 }
 
 /// Where a band over the cells started, from the content's top left, so a
-/// scroll does not move it.
+/// scroll does not move it, and whether Shift was held then (it adds).
 #[derive(Clone, Copy)]
-struct CellBand(egui::Vec2);
+struct CellBand(egui::Vec2, bool);
 
 fn cell_band_id() -> egui::Id {
     egui::Id::new("lumen_cell_band")
@@ -172,11 +172,12 @@ fn cell_band_id() -> egui::Id {
 /// `shape` it touches (`place` gives each one's rect on screen). Held near an
 /// edge it scrolls: down/up in Icons, sideways in List (`sideways`).
 pub(crate) fn cell_band(ui: &egui::Ui, content: Rect, may_start: bool, shape: &GridShape, place: impl Fn(usize) -> Rect, sideways: bool) -> Option<ListEvent> {
-    let (pressed, origin, down, dragging, pointer, dt) = ui.input(|i| {
-        (i.pointer.primary_pressed(), i.pointer.press_origin(), i.pointer.primary_down(), i.pointer.is_decidedly_dragging(), i.pointer.latest_pos(), i.stable_dt)
+    let (pressed, origin, down, dragging, pointer, dt, shift) = ui.input(|i| {
+        let p = &i.pointer;
+        (p.primary_pressed(), p.press_origin(), p.primary_down(), p.is_decidedly_dragging(), p.latest_pos(), i.stable_dt, i.modifiers.shift)
     });
     if pressed {
-        let start = origin.filter(|_| may_start).map(|p| CellBand(p - content.min));
+        let start = origin.filter(|_| may_start).map(|p| CellBand(p - content.min, shift));
         ui.ctx().data_mut(|d| match start {
             Some(start) => {
                 d.insert_temp(cell_band_id(), start);
@@ -202,7 +203,7 @@ pub(crate) fn cell_band(ui: &egui::Ui, content: Rect, may_start: bool, shape: &G
     ui.painter().rect(band, 0.0, selection.bg_fill.gamma_multiply(0.3), selection.stroke, egui::StrokeKind::Inside);
     let cells: Vec<usize> = (0..shape.total).filter(|&i| place(i).intersects(band)).collect();
     let cursor = cells.iter().copied().find(|&i| place(i).contains(pointer)).or(cells.last().copied());
-    Some(ListEvent::Cells { cells, cursor })
+    Some(ListEvent::Cells { cells, cursor, add: start.1 })
 }
 
 /// A cell's highlight: picked or the cursor, else hovered. The cursor's
