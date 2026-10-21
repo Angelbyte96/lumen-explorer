@@ -340,8 +340,9 @@ pub fn with_this_pc(mut places: Vec<Place>, windows: bool) -> Vec<Place> {
 }
 
 /// What a drive is, as File Explorer names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DriveKind {
+    #[default]
     Local,
     Removable,
     Network,
@@ -374,48 +375,126 @@ impl DriveKind {
 }
 
 /// A drive's kind and file system ("NTFS", "FAT32"; empty when unknown).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DriveInfo {
     pub kind: DriveKind,
     pub fs: String,
 }
 
-/// The kind and file system of the drive at `root` ("C:\"). Quick for the
-/// local and removable drives the side panel lists, which are the ones asked.
-#[cfg(windows)]
-pub fn drive_info(root: &Path) -> DriveInfo {
-    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumeInformationW};
-    use windows_sys::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode};
-    let wide = wide(&root.to_string_lossy());
-    let mut fs = [0u16; 64];
-    let mut previous = 0;
-    // SAFETY: `previous` is a valid out-parameter; restored below.
-    unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, &mut previous) };
-    // SAFETY: `wide` is a NUL-terminated UTF-16 string that outlives the call.
-    let kind = DriveKind::from_win(unsafe { GetDriveTypeW(wide.as_ptr()) });
-    // SAFETY: `fs` is a writable buffer of the length passed; the other
-    // out-parameters are optional and null.
-    let ok = unsafe {
-        GetVolumeInformationW(
-            wide.as_ptr(),
-            std::ptr::null_mut(),
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            fs.as_mut_ptr(),
-            fs.len() as u32,
-        )
-    };
-    // SAFETY: restores the mode read above; the old value is not needed.
-    unsafe { SetThreadErrorMode(previous, std::ptr::null_mut()) };
-    let len = fs.iter().position(|&c| c == 0).unwrap_or(fs.len());
-    DriveInfo { kind, fs: if ok == 0 { String::new() } else { String::from_utf16_lossy(&fs[..len]) } }
+/// What reading a drive's volume gave: its name (maybe empty) and file system.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Volume {
+    pub name: String,
+    pub fs: String,
 }
 
-#[cfg(not(windows))]
-pub fn drive_info(_root: &Path) -> DriveInfo {
-    DriveInfo { kind: DriveKind::Local, fs: String::new() }
+/// A drive as one read of the disks found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Disk {
+    pub mount: Mount,
+    /// `None` when the space could not be read (or was not asked).
+    pub usage: Option<Usage>,
+    pub info: DriveInfo,
+}
+
+/// "Ubuntu (\\wsl$) (Z:)" for a drive mapped to `\\wsl$\Ubuntu`, as File
+/// Explorer says it: the volume's name when it has one ("Data (Z:)"), else
+/// the share and its server from the remote name, else "Network Drive (Z:)".
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn network_label(letter: char, volume: &str, remote: Option<&str>) -> String {
+    let volume = volume.trim();
+    if !volume.is_empty() {
+        return format!("{volume} ({letter}:)");
+    }
+    match remote.and_then(share_parts) {
+        Some((share, server)) => format!("{share} ({server}) ({letter}:)"),
+        None => format!("Network Drive ({letter}:)"),
+    }
+}
+
+/// ("Ubuntu", "\\\\wsl$") from "\\\\wsl$\\Ubuntu": the share, and where it is. `None`
+/// for a name that is no UNC path or names only a server.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn share_parts(remote: &str) -> Option<(&str, String)> {
+    let segments: Vec<&str> = remote.trim().strip_prefix("\\\\")?.split('\\').filter(|s| !s.is_empty()).collect();
+    let (share, parents) = segments.split_last()?;
+    (!parents.is_empty()).then(|| (*share, format!("\\\\{}", parents.join("\\"))))
+}
+
+/// The disk to list for the drive `letter`, or `None` when it has nothing to
+/// open (an empty card reader, a CD drive). `volume` is what reading the
+/// volume gave; `remote` (the share a network drive is mapped to) and `usage`
+/// are only asked when they are needed, so a down share is not asked twice.
+/// A network drive whose volume cannot be read is still listed, without numbers.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn disk_of(
+    letter: char,
+    kind: DriveKind,
+    volume: Option<Volume>,
+    remote: impl FnOnce() -> Option<String>,
+    usage: impl FnOnce() -> Option<Usage>,
+) -> Option<Disk> {
+    let path = PathBuf::from(format!("{letter}:\\"));
+    let label = match kind {
+        DriveKind::Local | DriveKind::Removable => {
+            // No volume in an empty card reader slot: nothing to open there.
+            let volume = volume.as_ref()?;
+            drive_label(letter, &volume.name, kind == DriveKind::Removable)
+        }
+        DriveKind::Network => {
+            let named = volume.as_ref().is_some_and(|volume| !volume.name.trim().is_empty());
+            let share = if named { None } else { remote() };
+            network_label(letter, volume.as_ref().map_or("", |volume| &volume.name), share.as_deref())
+        }
+        DriveKind::Cd | DriveKind::Other => return None,
+    };
+    let usage = if volume.is_some() { usage() } else { None };
+    let fs = volume.map(|volume| volume.fs).unwrap_or_default();
+    Some(Disk { mount: Mount { label, path }, usage, info: DriveInfo { kind, fs } })
+}
+
+/// Reads the disks on a thread of its own, one read at a time: a share that
+/// is down or slow would stall the window if the UI thread asked it.
+#[derive(Default)]
+pub struct DiskReader {
+    receiver: Option<std::sync::mpsc::Receiver<Vec<Disk>>>,
+}
+
+impl DiskReader {
+    /// Whether a read is under way.
+    pub fn is_running(&self) -> bool {
+        self.receiver.is_some()
+    }
+
+    /// Runs `read` on a thread and calls `wake` when it is done. Does nothing
+    /// while a read is under way.
+    pub fn start(&mut self, wake: impl FnOnce() + Send + 'static, read: impl FnOnce() -> Vec<Disk> + Send + 'static) {
+        if self.receiver.is_some() {
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.receiver = Some(receiver);
+        std::thread::spawn(move || {
+            let _ = sender.send(read());
+            wake();
+        });
+    }
+
+    /// What the read found, once, when it is done.
+    pub fn poll(&mut self) -> Option<Vec<Disk>> {
+        match self.receiver.as_ref()?.try_recv() {
+            Ok(disks) => {
+                self.receiver = None;
+                Some(disks)
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            // The thread is gone without an answer: read again next time.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.receiver = None;
+                None
+            }
+        }
+    }
 }
 
 /// A mounted disk.
@@ -514,55 +593,98 @@ pub fn disks() -> Vec<Mount> {
     parse_mounts(&std::fs::read_to_string("/proc/self/mounts").unwrap_or_default())
 }
 
-/// Local and removable drives with a volume in them. Network and CD drives are
-/// left out: reading them can stall, and the panel is refreshed every few seconds.
+/// Local and removable drives with a volume in them, for the quick jump's
+/// crawl. Network drives are `network_mounts`: reading them can stall.
 #[cfg(windows)]
 pub fn disks() -> Vec<Mount> {
-    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
+    windows_disks(false, false).into_iter().map(|disk| disk.mount).collect()
+}
+
+/// Every disk for the side panel and This PC, with its space and file system.
+/// On Windows the network drives are in it, and a share that is down makes this
+/// wait: call it on a thread of its own (`DiskReader`), never on the UI's.
+#[cfg(windows)]
+pub fn read_disks() -> Vec<Disk> {
+    windows_disks(true, true)
+}
+
+#[cfg(not(windows))]
+pub fn read_disks() -> Vec<Disk> {
+    disks()
+        .into_iter()
+        .map(|mount| {
+            let usage = usage(&mount.path);
+            Disk { mount, usage, info: DriveInfo::default() }
+        })
+        .collect()
+}
+
+/// The drive letters in use, read as `disk_of` wants. Reading a network
+/// drive can take as long as its share does; `network` and `space` say
+/// whether to ask them at all and whether to read the free space.
+#[cfg(windows)]
+fn windows_disks(network: bool, space: bool) -> Vec<Disk> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
     use windows_sys::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode};
-    const DRIVE_REMOVABLE: u32 = 2;
-    const DRIVE_FIXED: u32 = 3;
     // An empty card reader would otherwise pop up a "no disk" system dialog.
     let mut previous = 0;
     // SAFETY: `previous` is a valid out-parameter; restored below.
     unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, &mut previous) };
     // SAFETY: no arguments; returns a bitmask.
     let mask = unsafe { GetLogicalDrives() };
-    let mut mounts = Vec::new();
+    let mut disks = Vec::new();
     for letter in drive_letters(mask) {
         let root = format!("{letter}:\\");
         let wide = wide(&root);
         // SAFETY: `wide` is a NUL-terminated UTF-16 string that outlives the call.
-        let kind = unsafe { GetDriveTypeW(wide.as_ptr()) };
-        if kind != DRIVE_FIXED && kind != DRIVE_REMOVABLE {
+        let kind = DriveKind::from_win(unsafe { GetDriveTypeW(wide.as_ptr()) });
+        if !matches!(kind, DriveKind::Local | DriveKind::Removable | DriveKind::Network) || (kind == DriveKind::Network && !network) {
             continue;
         }
-        let mut name = [0u16; 261];
-        // SAFETY: `name` is a writable buffer of the length passed; the other
-        // out-parameters are optional and null.
-        let ok = unsafe {
-            GetVolumeInformationW(
-                wide.as_ptr(),
-                name.as_mut_ptr(),
-                name.len() as u32,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        // Fails for an empty card reader slot: nothing to open there.
-        if ok == 0 {
-            continue;
-        }
-        let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
-        let volume = String::from_utf16_lossy(&name[..len]);
-        mounts.push(Mount { label: drive_label(letter, &volume, kind == DRIVE_REMOVABLE), path: PathBuf::from(root) });
+        let volume = read_volume(&wide);
+        let usage = || if space { usage(Path::new(&root)) } else { None };
+        disks.extend(disk_of(letter, kind, volume, || remote_name(letter), usage));
     }
     // SAFETY: restores the mode read above; the old value is not needed.
     unsafe { SetThreadErrorMode(previous, std::ptr::null_mut()) };
-    mounts
+    disks
+}
+
+/// The volume name and file system of the drive at `root` (wide, "C:\"), or
+/// `None` when it cannot be read: an empty card reader slot, a share that is down.
+#[cfg(windows)]
+fn read_volume(root: &[u16]) -> Option<Volume> {
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
+    let (mut name, mut fs) = ([0u16; 261], [0u16; 64]);
+    // SAFETY: `root` is NUL-terminated; `name` and `fs` are writable buffers of
+    // the lengths passed; the other out-parameters are optional and null.
+    let ok = unsafe {
+        GetVolumeInformationW(
+            root.as_ptr(),
+            name.as_mut_ptr(),
+            name.len() as u32,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            fs.as_mut_ptr(),
+            fs.len() as u32,
+        )
+    };
+    let text = |buffer: &[u16]| String::from_utf16_lossy(&buffer[..buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len())]);
+    (ok != 0).then(|| Volume { name: text(&name), fs: text(&fs) })
+}
+
+/// The share a network drive letter is mapped to ("\\wsl$\Ubuntu"), if Windows says.
+#[cfg(windows)]
+fn remote_name(letter: char) -> Option<String> {
+    use windows_sys::Win32::NetworkManagement::WNet::WNetGetConnectionW;
+    let local = wide(&format!("{letter}:"));
+    let mut buffer = [0u16; 1024];
+    let mut len = buffer.len() as u32;
+    // SAFETY: `local` is NUL-terminated; `buffer` is writable for `len` units.
+    let error = unsafe { WNetGetConnectionW(local.as_ptr(), buffer.as_mut_ptr(), &mut len) };
+    let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+    (error == 0 && end > 0).then(|| String::from_utf16_lossy(&buffer[..end]))
 }
 
 #[cfg(windows)]
@@ -1025,8 +1147,122 @@ mod this_pc_tests {
     #[test]
     fn the_system_drive_is_a_local_disk_with_a_file_system() {
         let root = std::env::var("SystemDrive").map_or_else(|_| PathBuf::from("C:\\"), |d| PathBuf::from(format!("{d}\\")));
-        let info = drive_info(&root);
-        assert_eq!(info.kind, DriveKind::Local);
-        assert!(!info.fs.is_empty(), "{info:?}");
+        let disk = read_disks().into_iter().find(|disk| disk.mount.path == root).expect("the system drive is listed");
+        assert_eq!(disk.info.kind, DriveKind::Local);
+        assert!(!disk.info.fs.is_empty(), "{disk:?}");
+        assert!(disk.usage.is_some(), "{disk:?}");
+    }
+
+    #[test]
+    fn a_network_drive_is_named_after_its_volume_else_its_share_else_just_network_drive() {
+        let share = Some(r"\\wsl$\Ubuntu");
+        assert_eq!(network_label('Z', "", share), r"Ubuntu (\\wsl$) (Z:)", "as File Explorer says it");
+        assert_eq!(network_label('S', "  ", Some(r"\\nas\media\")), r"media (\\nas) (S:)");
+        assert_eq!(network_label('Z', "Data", share), "Data (Z:)", "the volume's own name first");
+        assert_eq!(network_label('Z', "", None), "Network Drive (Z:)");
+        assert_eq!(network_label('Z', "", Some("")), "Network Drive (Z:)");
+        assert_eq!(network_label('Z', "", Some(r"\\server")), "Network Drive (Z:)", "a server alone names no share");
+        assert_eq!(network_label('Z', "", Some("https://dav.example/x")), "Network Drive (Z:)", "not a UNC name");
+    }
+
+    fn volume(name: &str, fs: &str) -> Option<Volume> {
+        Some(Volume { name: name.into(), fs: fs.into() })
+    }
+
+    const SPACE: Usage = Usage { total: 1006, free: 993 };
+
+    #[test]
+    fn a_readable_network_drive_lists_with_its_file_system_and_space() {
+        let disk = disk_of('Z', DriveKind::Network, volume("", "9P"), || Some(r"\\wsl$\Ubuntu".into()), || Some(SPACE)).unwrap();
+        assert_eq!(disk.mount, Mount { label: r"Ubuntu (\\wsl$) (Z:)".into(), path: PathBuf::from("Z:\\") });
+        assert_eq!(disk.info, DriveInfo { kind: DriveKind::Network, fs: "9P".into() });
+        assert_eq!(disk.info.kind.name(), "Network Drive");
+        assert_eq!(disk.usage, Some(SPACE));
+    }
+
+    #[test]
+    fn a_network_drive_with_a_volume_name_does_not_ask_for_the_share() {
+        let disk = disk_of('Z', DriveKind::Network, volume("Backup", "NTFS"), || panic!("no need"), || Some(SPACE)).unwrap();
+        assert_eq!(disk.mount.label, "Backup (Z:)");
+    }
+
+    #[test]
+    fn a_network_drive_that_cannot_be_read_is_listed_without_numbers() {
+        let disk = disk_of('Z', DriveKind::Network, None, || Some(r"\\nas\media".into()), || panic!("a share that is down is not asked again")).unwrap();
+        assert_eq!(disk.mount, Mount { label: r"media (\\nas) (Z:)".into(), path: PathBuf::from("Z:\\") });
+        assert_eq!(disk.info, DriveInfo { kind: DriveKind::Network, fs: String::new() });
+        assert_eq!(disk.usage, None);
+        let unnamed = disk_of('Y', DriveKind::Network, None, || None, || None).unwrap();
+        assert_eq!(unnamed.mount.label, "Network Drive (Y:)");
+    }
+
+    #[test]
+    fn local_and_removable_drives_keep_their_labels_and_an_empty_slot_is_left_out() {
+        let local = disk_of('C', DriveKind::Local, volume("Windows", "NTFS"), || panic!("not a share"), || Some(SPACE)).unwrap();
+        assert_eq!(local.mount, Mount { label: "Windows (C:)".into(), path: PathBuf::from("C:\\") });
+        assert_eq!(local.info, DriveInfo { kind: DriveKind::Local, fs: "NTFS".into() });
+        let usb = disk_of('F', DriveKind::Removable, volume("", "FAT32"), || None, || None).unwrap();
+        assert_eq!(usb.mount.label, "USB Drive (F:)");
+        assert_eq!(usb.usage, None);
+        assert_eq!(disk_of('G', DriveKind::Removable, None, || None, || Some(SPACE)), None, "an empty card reader");
+        assert_eq!(disk_of('D', DriveKind::Local, None, || None, || None), None);
+        assert_eq!(disk_of('E', DriveKind::Cd, volume("Disc", "CDFS"), || None, || None), None);
+    }
+
+    fn disk(label: &str) -> Disk {
+        Disk { mount: Mount { label: label.into(), path: PathBuf::from("/") }, usage: None, info: DriveInfo::default() }
+    }
+
+    /// Polls until the reader answers; the read ends within a moment in these tests.
+    fn answer(reader: &mut DiskReader) -> Vec<Disk> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if let Some(disks) = reader.poll() {
+                return disks;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the read did not answer");
+    }
+
+    #[test]
+    fn the_reader_answers_once_and_wakes_the_window() {
+        let (woke, woken) = std::sync::mpsc::channel();
+        let mut reader = DiskReader::default();
+        assert!(!reader.is_running() && reader.poll().is_none());
+        reader.start(move || woke.send(()).unwrap(), || vec![disk("A")]);
+        assert!(reader.is_running());
+        woken.recv_timeout(std::time::Duration::from_secs(10)).expect("woken when done");
+        assert_eq!(answer(&mut reader), [disk("A")]);
+        assert!(!reader.is_running(), "free for the next read");
+        assert!(reader.poll().is_none(), "answered once");
+    }
+
+    #[test]
+    fn a_slow_read_is_polled_without_waiting_and_only_one_runs_at_a_time() {
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let mut reader = DiskReader::default();
+        let started = std::time::Instant::now();
+        reader.start(|| {}, move || {
+            let _ = blocked.recv_timeout(std::time::Duration::from_secs(10));
+            vec![disk("first")]
+        });
+        assert!(reader.is_running() && reader.poll().is_none());
+        reader.start(|| {}, || vec![disk("second")]);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "neither start nor poll waited for the read");
+        release.send(()).unwrap();
+        assert_eq!(answer(&mut reader), [disk("first")], "the second start was ignored");
+    }
+
+    #[test]
+    fn a_read_that_dies_without_an_answer_frees_the_reader() {
+        let mut reader = DiskReader::default();
+        reader.start(|| {}, || panic!("the thread dies"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while reader.is_running() && std::time::Instant::now() < deadline {
+            assert!(reader.poll().is_none());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!reader.is_running(), "read again next time");
     }
 }

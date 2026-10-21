@@ -82,8 +82,19 @@ pub const COLUMNS: [(&str, DriveColumn); 6] = [
 ];
 
 // Fit All Columns shares the list's rule (`file_list::fit_all`), which works on
-// its six columns: Name, then the two that keep priority, then three small ones.
+// its six columns and says by role who gives room when they do not fit.
 const _: () = assert!(COLUMNS.len() == file_list::COLUMNS.len());
+
+/// Each column's role: Free Space and Size are numbers, the rest keep priority.
+pub const ROLES: file_list::Roles = {
+    use file_list::Role::*;
+    [Name, Short, Short, Numeric, Numeric, Short]
+};
+
+/// A fingerprint of what the rows show, to tell when the columns need fitting again.
+pub fn signature(rows: &[DriveRow]) -> u64 {
+    file_list::signature(rows.iter().map(|r| (&r.name, r.kind, &r.fs, &r.free, &r.size, &r.percent)))
+}
 
 /// Each column's width in points, like the list's.
 pub type Widths = file_list::Widths;
@@ -211,9 +222,14 @@ pub fn show(ui: &mut egui::Ui, rows: &[DriveRow], selected: Option<&Path>, sort:
                         ui.add(egui::Label::new(DISK).selectable(false));
                         ui.add(egui::Label::new(&drive.name).selectable(false).truncate());
                     });
-                    for text in [drive.kind, &drive.fs, &drive.free, &drive.size] {
+                    // Only Size is right-aligned: Free Space beside it would read as one column.
+                    for (text, right) in [(drive.kind, false), (&drive.fs, false), (&drive.free, false), (&drive.size, true)] {
                         row.col(|ui| {
-                            ui.add(egui::Label::new(text).selectable(false).truncate());
+                            if right {
+                                file_list::number_cell(ui, text);
+                            } else {
+                                ui.add(egui::Label::new(text).selectable(false).truncate());
+                            }
                         });
                     }
                     row.col(|ui| {
@@ -572,5 +588,54 @@ mod tests {
         let Some(DrivesEvent::Resized(new)) = released else { panic!("the widths are reported when let go: {released:?}") };
         assert!((new[0] - 310.0).abs() < 1.5, "Name is 50 wider: {new:?}");
         assert_eq!(new[1..], DEFAULT_WIDTHS[1..], "only the dragged column changes");
+    }
+
+    /// File Pilot's This PC at ~1080 px (L18): Name ~270, the others ~150 each.
+    #[test]
+    fn fitting_this_pc_spreads_the_room_over_every_column_like_file_pilot() {
+        let ctx = egui::Context::default();
+        let rows = two_drives();
+        draw(&ctx, &rows, None, vec![], None);
+        let content: Widths = std::array::from_fn(|c| fit_width(&ctx, &rows, c));
+        let room = file_list::room(&ctx, 1080.0, &file_list::ALL_SHOWN);
+        let fitted = file_list::fit_all(&content, &file_list::ALL_SHOWN, &ROLES, room);
+        assert!((fitted.iter().sum::<f32>() - room).abs() < 0.5, "the columns add up to the room: {fitted:?} in {room}");
+        assert!(fitted[0] < room / 2.0, "Name does not take the room: {fitted:?}");
+        assert!(fitted[0] > 200.0 && fitted[0] < 340.0, "Name about 270: {fitted:?}");
+        for c in 1..COLUMNS.len() {
+            assert!(fitted[c] >= content[c], "{c} is not cut: {fitted:?}");
+            assert!(fitted[c] > 90.0 && fitted[c] < 230.0, "column {c} spread, about 150: {fitted:?}");
+        }
+    }
+
+    #[test]
+    fn this_pc_in_a_narrow_window_squeezes_the_numbers_first_and_keeps_the_rest_whole() {
+        let ctx = egui::Context::default();
+        let rows = two_drives();
+        draw(&ctx, &rows, None, vec![], None);
+        let content: Widths = std::array::from_fn(|c| fit_width(&ctx, &rows, c));
+        let mut roomy = content;
+        roomy[0] = 700.0;
+        let room = roomy.iter().sum::<f32>() - 60.0;
+        let fitted = file_list::fit_all(&roomy, &file_list::ALL_SHOWN, &ROLES, room);
+        assert!((fitted.iter().sum::<f32>() - room).abs() < 0.5, "{fitted:?}");
+        assert_eq!((fitted[1], fitted[2], fitted[5]), (content[1], content[2], content[5]), "Type, File System and Percent Full whole: {fitted:?}");
+        assert!(fitted[3] < content[3] && fitted[4] < content[4], "Free Space and Size give: {fitted:?}");
+        assert!(fitted[0] >= 700.0, "and Name is not cut while they can: {fitted:?}");
+    }
+
+    /// The x of the left edge of `text`'s column is the header's; its right edge is the next header's less the gap.
+    #[test]
+    fn only_size_is_right_aligned_and_free_space_starts_at_its_header_like_the_text_columns() {
+        let ctx = egui::Context::default();
+        let rows = two_drives();
+        let shapes = settled(&ctx, &rows, None);
+        let gap = ctx.global_style().spacing.item_spacing.x;
+        let (free, percent) = (text_rect(&shapes, "Free Space"), text_rect(&shapes, "Percent Full"));
+        assert!((text_rect(&shapes, "210.6 GB").min.x - free.min.x).abs() < 6.0, "Free Space starts at its header, not by Size");
+        assert!((percent.min.x - text_rect(&shapes, "461.2 GB").max.x - gap).abs() < 6.0, "Size ends at the Percent Full column");
+        let (ty, fs) = (text_rect(&shapes, "Type"), text_rect(&shapes, "File System"));
+        assert!((text_rect(&shapes, "Local Disk").min.x - ty.min.x).abs() < 6.0, "Type starts at its header");
+        assert!((text_rect(&shapes, "NTFS").min.x - fs.min.x).abs() < 6.0, "File System starts at its header");
     }
 }

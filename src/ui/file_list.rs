@@ -468,6 +468,9 @@ const FIT_MARGIN: f32 = 6.0;
 /// Fit All Columns never takes Name below this (unless it is narrower to begin with).
 pub const NAME_MIN: f32 = 120.0;
 
+/// The width a long text column (Original Location) shrinks toward first.
+pub const TEXT_MIN: f32 = 120.0;
+
 /// The width Folders, Files and Size shrink toward when the columns do not fit:
 /// about "Fol…" and some padding.
 pub const SMALL_MIN: f32 = 44.0;
@@ -486,35 +489,72 @@ pub fn remember_width(ctx: &egui::Context, width: f32) {
 /// last drawn width less the gaps between columns. `None` before the list was drawn.
 pub fn visible_width(ctx: &egui::Context, shown: &Shown) -> Option<f32> {
     let width = ctx.data(|d| d.get_temp::<f32>(list_width_id()))?;
-    let gaps = shown.iter().enumerate().filter(|&(c, &on)| on || c == 0).count().saturating_sub(1);
-    Some((width - gaps as f32 * ctx.global_style().spacing.item_spacing.x).floor().max(0.0))
+    Some(room(ctx, width, shown))
 }
+
+/// What of a table `width` wide the shown columns can share: less the gaps between them.
+pub fn room(ctx: &egui::Context, width: f32, shown: &Shown) -> f32 {
+    let gaps = shown.iter().enumerate().filter(|&(c, &on)| on || c == 0).count().saturating_sub(1);
+    (width - gaps as f32 * ctx.global_style().spacing.item_spacing.x).floor().max(0.0)
+}
+
+/// What a column holds, which decides how it gives room when the columns do not fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The first column: it takes what the others leave.
+    Name,
+    /// Long free text other than the name (Original Location): the first to be cut.
+    Text,
+    /// A short value that keeps priority (Type, Date Modified, File System, Percent Full):
+    /// the last to be cut.
+    Short,
+    /// A small number (Folders, Files, Size, Free Space): squeezed before Name. This PC and
+    /// the Recycle Bin right-align them; the list right-aligns its Size only.
+    /// Short values like Size stay whole while the text columns can give.
+    Numeric,
+}
+
+/// Each column's role, in `COLUMNS` order.
+pub type Roles = [Role; COLUMNS.len()];
+
+/// The list's columns: Name, Type, Date Modified, Folders, Files, Size.
+pub const LIST_ROLES: Roles = [Role::Name, Role::Short, Role::Short, Role::Numeric, Role::Numeric, Role::Numeric];
 
 /// The widths Fit All Columns gives: `content` is each column's fit width, and the
 /// shown columns end up adding up to `available`. Hidden ones keep their `content`.
+/// `roles` says who gives room, not the columns' places.
 ///
-/// When every shown column fits, each gets its content and Name the room left.
-/// Otherwise Folders, Files and Size shrink first (toward `SMALL_MIN`, in
-/// proportion to what they can give), then Name (toward `NAME_MIN`), and only
-/// then Type and Date Modified, which keep priority. Nothing goes below `MIN_WIDTH`.
-pub fn fit_all(content: &Widths, shown: &Shown, available: f32) -> Widths {
+/// When every shown column fits, the spare room is shared over all of them in
+/// proportion to their content (like File Pilot), so no column takes it all.
+/// Otherwise the columns give in this order, each in proportion to what it can
+/// give: long text (`TEXT_MIN`), numbers (`SMALL_MIN`), then Name (`NAME_MIN`), and
+/// only then the text and the short columns, which keep priority, down to
+/// `MIN_WIDTH`. Short values (Date, Size...) stay whole while the others can give.
+pub fn fit_all(content: &Widths, shown: &Shown, roles: &Roles, available: f32) -> Widths {
+    let name = roles.iter().position(|&r| r == Role::Name).unwrap_or(0);
     // Name is always shown.
-    let on = |c: &usize| *c == 0 || shown[*c];
+    let columns: Vec<usize> = (0..COLUMNS.len()).filter(|&c| c == name || shown[c]).collect();
+    let with = |wanted: &[Role]| -> Vec<usize> { columns.iter().copied().filter(|&c| c != name && wanted.contains(&roles[c])).collect() };
     let mut widths = *content;
-    let mut over = (0..COLUMNS.len()).filter(on).map(|c| content[c]).sum::<f32>() - available;
-    if over > 0.0 {
-        let small: Vec<usize> = (3..COLUMNS.len()).filter(on).collect();
-        let priority: Vec<usize> = (1..3).filter(on).collect();
-        over = squeeze(&mut widths, &small, SMALL_MIN, over);
-        over = squeeze(&mut widths, &[0], NAME_MIN, over);
-        squeeze(&mut widths, &priority, MIN_WIDTH, over);
+    let total: f32 = columns.iter().map(|&c| content[c]).sum();
+    if total <= available {
+        let grown = available / total;
+        for &c in &columns {
+            widths[c] = content[c] * grown;
+        }
+    } else {
+        let mut over = total - available;
+        over = squeeze(&mut widths, &with(&[Role::Text]), TEXT_MIN, over);
+        over = squeeze(&mut widths, &with(&[Role::Numeric]), SMALL_MIN, over);
+        over = squeeze(&mut widths, &[name], NAME_MIN, over);
+        squeeze(&mut widths, &with(&[Role::Text, Role::Short]), MIN_WIDTH, over);
     }
     // Whole points: the config keeps them so. Name takes what the others leave.
-    let others: f32 = (1..COLUMNS.len()).filter(on).map(|c| widths[c].floor()).sum();
-    for c in (1..COLUMNS.len()).filter(on) {
+    let others: Vec<usize> = columns.iter().copied().filter(|&c| c != name).collect();
+    for &c in &others {
         widths[c] = widths[c].floor();
     }
-    widths[0] = (available.floor() - others).max(MIN_WIDTH);
+    widths[name] = (available.floor() - others.iter().map(|&c| widths[c]).sum::<f32>()).max(MIN_WIDTH);
     widths
 }
 
@@ -530,6 +570,60 @@ fn squeeze(widths: &mut Widths, columns: &[usize], floor: f32, over: f32) -> f32
         }
     }
     over - take
+}
+
+/// A fingerprint of the text a view shows, to tell when its content changed.
+pub fn signature(rows: impl IntoIterator<Item = impl std::hash::Hash>) -> u64 {
+    use std::hash::{DefaultHasher, Hasher};
+    let mut hasher = DefaultHasher::new();
+    for row in rows {
+        row.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// A view with fixed columns (This PC, the Recycle Bin) that fits them by itself
+/// while nobody dragged a border or fitted a single column by hand: when it is
+/// first shown, when its content changes, and when the room changes.
+#[derive(Default)]
+pub struct AutoFit {
+    by_hand: bool,
+    /// What the columns were last fitted to.
+    seen: Option<Seen>,
+}
+
+struct Seen {
+    signature: u64,
+    content: Widths,
+    room: f32,
+}
+
+impl AutoFit {
+    /// The widths to take now, if the columns are due for a fit. `content` measures
+    /// each column's fit width; it only runs when `signature` (the content) changed.
+    pub fn fit(&mut self, signature: u64, room: f32, shown: &Shown, roles: &Roles, content: impl FnOnce() -> Widths) -> Option<Widths> {
+        if self.by_hand {
+            return None;
+        }
+        let content = match self.seen.as_ref().filter(|seen| seen.signature == signature) {
+            Some(seen) if seen.room == room => return None,
+            Some(seen) => seen.content,
+            None => content(),
+        };
+        self.seen = Some(Seen { signature, content, room });
+        Some(fit_all(&content, shown, roles, room))
+    }
+
+    /// A border was dragged or a column fitted on its own: the widths are the user's now.
+    pub fn by_hand(&mut self) {
+        self.by_hand = true;
+    }
+
+    /// Fit All Columns: the view looks after its widths again.
+    pub fn auto(&mut self) {
+        self.by_hand = false;
+        self.seen = None;
+    }
 }
 
 /// A column border being dragged: which column, where the pointer and the
@@ -673,6 +767,14 @@ pub fn count_cols(row: &mut egui_extras::TableRow<'_, '_>, cells: &[String; 3]) 
     for (i, cell) in cells.iter().enumerate() {
         row.col(|ui| count_cell(ui, i, cell));
     }
+}
+
+/// A cell of a number column in the views with fixed columns (This PC, the
+/// Recycle Bin): right-aligned so the units line up, like the list's Size.
+pub fn number_cell(ui: &mut egui::Ui, text: &str) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.add(egui::Label::new(text).selectable(false));
+    });
 }
 
 /// Cell `i` of the Folders, Files and Size cells.
@@ -2332,17 +2434,78 @@ mod tests {
     }
 
     #[test]
-    fn fit_all_gives_each_column_its_content_and_name_the_room_left_when_all_fit() {
+    fn fit_all_spreads_the_spare_room_over_every_shown_column_in_proportion_to_its_content() {
         let content = [200.0, 100.0, 140.0, 50.0, 50.0, 60.0];
-        let fitted = fit_all(&content, &ALL_SHOWN, 900.0);
-        assert_eq!(fitted, [500.0, 100.0, 140.0, 50.0, 50.0, 60.0]);
-        assert_eq!(fit_all(&content, &ALL_SHOWN, 600.0), content, "exactly the room: nothing to share");
+        let fitted = fit_all(&content, &ALL_SHOWN, &LIST_ROLES, 900.0);
+        assert_eq!(fitted, [300.0, 150.0, 210.0, 75.0, 75.0, 90.0], "600 points of content over 900: everyone 1.5 times");
+        assert_eq!(fit_all(&content, &ALL_SHOWN, &LIST_ROLES, 600.0), content, "exactly the room: nothing to share");
+    }
+
+    #[test]
+    fn fit_all_follows_the_roles_not_the_column_positions_when_they_do_not_fit() {
+        // The long text column gives before the numbers, wherever it sits.
+        let roles = [Role::Name, Role::Short, Role::Numeric, Role::Numeric, Role::Short, Role::Text];
+        let content = [300.0, 110.0, 70.0, 70.0, 150.0, 600.0];
+        let fitted = fit_all(&content, &ALL_SHOWN, &roles, 1000.0);
+        assert!((total(&fitted, &ALL_SHOWN) - 1000.0).abs() < 0.5, "{fitted:?}");
+        assert_eq!(fitted, [300.0, 110.0, 70.0, 70.0, 150.0, 300.0], "only the text column gives");
+        // The same widths with the list's roles (no text column): the numbers give, Type and Date stay whole.
+        let fitted = fit_all(&content, &ALL_SHOWN, &LIST_ROLES, 1000.0);
+        assert_eq!(fitted[1..3], [110.0, 70.0], "{fitted:?}");
+        assert!((3..6).all(|c| fitted[c] >= SMALL_MIN && fitted[c] < content[c]), "{fitted:?}");
+        assert!(fitted[0] >= 300.0, "{fitted:?}");
+    }
+
+    #[test]
+    fn auto_fit_fits_when_first_shown_and_again_only_when_the_room_or_the_content_change() {
+        let content = [200.0, 100.0, 140.0, 50.0, 50.0, 60.0];
+        let measured = std::cell::Cell::new(0);
+        let measure = |widths: Widths| {
+            let measured = &measured;
+            move || {
+                measured.set(measured.get() + 1);
+                widths
+            }
+        };
+        let mut auto = AutoFit::default();
+        let first = auto.fit(1, 900.0, &ALL_SHOWN, &LIST_ROLES, measure(content));
+        assert_eq!(first, Some(fit_all(&content, &ALL_SHOWN, &LIST_ROLES, 900.0)), "first shown");
+        assert_eq!(auto.fit(1, 900.0, &ALL_SHOWN, &LIST_ROLES, measure(content)), None, "nothing changed");
+        assert_eq!(measured.get(), 1);
+        let narrower = auto.fit(1, 700.0, &ALL_SHOWN, &LIST_ROLES, measure(content));
+        assert_eq!(narrower, Some(fit_all(&content, &ALL_SHOWN, &LIST_ROLES, 700.0)), "the window was resized");
+        assert_eq!(measured.get(), 1, "a resize does not measure the content again");
+        let more = [300.0; COLUMNS.len()];
+        let changed = auto.fit(2, 700.0, &ALL_SHOWN, &LIST_ROLES, measure(more));
+        assert_eq!(changed, Some(fit_all(&more, &ALL_SHOWN, &LIST_ROLES, 700.0)), "the rows changed");
+        assert_eq!(measured.get(), 2);
+    }
+
+    #[test]
+    fn auto_fit_leaves_widths_set_by_hand_alone_until_fit_all_columns() {
+        let content = [200.0, 100.0, 140.0, 50.0, 50.0, 60.0];
+        let mut auto = AutoFit::default();
+        assert!(auto.fit(1, 900.0, &ALL_SHOWN, &LIST_ROLES, || content).is_some());
+        auto.by_hand();
+        assert_eq!(auto.fit(1, 700.0, &ALL_SHOWN, &LIST_ROLES, || content), None, "resized after a drag");
+        assert_eq!(auto.fit(2, 700.0, &ALL_SHOWN, &LIST_ROLES, || content), None, "and new rows");
+        auto.auto();
+        assert_eq!(auto.fit(2, 700.0, &ALL_SHOWN, &LIST_ROLES, || content), Some(fit_all(&content, &ALL_SHOWN, &LIST_ROLES, 700.0)));
+    }
+
+    #[test]
+    fn the_room_of_a_table_is_its_width_less_the_gaps_between_shown_columns() {
+        let ctx = egui::Context::default();
+        let gap = ctx.global_style().spacing.item_spacing.x;
+        assert_eq!(room(&ctx, 1080.0, &ALL_SHOWN), (1080.0 - 5.0 * gap).floor());
+        assert_eq!(room(&ctx, 1080.0, &[true, false, false, false, true, false]), (1080.0 - gap).floor());
+        assert_eq!(room(&ctx, 10.0, &ALL_SHOWN), 0.0, "never negative");
     }
 
     #[test]
     fn fit_all_with_a_very_long_name_keeps_type_and_date_whole_and_squeezes_the_small_columns() {
         let content = [1400.0, 110.0, 150.0, 60.0, 60.0, 70.0];
-        let fitted = fit_all(&content, &ALL_SHOWN, 1000.0);
+        let fitted = fit_all(&content, &ALL_SHOWN, &LIST_ROLES, 1000.0);
         assert!((total(&fitted, &ALL_SHOWN) - 1000.0).abs() < 0.5, "adds up to the room: {fitted:?}");
         assert_eq!((fitted[1], fitted[2]), (110.0, 150.0), "Type and Date Modified whole: {fitted:?}");
         for c in 3..6 {
@@ -2354,7 +2517,7 @@ mod tests {
     #[test]
     fn fit_all_takes_from_the_small_columns_in_proportion_and_keeps_name_whole_for_a_little_overflow() {
         let content = [500.0, 110.0, 150.0, 60.0, 60.0, 70.0];
-        let fitted = fit_all(&content, &ALL_SHOWN, 900.0);
+        let fitted = fit_all(&content, &ALL_SHOWN, &LIST_ROLES, 900.0);
         assert!((total(&fitted, &ALL_SHOWN) - 900.0).abs() < 0.5, "{fitted:?}");
         assert!(fitted[0] >= 500.0, "Name is not cut while the small columns can give: {fitted:?}");
         assert_eq!((fitted[1], fitted[2]), (110.0, 150.0));
@@ -2365,7 +2528,7 @@ mod tests {
     #[test]
     fn fit_all_in_a_very_narrow_list_takes_name_to_its_minimum_then_squeezes_type_and_date() {
         let content = [800.0, 150.0, 160.0, 60.0, 60.0, 60.0];
-        let fitted = fit_all(&content, &ALL_SHOWN, 400.0);
+        let fitted = fit_all(&content, &ALL_SHOWN, &LIST_ROLES, 400.0);
         assert!((total(&fitted, &ALL_SHOWN) - 400.0).abs() < 0.5, "adds up to the room: {fitted:?}");
         assert!(fitted[0] >= NAME_MIN && fitted[0] < NAME_MIN + 3.0, "Name at its minimum: {fitted:?}");
         assert!(fitted[1] < 150.0 && fitted[2] < 160.0, "Type and Date give too: {fitted:?}");
@@ -2376,13 +2539,18 @@ mod tests {
     fn fit_all_ignores_hidden_columns() {
         let content = [1400.0, 110.0, 150.0, 900.0, 60.0, 900.0];
         let shown = [true, true, true, false, true, false];
-        let fitted = fit_all(&content, &shown, 700.0);
+        let fitted = fit_all(&content, &shown, &LIST_ROLES, 700.0);
         assert!((total(&fitted, &shown) - 700.0).abs() < 0.5, "{fitted:?}");
         assert_eq!((fitted[3], fitted[5]), (900.0, 900.0), "hidden ones keep their fit width");
         assert_eq!((fitted[1], fitted[2]), (110.0, 150.0));
         assert!(fitted[0] > 380.0, "{fitted:?}");
-        let roomy = fit_all(&content, &shown, 3000.0);
-        assert_eq!(roomy, [3000.0 - 110.0 - 150.0 - 60.0, 110.0, 150.0, 900.0, 60.0, 900.0]);
+        // With room to spare the shown ones share it in proportion; the hidden ones still keep theirs.
+        let roomy = fit_all(&content, &shown, &LIST_ROLES, 3000.0);
+        assert_eq!((roomy[3], roomy[5]), (900.0, 900.0));
+        assert!((total(&roomy, &shown) - 3000.0).abs() < 0.5, "{roomy:?}");
+        for c in [0, 1, 2, 4] {
+            assert!((roomy[c] / content[c] - 3000.0 / 1720.0).abs() < 0.02, "column {c} grows with the rest: {roomy:?}");
+        }
     }
 
     #[test]
@@ -2409,7 +2577,7 @@ mod tests {
             *width = fit_width(&ctx, &view, c);
         }
         assert!(content.iter().sum::<f32>() > room, "the columns together overflow: {content:?}");
-        let fitted = fit_all(&content, &ALL_SHOWN, room);
+        let fitted = fit_all(&content, &ALL_SHOWN, &LIST_ROLES, room);
         let mut lefts = Vec::new();
         for _ in 0..3 {
             lefts = draw_list(&ctx, &view, &fitted, vec![]).lefts;
