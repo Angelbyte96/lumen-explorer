@@ -222,10 +222,12 @@ pub fn show(ui: &mut egui::Ui, rows: &[DriveRow], selected: Option<&Path>, sort:
                         ui.add(egui::Label::new(DISK).selectable(false));
                         ui.add(egui::Label::new(&drive.name).selectable(false).truncate());
                     });
-                    for (text, role) in [drive.kind, &drive.fs, &drive.free, &drive.size].into_iter().zip(&ROLES[1..]) {
-                        row.col(|ui| match role {
-                            file_list::Role::Numeric => file_list::number_cell(ui, text),
-                            _ => {
+                    // Only Size is right-aligned: Free Space beside it would read as one column.
+                    for (text, right) in [(drive.kind, false), (&drive.fs, false), (&drive.free, false), (&drive.size, true)] {
+                        row.col(|ui| {
+                            if right {
+                                file_list::number_cell(ui, text);
+                            } else {
                                 ui.add(egui::Label::new(text).selectable(false).truncate());
                             }
                         });
@@ -624,17 +626,16 @@ mod tests {
 
     /// The x of the left edge of `text`'s column is the header's; its right edge is the next header's less the gap.
     #[test]
-    fn free_space_and_size_are_right_aligned_and_the_text_columns_left_aligned() {
+    fn only_size_is_right_aligned_and_free_space_starts_at_its_header_like_the_text_columns() {
         let ctx = egui::Context::default();
         let rows = two_drives();
         let shapes = settled(&ctx, &rows, None);
         let gap = ctx.global_style().spacing.item_spacing.x;
-        let (free, size, percent) = (text_rect(&shapes, "Free Space"), text_rect(&shapes, "Size"), text_rect(&shapes, "Percent Full"));
-        assert!((size.min.x - text_rect(&shapes, "210.6 GB").max.x - gap).abs() < 6.0, "Free Space ends at the Size column");
+        let (free, percent) = (text_rect(&shapes, "Free Space"), text_rect(&shapes, "Percent Full"));
+        assert!((text_rect(&shapes, "210.6 GB").min.x - free.min.x).abs() < 6.0, "Free Space starts at its header, not by Size");
         assert!((percent.min.x - text_rect(&shapes, "461.2 GB").max.x - gap).abs() < 6.0, "Size ends at the Percent Full column");
         let (ty, fs) = (text_rect(&shapes, "Type"), text_rect(&shapes, "File System"));
         assert!((text_rect(&shapes, "Local Disk").min.x - ty.min.x).abs() < 6.0, "Type starts at its header");
         assert!((text_rect(&shapes, "NTFS").min.x - fs.min.x).abs() < 6.0, "File System starts at its header");
-        assert!(free.min.x < text_rect(&shapes, "210.6 GB").min.x, "the header stays on the left");
     }
 }
