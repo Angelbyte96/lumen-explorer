@@ -50,6 +50,8 @@ impl Watcher {
         // This PC is no folder, and as a relative path it could name one.
         if crate::places::is_this_pc(path) {
             self.forget();
+            // Nothing to refresh there: news from the folder left behind are dropped.
+            self.changed.store(false, Ordering::SeqCst);
             return;
         }
         let Some(inner) = &mut self.inner else { return };
@@ -134,6 +136,8 @@ mod tests {
         let (mut w, _woke) = watcher();
         w.watch(&dir);
         assert_eq!(w.watched.as_deref(), Some(dir.as_path()));
+        // News from the folder that came in just before leaving it.
+        w.changed.store(true, Ordering::SeqCst);
         w.watch(&crate::places::this_pc());
         assert_eq!(w.watched, None);
         std::fs::write(dir.join("x"), "").unwrap();
