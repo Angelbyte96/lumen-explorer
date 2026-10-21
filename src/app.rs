@@ -729,6 +729,9 @@ const DISKS_INTERVAL: Duration = Duration::from_secs(5);
 /// window ride along, so a long copy reloads a few times a second, not per file.
 pub const REFRESH_DELAY: Duration = Duration::from_millis(200);
 
+/// How long a notice stays in the status bar.
+const NOTICE_TIME: Duration = Duration::from_secs(4);
+
 /// Schedules the reload that follows changes on disk.
 #[derive(Default)]
 pub struct RefreshTimer {
@@ -1106,6 +1109,8 @@ pub struct LumenApp {
     counting: Option<Count>,
     /// Informational line in the status bar ("1 item copied").
     notice: Option<String>,
+    /// The notice on screen and when it first showed, to clear it later.
+    notice_shown: Option<(String, Instant)>,
     /// Watches the folder on screen; changes schedule a refresh.
     watcher: Watcher,
     refresh: RefreshTimer,
@@ -1183,6 +1188,7 @@ impl LumenApp {
             shown_columns: ui::file_list::ALL_SHOWN,
             column_order: ui::file_list::DEFAULT_ORDER,
             notice: None,
+            notice_shown: None,
             watcher: Watcher::new({
                 let ctx = ctx.clone();
                 move || ctx.request_repaint()
@@ -1815,6 +1821,29 @@ impl LumenApp {
             return;
         };
         self.start_batch(ctx, paths, dest, mode);
+    }
+
+    /// Clears the notice once it has been on screen for `NOTICE_TIME`; returns
+    /// how long until then, or `None` when there is none left.
+    fn expire_notice(&mut self, now: Instant) -> Option<Duration> {
+        let Some(notice) = &self.notice else {
+            self.notice_shown = None;
+            return None;
+        };
+        let since = match &self.notice_shown {
+            Some((shown, since)) if shown == notice => *since,
+            _ => {
+                self.notice_shown = Some((notice.clone(), now));
+                now
+            }
+        };
+        let left = NOTICE_TIME.saturating_sub(now.saturating_duration_since(since));
+        if left.is_zero() {
+            self.notice = None;
+            self.notice_shown = None;
+            return None;
+        }
+        Some(left)
     }
 
     /// A copy or move is already running: says so.
@@ -2467,7 +2496,13 @@ impl eframe::App for LumenApp {
         #[cfg(windows)]
         self.read_pending_menu(&ctx);
 
+        if let Some(left) = self.expire_notice(Instant::now()) {
+            ctx.request_repaint_after(left);
+        }
         ui::skip_panel_borders(&ctx);
+        if self.dialog.is_none() && !self.path_popup.is_open() && self.context_menu.is_none() {
+            ui::shift_tab_from_list(&ctx);
+        }
 
         // An open dialog takes the keyboard; the list must not react underneath.
         if self.dialog.is_some() {
@@ -4516,6 +4551,23 @@ mod tests {
         app.handle_sidebar(&ctx, SidebarEvent::RemoveBookmark(dir.join("sub")));
         assert!(app.bookmarks.paths().is_empty());
         assert_eq!(app.notice.as_deref(), Some("Removed “sub” from bookmarks"));
+    }
+
+    #[test]
+    fn a_notice_goes_away_after_a_few_seconds_and_a_new_one_starts_its_own_time() {
+        let (ctx, mut app, _) = app_in("app-notice-expiry");
+        let start = Instant::now();
+        app.handle_action(&ctx, Action::ToggleBookmark);
+        assert_eq!(app.expire_notice(start), Some(NOTICE_TIME), "a new notice asks to be looked at again once its time is up");
+        assert_eq!(app.expire_notice(start + NOTICE_TIME / 2), Some(NOTICE_TIME / 2));
+        assert_eq!(app.notice.as_deref(), Some("Added “app-notice-expiry” to bookmarks"), "still shown before its time");
+        app.handle_action(&ctx, Action::ToggleBookmark);
+        let later = start + NOTICE_TIME;
+        assert_eq!(app.expire_notice(later), Some(NOTICE_TIME), "a different notice gets its full time");
+        assert_eq!(app.notice.as_deref(), Some("Removed “app-notice-expiry” from bookmarks"));
+        assert_eq!(app.expire_notice(later + NOTICE_TIME), None);
+        assert_eq!(app.notice, None, "gone once its time is up");
+        assert_eq!(app.expire_notice(later + NOTICE_TIME * 2), None, "nothing to clear");
     }
 
     #[test]

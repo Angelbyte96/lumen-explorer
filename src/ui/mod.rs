@@ -46,6 +46,19 @@ pub fn skip_panel_borders(ctx: &egui::Context) {
     }
 }
 
+/// Shift+Tab while nothing has the focus (after a click on a row): starts
+/// from the list, so it goes to the side panel, as Tab goes to the first tab.
+/// Call each frame before any widget is drawn.
+pub fn shift_tab_from_list(ctx: &egui::Context) {
+    let back = ctx.input(|i| {
+        i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Tab, pressed: true, modifiers, .. } if modifiers.shift_only()))
+    });
+    // egui's own Shift+Tab from nothing lands on the last widget it saw.
+    if back && ctx.memory(|m| m.focused()).is_none() {
+        ctx.memory_mut(|m| m.request_focus(file_list::focus_id()));
+    }
+}
+
 /// A ring round `response` while it has the keyboard focus, so it shows
 /// where Tab landed and what Enter or Space will press.
 pub fn focus_ring(ui: &egui::Ui, response: &egui::Response) {
