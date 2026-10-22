@@ -509,15 +509,18 @@ pub fn room(ctx: &egui::Context, width: f32, shown: &Shown) -> f32 {
 pub enum Role {
     /// The first column: it takes what the others leave.
     Name,
-    /// Long free text other than the name (Original Location): the first to be cut.
+    /// Long free text other than the name: the first to be cut.
     Text,
-    /// A short value that keeps priority (Type, Date Modified, File System, Percent Full):
-    /// the last to be cut.
+    /// A value that keeps priority (Type, Date Modified, File System, Percent Full, the
+    /// Recycle Bin's Type, Date Deleted and Size): the last to be cut.
     Short,
     /// A small number (Folders, Files, Size, Free Space): squeezed before Name. This PC and
     /// the Recycle Bin right-align them; the list right-aligns its Size only.
     /// Short values like Size stay whole while the text columns can give.
     Numeric,
+    /// Long text that keeps priority over the short values but gives right after Name (the
+    /// Recycle Bin's Original Location): cut with "…" while they stay whole.
+    Path,
 }
 
 /// Each column's role, in `COLUMNS` order.
@@ -533,9 +536,10 @@ pub const LIST_ROLES: Roles = [Role::Name, Role::Short, Role::Short, Role::Numer
 /// When every shown column fits, the spare room is shared over all of them in
 /// proportion to their content (like File Pilot), so no column takes it all.
 /// Otherwise the columns give in this order, each in proportion to what it can
-/// give: long text (`TEXT_MIN`), numbers (`SMALL_MIN`), then Name (`NAME_MIN`), and
-/// only then the text and the short columns, which keep priority, down to
-/// `MIN_WIDTH`. Short values (Date, Size...) stay whole while the others can give.
+/// give: long text (`TEXT_MIN`), numbers (`SMALL_MIN`), then Name (`NAME_MIN`), then
+/// path columns (`TEXT_MIN`), and only then the text, path and short columns, which
+/// keep priority, down to `MIN_WIDTH`. Short values (Date, Size...) stay whole while
+/// the others can give.
 pub fn fit_all(content: &Widths, shown: &Shown, roles: &Roles, available: f32) -> Widths {
     let name = roles.iter().position(|&r| r == Role::Name).unwrap_or(0);
     // Name is always shown.
@@ -553,7 +557,8 @@ pub fn fit_all(content: &Widths, shown: &Shown, roles: &Roles, available: f32) -
         over = squeeze(&mut widths, &with(&[Role::Text]), TEXT_MIN, over);
         over = squeeze(&mut widths, &with(&[Role::Numeric]), SMALL_MIN, over);
         over = squeeze(&mut widths, &[name], NAME_MIN, over);
-        squeeze(&mut widths, &with(&[Role::Text, Role::Short]), MIN_WIDTH, over);
+        over = squeeze(&mut widths, &with(&[Role::Path]), TEXT_MIN, over);
+        squeeze(&mut widths, &with(&[Role::Text, Role::Path, Role::Short]), MIN_WIDTH, over);
     }
     // Whole points: the config keeps them so. Name takes what the others leave.
     let others: Vec<usize> = columns.iter().copied().filter(|&c| c != name).collect();
@@ -2593,6 +2598,22 @@ pub(crate) mod tests {
         assert_eq!(fitted[1..3], [110.0, 70.0], "{fitted:?}");
         assert!((3..6).all(|c| fitted[c] >= SMALL_MIN && fitted[c] < content[c]), "{fitted:?}");
         assert!(fitted[0] >= 300.0, "{fitted:?}");
+    }
+
+    #[test]
+    fn fit_all_cuts_a_path_column_after_name_and_before_the_short_ones() {
+        let roles = [Role::Name, Role::Path, Role::Short, Role::Short, Role::Short, Role::Short];
+        let content = [300.0, 400.0, 100.0, 100.0, 100.0, 100.0];
+        // 100 over: Name (300 -> 200) gives, nobody else.
+        let fitted = fit_all(&content, &ALL_SHOWN, &roles, 1000.0);
+        assert_eq!(fitted, [200.0, 400.0, 100.0, 100.0, 100.0, 100.0], "only Name gives");
+        // 400 over: Name is at NAME_MIN, then the path column gives; the short ones stay whole.
+        let fitted = fit_all(&content, &ALL_SHOWN, &roles, 700.0);
+        assert_eq!(fitted, [NAME_MIN, 180.0, 100.0, 100.0, 100.0, 100.0], "Name, then the path");
+        // Past both floors, everyone gives down to MIN_WIDTH and the room is filled.
+        let fitted = fit_all(&content, &ALL_SHOWN, &roles, 500.0);
+        assert!((total(&fitted, &ALL_SHOWN) - 500.0).abs() < 0.5, "{fitted:?}");
+        assert!(fitted[1..].iter().all(|&w| (MIN_WIDTH..=TEXT_MIN).contains(&w)) && fitted[2] < 100.0, "{fitted:?}");
     }
 
     #[test]
