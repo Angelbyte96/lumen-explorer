@@ -30,6 +30,8 @@ pub enum Action {
     Up,
     FocusPathBar,
     ToggleHidden,
+    /// Ctrl+E: also list what the subfolders hold, all the way down.
+    ToggleFlat,
     /// Previous / next folder in the history (Alt+Left / Alt+Right).
     Back,
     Forward,
@@ -177,6 +179,9 @@ fn read_keys(ctx: &Context, typing: bool, list: bool) -> Vec<Action> {
         }
         if i.consume_key(Modifiers::COMMAND, Key::H) {
             actions.push(Action::ToggleHidden);
+        }
+        if i.consume_key(Modifiers::COMMAND, Key::E) {
+            actions.push(Action::ToggleFlat);
         }
         if i.consume_key(Modifiers::COMMAND, Key::D) {
             actions.push(Action::ToggleBookmark);
@@ -480,6 +485,16 @@ mod tests {
             Event::Text("d".into()),
         ];
         assert_eq!(actions_for(events), [Action::ToggleBookmark]);
+    }
+
+    #[test]
+    fn ctrl_e_toggles_the_subfolders_and_types_nothing() {
+        let events = vec![
+            Event::ModifiersChanged(Modifiers::COMMAND),
+            key(Key::E, Modifiers::COMMAND),
+            Event::Text("e".into()),
+        ];
+        assert_eq!(actions_for(events), [Action::ToggleFlat]);
     }
 
     #[test]
