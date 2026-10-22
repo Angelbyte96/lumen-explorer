@@ -19,6 +19,10 @@ scripts/install-desktop.sh             # build release, add Lumen to the app men
 scripts/install-desktop.sh --uninstall # remove it again
 ```
 
+It shows each step as it goes and ends with `Done: Lumen <version> (<commit>)
+is installed at ...`, the build you will get from the menu; a failed step ends
+with `Lumen was NOT installed`.
+
 No sudo: the binary goes to `~/.local/bin/lumen`, the menu entry to
 `~/.local/share/applications/lumen.desktop` and the icon to
 `~/.local/share/icons/hicolor`. Lumen then shows up as "Lumen" in the GNOME

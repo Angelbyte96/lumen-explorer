@@ -54,13 +54,24 @@ case $bin_dir in
         ;;
 esac
 
+# Any step that fails stops the script (set -e): say so, plainly.
+finished=false
+trap '[ "$finished" = true ] || echo "Lumen was NOT installed: the step above failed." >&2' EXIT
+
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -n 1)
+commit=$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo "no git")
+
 # Always build: cargo does nothing when the binary is already up to date.
+echo "[1/4] Building Lumen $version (release; the first build takes a few minutes)..."
 cargo build --release --manifest-path "$root/Cargo.toml"
 binary=${CARGO_TARGET_DIR:-$root/target}/release/lumen
 
+echo "[2/4] Installing the binary..."
 mkdir -p "$bin_dir" "$apps" "$icons/scalable/apps" "$icons/256x256/apps"
 bin_dir=$(cd "$bin_dir" && pwd) # the Exec path must be absolute
 cp "$binary" "$bin_dir/lumen.tmp" && mv "$bin_dir/lumen.tmp" "$bin_dir/lumen"
+
+echo "[3/4] Installing the menu entry and icon..."
 cp "$root/assets/lumen.svg" "$icons/scalable/apps/lumen.svg"
 cp "$root/assets/lumen.png" "$icons/256x256/apps/lumen.png"
 # Absolute Exec path: ~/.local/bin is not always on the PATH GNOME starts apps with.
@@ -71,7 +82,10 @@ while IFS= read -r line; do
     esac
 done <"$root/assets/lumen.desktop" >"$apps/lumen.desktop.tmp"
 mv "$apps/lumen.desktop.tmp" "$apps/lumen.desktop"
+
+echo "[4/4] Refreshing the app menu..."
 refresh
 
-echo "Lumen installed: $bin_dir/lumen"
-echo "It shows up in the app menu as \"Lumen\" (it may take a few seconds)."
+finished=true
+echo "Done: Lumen $version ($commit) is installed at $bin_dir/lumen"
+echo "It shows up in the app menu as \"Lumen\" (it may take a few seconds). Close a running Lumen to use this one."
