@@ -290,7 +290,8 @@ pub fn show(ui: &mut egui::Ui, rows: &[Recycled], look: &Look) -> Option<Recycle
                     });
                 }
             })
-            .body(|body| {
+            .body(|mut body| {
+                file_list::light_hovered_rows(body.ui_mut());
                 body.rows(row_height, rows.len(), |mut row| {
                     let i = row.index();
                     let item = &rows[i];
@@ -737,6 +738,20 @@ mod tests {
         let Some(RecycleEvent::Resized(new)) = released else { panic!("the widths are reported when let go: {released:?}") };
         assert!((new[0] - 310.0).abs() < 1.5, "Name is 50 wider: {new:?}");
         assert_eq!(new[1..], DEFAULT_WIDTHS[1..], "only the dragged column changes");
+    }
+
+    #[test]
+    fn the_entry_under_the_pointer_is_lit_in_a_translucent_cyan() {
+        let ctx = egui::Context::default();
+        let rows = three();
+        let scene = Scene::default();
+        let shapes = settled(&ctx, &rows, &scene);
+        let at = text_rect(&shapes, "300 B").center();
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            shapes = draw(&ctx, &rows, &scene, vec![egui::Event::PointerMoved(at)], egui::Modifiers::NONE, None).1;
+        }
+        assert!(file_list::tests::hover_lit(&ctx, &shapes, at));
     }
 
     #[test]
