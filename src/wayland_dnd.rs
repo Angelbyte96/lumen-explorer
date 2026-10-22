@@ -177,6 +177,14 @@ fn should_start(carried: bool, outside: bool, serial: Option<u32>, started: bool
     carried && outside && serial.is_some() && !started
 }
 
+/// Whether a drag Lumen carries goes to the compositor: past the window's
+/// edge, or with Alt held. GNOME's Alt+Tab switcher takes the pointer and
+/// breaks the press's grab, and a `start_drag` after that is ignored; a
+/// drag the compositor already holds lives through the switch.
+fn goes_out(left_window: bool, alt: bool) -> bool {
+    left_window || alt
+}
+
 /// Writes all of `data` to `fd` (a receiving app's pipe) without ever
 /// waiting longer than `limit` for a slow reader.
 fn write_within(fd: OwnedFd, data: &[u8], limit: Duration) -> std::io::Result<()> {
@@ -505,7 +513,7 @@ impl Receiver {
         }
         let drag = crate::ui::dnd::carried_inside(ctx);
         let serial = worker.shared.grab.lock().ok().and_then(|grab| grab.press);
-        let outside = drag.is_some() && crate::ui::dnd::left_window(ctx);
+        let outside = drag.is_some() && goes_out(crate::ui::dnd::left_window(ctx), ctx.input(|i| i.modifiers.alt));
         if !should_start(drag.is_some(), outside, serial, worker.shared.started(serial)) {
             return false;
         }
@@ -1243,6 +1251,14 @@ mod tests {
         assert!(!should_start(true, false, Some(7), false), "still inside the window");
         assert!(!should_start(true, true, None, false), "no press serial: start_drag would be refused");
         assert!(!should_start(true, true, Some(7), true), "this grab already started one");
+    }
+
+    #[test]
+    fn alt_held_mid_drag_hands_it_over_before_the_window_switcher_takes_the_pointer() {
+        assert!(goes_out(false, true), "Alt inside the window: Alt+Tab may follow");
+        assert!(goes_out(true, false), "past the edge, as before");
+        assert!(goes_out(true, true));
+        assert!(!goes_out(false, false), "inside, no Alt: the drag stays Lumen's");
     }
 
     #[test]
