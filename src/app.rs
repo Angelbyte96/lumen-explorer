@@ -1965,6 +1965,16 @@ impl LumenApp {
         self.activate(ctx, entry.path.clone(), entry.is_dir);
     }
 
+    /// Flattened, opens the folder row `row` is in, with that row selected.
+    fn open_folder_of(&mut self, ctx: &egui::Context, row: usize) {
+        let Some(&index) = self.tab.view.rows.get(row) else { return };
+        let entry = self.tab.view.entry(index);
+        if let Some(folder) = entry.path.parent() {
+            let (folder, name) = (folder.to_path_buf(), entry.name.clone());
+            self.navigate(ctx, folder, Some(name));
+        }
+    }
+
     fn activate(&mut self, ctx: &egui::Context, path: PathBuf, is_dir: bool) {
         if is_dir {
             self.navigate(ctx, path, None);
@@ -3397,6 +3407,7 @@ impl eframe::App for LumenApp {
                     self.tab.view.select_row(i);
                     self.activate_selected(&ctx);
                 }
+                Some(ListEvent::OpenFolder(i)) => self.open_folder_of(&ctx, i),
                 Some(ListEvent::Sort(column)) => self.tab.view.sort_by(column),
                 Some(ListEvent::Resized(widths)) => self.columns = widths,
                 Some(ListEvent::Fit(column)) => self.run_command(&ctx, Command::FitColumn(column)),
@@ -4134,6 +4145,23 @@ mod tests {
             app.poll_flat();
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn a_nested_rows_grey_folder_opens_that_folder_with_the_row_selected() {
+        let (ctx, mut app, dir) = app_in("app-flat-open-folder");
+        std::fs::create_dir(dir.join("sub/deeper")).unwrap();
+        std::fs::write(dir.join("sub/deeper/d.txt"), "D").unwrap();
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        let row = app.tab.view.rows.iter().position(|&i| app.tab.view.entry(i).name == "d.txt").unwrap();
+        app.open_folder_of(&ctx, row);
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub/deeper")), "opens the folder it is in");
+        land(&mut app);
+        assert!(!app.tab.view.is_flat(), "the folder alone");
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.name.as_str()), Some("d.txt"), "the row it came from is selected");
+        app.handle_action(&ctx, Action::Back);
+        assert_eq!(app.tab.lister.last_requested(), Some(dir), "Back returns");
     }
 
     #[test]

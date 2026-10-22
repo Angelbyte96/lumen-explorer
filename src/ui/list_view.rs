@@ -74,6 +74,7 @@ pub fn show(
                     ui.painter().add(dnd::lit_shape(ui.ctx(), rect));
                 }
                 let inner = rect.shrink2(vec2(6.0, 0.0));
+                let mut open_folder = false;
                 ui.scope_builder(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
                     if cut.contains(&entry.path) {
                         ui.set_opacity(file_list::CUT_OPACITY);
@@ -85,10 +86,12 @@ pub fn show(
                         }
                     } else {
                         file_list::name_label(ui, entry, view.filter());
-                        file_list::folder_label(ui, view.relative_parent(entry));
+                        open_folder = file_list::folder_label(ui, view.relative_parent(entry));
                     }
                 });
-                if let Some(clicked) = cell_event(&response, i) {
+                if open_folder {
+                    event = Some(ListEvent::OpenFolder(i));
+                } else if let Some(clicked) = cell_event(&response, i) {
                     event = Some(clicked);
                 }
             }
@@ -303,6 +306,25 @@ mod tests {
         view.extend_to(2);
         let (_, two) = lift(&ctx, &view, find(&texts, "a.txt").center(), to);
         find(&two, "Copy 2 items to x");
+    }
+
+    #[test]
+    fn a_click_on_a_nested_cells_grey_folder_opens_that_folder() {
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        let listing = |entries| crate::fs::Listing { id: 1, path: PathBuf::from("/x"), result: Ok(entries), elapsed: std::time::Duration::ZERO };
+        view.apply_listing(listing(vec![entry("src", true), entry("a.txt", false)]), None);
+        view.set_flat(vec![PathBuf::from("/x")]);
+        let main = Entry { path: PathBuf::from("/x/src/main.rs"), ..entry("main.rs", false) };
+        view.apply_flat(&[PathBuf::from("/x")], vec![main]);
+        let row = view.rows.iter().position(|&i| view.entry(i).name == "main.rs").unwrap();
+        let texts = settled_texts(&ctx, &view);
+        let click = |pos| vec![egui::Event::PointerMoved(pos), button(pos, true), button(pos, false)];
+        let (out, _) = draw(&ctx, &view, click(find(&texts, "> src").center()));
+        assert!(matches!(out.event, Some(ListEvent::OpenFolder(r)) if r == row), "the grey folder opens it: {:?}", out.event);
+        draw(&ctx, &view, vec![]);
+        let (out, _) = draw(&ctx, &view, click(find(&texts, "main.rs").center()));
+        assert!(matches!(out.event, Some(ListEvent::Select(r)) if r == row), "the name still selects: {:?}", out.event);
     }
 
     #[test]
