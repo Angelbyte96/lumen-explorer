@@ -245,6 +245,7 @@ pub fn show(
                                             }
                                         } else {
                                             name_label(ui, entry, view.filter());
+                                            folder_label(ui, view.relative_parent(entry));
                                         }
                                         // The icon and the name: kept for dragging the entry itself.
                                         on_name = ui.input(|i| i.pointer.press_origin()).is_some_and(|p| ui.min_rect().contains(p));
@@ -747,6 +748,14 @@ pub fn cursor_row_rect(ctx: &egui::Context) -> Option<egui::Rect> {
 pub fn name_label(ui: &mut egui::Ui, entry: &Entry, typed: &str) {
     let ranges = word_ranges(&entry.name, typed).unwrap_or_default();
     ranged_name_label(ui, entry, &ranges);
+}
+
+/// Flattened (Ctrl+E), the folder an entry from a subfolder is in, dimmed
+/// after its name, like File Pilot: `lumen.pdb > deps`.
+pub fn folder_label(ui: &mut egui::Ui, folder: Option<String>) {
+    if let Some(folder) = folder {
+        ui.add(egui::Label::new(egui::RichText::new(format!("> {folder}")).weak()).selectable(false).truncate());
+    }
 }
 
 /// `name_label` without its own tooltip when cut: for a cell whose whole

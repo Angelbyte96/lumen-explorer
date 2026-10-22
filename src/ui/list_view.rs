@@ -85,6 +85,7 @@ pub fn show(
                         }
                     } else {
                         file_list::name_label(ui, entry, view.filter());
+                        file_list::folder_label(ui, view.relative_parent(entry));
                     }
                 });
                 if let Some(clicked) = cell_event(&response, i) {
