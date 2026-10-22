@@ -74,7 +74,7 @@ pub fn show(
                     ui.painter().add(dnd::lit_shape(ui.ctx(), rect));
                 }
                 let inner = rect.shrink2(vec2(6.0, 0.0));
-                let mut open_folder = false;
+                let mut grey_folder = None;
                 ui.scope_builder(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
                     if cut.contains(&entry.path) {
                         ui.set_opacity(file_list::CUT_OPACITY);
@@ -86,10 +86,10 @@ pub fn show(
                         }
                     } else {
                         file_list::name_label(ui, entry, view.filter());
-                        open_folder = file_list::folder_label(ui, view.relative_parent(entry));
+                        grey_folder = file_list::folder_label(ui, view.relative_parent(entry));
                     }
                 });
-                if open_folder {
+                if file_list::opens_folder(&response, grey_folder) {
                     event = Some(ListEvent::OpenFolder(i));
                 } else if let Some(clicked) = cell_event(&response, i) {
                     event = Some(clicked);
@@ -325,6 +325,20 @@ mod tests {
         draw(&ctx, &view, vec![]);
         let (out, _) = draw(&ctx, &view, click(find(&texts, "main.rs").center()));
         assert!(matches!(out.event, Some(ListEvent::Select(r)) if r == row), "the name still selects: {:?}", out.event);
+        let grey = find(&texts, "> src").center();
+        let with = |modifiers| {
+            draw_shapes(&ctx, &view, vec![], modifiers);
+            let event = draw_shapes(&ctx, &view, click(grey), modifiers).0.event;
+            draw(&ctx, &view, vec![]);
+            event
+        };
+        let toggled = with(egui::Modifiers::COMMAND);
+        assert!(matches!(toggled, Some(ListEvent::Toggle(r)) if r == row), "Ctrl+click picks the cell: {toggled:?}");
+        let extended = with(egui::Modifiers::SHIFT);
+        assert!(matches!(extended, Some(ListEvent::Extend(r)) if r == row), "Shift+click extends: {extended:?}");
+        let right = |pressed| egui::Event::PointerButton { pos: grey, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() };
+        let (out, _) = draw(&ctx, &view, vec![egui::Event::PointerMoved(grey), right(true), right(false)]);
+        assert!(matches!(out.event, Some(ListEvent::Menu(r)) if r == row), "a right click opens the cell's menu: {:?}", out.event);
     }
 
     #[test]
