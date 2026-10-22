@@ -101,7 +101,7 @@ fn keys(ctx: &egui::Context) -> Keys {
 /// Whether the pointer at `pos` (`None`: it is gone) is outside `screen`, the
 /// window's own surface: the right and bottom edges are outside, as a pixel
 /// is.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 fn outside_window(pos: Option<egui::Pos2>, screen: Rect) -> bool {
     let Some(pos) = pos else { return true };
     pos.x < screen.min.x || pos.y < screen.min.y || pos.x >= screen.max.x || pos.y >= screen.max.y
@@ -110,13 +110,13 @@ fn outside_window(pos: Option<egui::Pos2>, screen: Rect) -> bool {
 /// Whether the pointer is outside the window. During the implicit grab of a
 /// held button the compositor keeps sending motion past the edge, which is
 /// how a drag in progress is seen leaving.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 pub fn left_window(ctx: &egui::Context) -> bool {
     outside_window(ctx.input(|i| i.pointer.latest_pos()), ctx.content_rect())
 }
 
 /// The drag carried inside Lumen (egui's payload), not one from another app.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 pub fn carried_inside(ctx: &egui::Context) -> Option<Drag> {
     if outside(ctx).is_some() {
         return None;
@@ -138,7 +138,7 @@ fn handed_off_id() -> egui::Id {
 /// The compositor has the drag now (a Wayland drag out): the pointer is its
 /// and egui will never see the button let go. Drops the payload, so nothing is
 /// carried, and has the next frame see the release (`end_hand_off`).
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 pub fn hand_off(ctx: &egui::Context) {
     DragAndDrop::clear_payload(ctx);
     let (at, modifiers) = ctx.input(|i| (i.pointer.latest_pos().or(i.pointer.interact_pos()), i.modifiers));
@@ -148,7 +148,7 @@ pub fn hand_off(ctx: &egui::Context) {
 
 /// First thing of a frame: if the drag was handed off, the release and the
 /// pointer gone that egui missed.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 pub fn end_hand_off(ctx: &egui::Context, raw_input: &mut egui::RawInput) {
     let Some(HandedOff { at, modifiers }) = ctx.data_mut(|d| {
         let handed = d.get_temp::<HandedOff>(handed_off_id());
