@@ -465,6 +465,16 @@ impl View {
         self.rows.get(row).is_some_and(|&i| self.picks.contains(&self.entry(i).path))
     }
 
+    /// The folders picked among the rows shown (not the cursor row alone).
+    pub fn picked_folders(&self) -> Vec<PathBuf> {
+        (0..self.rows.len())
+            .filter(|&row| self.is_picked(row))
+            .map(|row| self.entry(self.rows[row]))
+            .filter(|e| e.is_dir)
+            .map(|e| e.path.clone())
+            .collect()
+    }
+
     /// Picked rows shown.
     pub fn picked_count(&self) -> usize {
         (0..self.rows.len()).filter(|&row| self.is_picked(row)).count()
@@ -777,6 +787,31 @@ fn tree_rows(
         pending.extend((0..order.len()).rev().map(|k| (first + k, depth + 1)));
     }
     (rows, kids, depths)
+}
+
+/// The folders to flatten after Ctrl+E, from those flattened now (`roots`)
+/// and the folders picked: none picked, all of `current` or nothing; picked
+/// ones all listed already, those taken out; else those added.
+fn next_flat(roots: &[PathBuf], current: &Path, picked: &[PathBuf]) -> Vec<PathBuf> {
+    let whole = roots.iter().any(|root| root == current);
+    if picked.is_empty() || whole {
+        return if roots.is_empty() && picked.is_empty() { vec![current.to_path_buf()] } else { Vec::new() };
+    }
+    let listed = |pick: &PathBuf| roots.iter().any(|root| pick.starts_with(root));
+    if picked.iter().all(listed) {
+        // Out with the roots holding a picked folder or held by one.
+        return roots
+            .iter()
+            .filter(|root| !picked.iter().any(|pick| pick.starts_with(root) || root.starts_with(pick)))
+            .cloned()
+            .collect();
+    }
+    let mut next: Vec<PathBuf> = roots.to_vec();
+    next.extend(picked.iter().filter(|pick| !listed(pick)).cloned());
+    // A folder inside another one listed is listed with it.
+    let all = next.clone();
+    next.retain(|root| !all.iter().any(|other| other != root && root.starts_with(other)));
+    next
 }
 
 /// The entries of a flattened view: the folder's own (as listed, fresher
@@ -2924,13 +2959,19 @@ impl LumenApp {
     }
 
     /// Ctrl+E: lists what the subfolders hold too, or the folder alone again.
+    /// With folders picked, it lists or takes out what those hold alone.
     fn toggle_flat(&mut self) {
-        if self.tab.view.is_flat() {
+        if self.on_marker() {
+            return;
+        }
+        let view = &self.tab.view;
+        let next = next_flat(view.flat_roots(), &view.current, &view.picked_folders());
+        if next.is_empty() {
             self.tab.view.clear_flat();
             self.tab.flattener = None;
             self.tab.flat_due = false;
-        } else if !self.on_marker() {
-            self.tab.view.set_flat(vec![self.tab.view.current.clone()]);
+        } else {
+            self.tab.view.set_flat(next);
             self.tab.flat_due = true;
         }
     }
@@ -4116,6 +4157,43 @@ mod tests {
         land(&mut app);
         land_flat(&ctx, &mut app);
         assert!(app.tab.view.lists(&dir.join("sub/new.txt")));
+    }
+
+    #[test]
+    fn ctrl_e_on_picked_folders_lists_only_what_they_hold() {
+        let (ctx, mut app, dir) = app_in("app-flat-partial");
+        std::fs::create_dir(dir.join("other")).unwrap();
+        std::fs::write(dir.join("sub/c.txt"), "C").unwrap();
+        std::fs::write(dir.join("other/o.txt"), "O").unwrap();
+        app.tab.view.apply_refresh(listing_of(&dir));
+        // A click on a file, then a Ctrl+click on `sub` (the first one keeps the cursor row picked).
+        let a = app.tab.view.row_of_path(&dir.join("a.txt")).unwrap();
+        app.tab.view.select_row(a);
+        let sub = app.tab.view.row_of_path(&dir.join("sub")).unwrap();
+        app.tab.view.toggle_pick(sub);
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        assert!(app.tab.view.lists(&dir.join("sub/c.txt")));
+        assert!(!app.tab.view.lists(&dir.join("other/o.txt")), "a folder not picked stays folded");
+        assert_eq!(app.tab.view.rows.len(), 5, "other, sub, a.txt, b.txt, c.txt");
+        // The same folders again: the folder alone.
+        app.handle_action(&ctx, Action::ToggleFlat);
+        assert!(!app.tab.view.is_flat());
+        assert_eq!(app.tab.view.rows.len(), 4);
+    }
+
+    #[test]
+    fn picked_folders_are_flattened_the_cursor_alone_flattens_everything() {
+        let x = PathBuf::from("/x");
+        let (a, b) = (x.join("a"), x.join("b"));
+        assert_eq!(next_flat(&[], &x, &[]), [x.clone()], "nothing picked: all of it");
+        assert_eq!(next_flat(&[x.clone()], &x, &[]), Vec::<PathBuf>::new(), "again: off");
+        assert_eq!(next_flat(&[], &x, &[a.clone()]), [a.clone()]);
+        assert_eq!(next_flat(&[a.clone()], &x, &[b.clone()]), [a.clone(), b.clone()], "another folder is added");
+        assert_eq!(next_flat(&[a.clone(), b.clone()], &x, &[a.clone()]), [b.clone()], "one already listed is taken out");
+        assert_eq!(next_flat(&[a.clone()], &x, &[a.join("deep")]), Vec::<PathBuf>::new(), "inside a listed one: already listed, so out with it");
+        assert_eq!(next_flat(&[a.clone()], &x, &[]), Vec::<PathBuf>::new(), "nothing picked: off");
+        assert_eq!(next_flat(&[x.clone()], &x, &[a.clone()]), Vec::<PathBuf>::new(), "all of it listed: off");
     }
 
     #[test]
