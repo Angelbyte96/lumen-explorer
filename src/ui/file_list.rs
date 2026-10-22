@@ -212,7 +212,7 @@ pub fn show(
                     let mut on_name = false;
                     // Where the folder's chevron is drawn (Tree).
                     let mut chevron = None;
-                    let mut open_folder = false;
+                    let mut grey_folder = None;
                     row.set_selected(view.is_highlighted(i));
                     let mut row_rect = egui::Rect::NOTHING;
                     // Behind the row's content: where a folder taking a drop is lit.
@@ -249,7 +249,7 @@ pub fn show(
                                             }
                                         } else {
                                             name_label(ui, entry, view.filter());
-                                            open_folder = folder_label(ui, view.relative_parent(entry));
+                                            grey_folder = folder_label(ui, view.relative_parent(entry));
                                         }
                                         // The icon and the name: kept for dragging the entry itself.
                                         on_name = ui.input(|i| i.pointer.press_origin()).is_some_and(|p| ui.min_rect().contains(p));
@@ -297,7 +297,7 @@ pub fn show(
                         let at = response.ctx.input(|input| input.pointer.interact_pos());
                         at.is_some_and(|at| egui::Rect::from_x_y_ranges(c.x_range(), response.rect.y_range()).contains(at))
                     });
-                    if open_folder {
+                    if opens_folder(&response, grey_folder) {
                         event = Some(ListEvent::OpenFolder(i));
                     } else if response.secondary_clicked() {
                         event = Some(ListEvent::Menu(i));
@@ -762,12 +762,23 @@ pub fn name_label(ui: &mut egui::Ui, entry: &Entry, typed: &str) {
 }
 
 /// Flattened (Ctrl+E), the folder an entry from a subfolder is in, dimmed
-/// after its name, like File Pilot: `lumen.pdb > deps`. `true` when it was
-/// clicked: it opens that folder, like File Pilot.
-pub fn folder_label(ui: &mut egui::Ui, folder: Option<String>) -> bool {
-    let Some(folder) = folder else { return false };
-    let label = egui::Label::new(egui::RichText::new(format!("> {folder}")).weak()).selectable(false).truncate();
-    ui.add(label.sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+/// after its name, like File Pilot: `lumen.pdb > deps`. Where it was drawn:
+/// a plain click there opens that folder ([`opens_folder`]).
+pub fn folder_label(ui: &mut egui::Ui, folder: Option<String>) -> Option<egui::Rect> {
+    let folder = folder?;
+    let rect = ui.add(egui::Label::new(egui::RichText::new(format!("> {folder}")).weak()).selectable(false).truncate()).rect;
+    if ui.rect_contains_pointer(rect) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    Some(rect)
+}
+
+/// A left click with no keys held on the row's grey folder (`label`). The row
+/// itself takes every other click: Ctrl and Shift pick, a right click opens its menu.
+pub(crate) fn opens_folder(response: &egui::Response, label: Option<egui::Rect>) -> bool {
+    let plain = response.ctx.input(|input| input.modifiers.is_none());
+    let on_label = label.zip(response.interact_pointer_pos()).is_some_and(|(label, at)| label.contains(at));
+    response.clicked() && plain && on_label
 }
 
 /// `name_label` without its own tooltip when cut: for a cell whose whole
@@ -2529,17 +2540,27 @@ pub(crate) mod tests {
         let view = flat_listed();
         let row = view.rows.iter().position(|&i| view.entry(i).name == "main.rs").unwrap();
         let shapes = settled_tree(&ctx, &view, false);
-        let click = |at: egui::Pos2| {
+        let click_with = |at: egui::Pos2, button: egui::PointerButton, modifiers: egui::Modifiers| {
             draw_tree(&ctx, &view, false, vec![egui::Event::PointerMoved(at)], None);
-            let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
-            let event = draw_tree(&ctx, &view, false, vec![press(true), press(false)], None).0;
+            let press = |pressed| egui::Event::PointerButton { pos: at, button, pressed, modifiers };
+            let event = draw_tree(&ctx, &view, false, vec![egui::Event::ModifiersChanged(modifiers), press(true), press(false)], None).0;
+            draw_tree(&ctx, &view, false, vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)], None);
             settled_tree(&ctx, &view, false);
             event
         };
-        let opened = click(text_rect(&shapes, "> src").center());
+        let click = |at| click_with(at, egui::PointerButton::Primary, egui::Modifiers::NONE);
+        let grey = text_rect(&shapes, "> src").center();
+        let opened = click(grey);
         assert!(matches!(opened, Some(ListEvent::OpenFolder(r)) if r == row), "the grey folder opens it: {opened:?}");
         let named = click(text_rect(&shapes, "main.rs").center());
         assert!(matches!(named, Some(ListEvent::Select(r)) if r == row), "the name still selects: {named:?}");
+        let primary = egui::PointerButton::Primary;
+        let toggled = click_with(grey, primary, egui::Modifiers::COMMAND);
+        assert!(matches!(toggled, Some(ListEvent::Toggle(r)) if r == row), "Ctrl+click picks the row: {toggled:?}");
+        let extended = click_with(grey, primary, egui::Modifiers::SHIFT);
+        assert!(matches!(extended, Some(ListEvent::Extend(r)) if r == row), "Shift+click extends: {extended:?}");
+        let menu = click_with(grey, egui::PointerButton::Secondary, egui::Modifiers::NONE);
+        assert!(matches!(menu, Some(ListEvent::Menu(r)) if r == row), "a right click opens the row's menu: {menu:?}");
     }
 
     #[test]
