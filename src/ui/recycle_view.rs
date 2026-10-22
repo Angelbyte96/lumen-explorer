@@ -762,6 +762,7 @@ mod tests {
         let lines = file_list::tests::separators(&ctx, &shapes);
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert!(lines[0].0 < text_rect(&shapes, "Original Location").min.x, "the first one between Name and Original Location");
+        assert!(lines.iter().all(|(_, height)| height.max < 60.0), "in the header only: {lines:?}");
     }
 
     #[test]

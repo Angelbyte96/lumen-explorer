@@ -667,8 +667,7 @@ pub fn live_widths(ui: &egui::Ui, saved: &Widths) -> Widths {
     }
 }
 
-/// The faint line between two columns, from the header down to the list's
-/// bottom, like File Pilot's.
+/// The faint line between two column headers, like File Pilot's.
 pub(crate) fn separator_stroke(visuals: &egui::Visuals) -> egui::Stroke {
     egui::Stroke::new(1.0, visuals.text_color().gamma_multiply(SEPARATOR_OPACITY))
 }
@@ -696,12 +695,11 @@ pub enum BorderEvent {
 pub fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths: &Widths) -> Option<BorderEvent> {
     let gap = ui.spacing().item_spacing.x;
     let mut event = None;
-    // Under the borders: a faint line after every column but the last, to the list's bottom.
+    // Under the borders: a faint line in the header after every column but the last.
     let last_right = cells.iter().filter(|cell| cell.is_positive()).map(|cell| cell.right()).fold(f32::NEG_INFINITY, f32::max);
-    let bottom = ui.clip_rect().bottom();
     let separator = separator_stroke(ui.visuals());
     for cell in cells.iter().filter(|cell| cell.is_positive() && cell.right() < last_right) {
-        ui.painter().vline(cell.right() + gap / 2.0, cell.top()..=bottom, separator);
+        ui.painter().vline(cell.right() + gap / 2.0, cell.y_range(), separator);
     }
     for (column, cell) in cells.iter().enumerate().filter(|(_, cell)| cell.is_positive()) {
         let x = cell.right() + gap / 2.0;
@@ -1945,7 +1943,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn faint_separators_run_between_the_columns_from_the_header_to_the_bottom() {
+    fn faint_separators_run_between_the_columns_in_the_header_only() {
         let ctx = egui::Context::default();
         let view = listed(&["a.txt", "b.txt"]);
         let lefts = settled(&ctx, &view, &DEFAULT_WIDTHS);
@@ -1962,7 +1960,7 @@ pub(crate) mod tests {
         for (column, (x, height)) in lines.iter().enumerate() {
             assert!(*x < lefts[column + 1] && *x > lefts[column], "between {} and {}: {x}", COLUMNS[column].0, COLUMNS[column + 1].0);
             assert!(height.min < 20.0, "from the header: {height:?}");
-            assert!(height.max > crate::ui::testing::SCREEN.max.y - 40.0, "to the list's bottom, past the rows: {height:?}");
+            assert!(height.max < 40.0, "in the header only, not down the rows: {height:?}");
         }
     }
 
