@@ -617,6 +617,7 @@ mod tests {
         assert_eq!(lines.len(), 5, "{lines:?}");
         let ty = text_rect(&shapes, "Type");
         assert!(lines[0].0 < ty.min.x && lines[0].0 > text_rect(&shapes, "Name").max.x, "the first one between Name and Type");
+        assert!(lines.iter().all(|(_, height)| height.max < 60.0), "in the header only: {lines:?}");
     }
 
     #[test]
