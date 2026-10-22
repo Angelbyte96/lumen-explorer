@@ -338,7 +338,7 @@ fn item(ui: &mut egui::Ui, icon: ItemIcon, theme: &'static str, label: &str, hin
     let response = inner.response.union(inner.inner);
     // The whole row, as the file rows do, also where the name's button is.
     if response.contains_pointer() && !selected {
-        let fill = ui.visuals().widgets.hovered.bg_fill;
+        let fill = crate::ui::theme::row_hover(ui.visuals());
         ui.painter().set(backdrop, egui::Shape::rect_filled(response.rect, egui::CornerRadius::same(3), fill));
     }
     response.on_hover_text(hint)
@@ -464,7 +464,7 @@ mod tests {
             output.textures_delta.clear();
             (output.shapes, row)
         };
-        let hover = ctx.global_style().visuals.widgets.hovered.bg_fill;
+        let hover = crate::ui::theme::row_hover(&ctx.global_style().visuals);
         let fills = |shapes: &[egui::epaint::ClippedShape]| -> Vec<egui::Rect> {
             shapes
                 .iter()
