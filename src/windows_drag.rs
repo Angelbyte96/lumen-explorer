@@ -8,31 +8,55 @@ use std::path::PathBuf;
 use eframe::egui;
 
 /// After the list is drawn: when an entry carried inside Lumen has its
-/// pointer past the window's edge, hands it to Windows as a drag out.
+/// pointer past the window's edge, or the window lost the focus mid-drag
+/// (Alt+Tab to another app), hands it to Windows as a drag out.
 /// `window` is Lumen's window, the drag's owner. Returns whether it did.
 pub fn carry_out(ctx: &egui::Context, window: Option<isize>) -> bool {
-    carry_out_with(ctx, |paths| drag_out(paths, window))
+    carry_out_with(ctx, button_held, |paths| drag_out(paths, window))
 }
 
 /// `carry_out` with the system's drag as `start`, which returns once the
-/// button is let go or Escape is pressed.
+/// button is let go or Escape is pressed, and `held` telling whether the
+/// button is really still down.
 fn carry_out_with(
     ctx: &egui::Context,
+    held: impl FnOnce() -> bool,
     start: impl FnOnce(&[PathBuf]) -> Result<(), String>,
 ) -> bool {
     let Some(drag) = crate::ui::dnd::carried_inside(ctx) else {
         return false;
     };
-    if !crate::ui::dnd::left_window(ctx) {
+    // A window that lost the focus mid-drag (Alt+Tab) no longer gets the
+    // pointer: egui keeps it where it was, inside, though it moves on.
+    let away = !ctx.input(|i| i.focused);
+    if !away && !crate::ui::dnd::left_window(ctx) {
         return false;
     }
     // The system's drag keeps the release from egui, and a failed one must
     // not be tried again every frame: Lumen's drag ends here either way.
     crate::ui::dnd::hand_off(ctx);
+    // Let go where Lumen did not see it: a system drag now would drop at
+    // once on whatever app is under the pointer.
+    if !held() {
+        return true;
+    }
     if let Err(err) = start(&drag.paths) {
         eprintln!("[lumen] dragging files out failed: {err}");
     }
     true
+}
+
+/// Whether the primary button is really held now, whichever window has the
+/// pointer (egui only knows what Lumen's window was told).
+fn button_held() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
+    // SAFETY: plain queries. GetAsyncKeyState reads the physical buttons, so
+    // with them swapped the primary one is the right.
+    unsafe {
+        let primary = if GetSystemMetrics(SM_SWAPBUTTON) != 0 { VK_RBUTTON } else { VK_LBUTTON };
+        GetAsyncKeyState(primary.0 as i32) < 0
+    }
 }
 
 /// Runs the system's drag of `paths` until it ends. On winit's thread, which
@@ -155,7 +179,7 @@ mod tests {
         );
         let mut started = false;
         assert!(
-            !carry_out_with(&ctx, |_| {
+            !carry_out_with(&ctx, || true, |_| {
                 started = true;
                 Ok(())
             }),
@@ -164,7 +188,7 @@ mod tests {
 
         dragged_to(&ctx, &[dir.join("a.txt")], pos2(600.0, 300.0));
         assert!(
-            !carry_out_with(&ctx, |_| {
+            !carry_out_with(&ctx, || true, |_| {
                 started = true;
                 Ok(())
             }),
@@ -185,7 +209,7 @@ mod tests {
         let ctx = egui::Context::default();
         dragged_to(&ctx, &files, pos2(850.0, 300.0));
         let mut given = None;
-        assert!(carry_out_with(&ctx, |paths| {
+        assert!(carry_out_with(&ctx, || true, |paths| {
             given = Some(paths.to_vec());
             Ok(())
         }));
@@ -209,8 +233,76 @@ mod tests {
         );
         // A failed system drag still ends Lumen's: it is not tried again every frame.
         dragged_to(&ctx, &files[..1], pos2(850.0, 300.0));
-        assert!(carry_out_with(&ctx, |_| Err("refused".into())));
+        assert!(carry_out_with(&ctx, || true, |_| Err("refused".into())));
         assert!(carried_inside(&ctx).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One frame with `events`, Lumen's window focused or not.
+    fn frame_focused(ctx: &egui::Context, focused: bool, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            events,
+            focused,
+            screen_rect: Some(crate::ui::testing::SCREEN),
+            ..egui::RawInput::default()
+        };
+        ctx.run_ui(input, |_| ()).drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn a_drag_whose_window_loses_the_focus_goes_to_windows_with_the_pointer_still_inside() {
+        let dir = fresh_fixture("windows-drag-alt-tab");
+        let files = [dir.join("a.png"), dir.join("b.png")];
+        for file in &files {
+            std::fs::write(file, "x").unwrap();
+        }
+        let ctx = egui::Context::default();
+        // Alt+Tab mid-drag: the pointer egui knows stays over the window.
+        dragged_to(&ctx, &files, pos2(600.0, 300.0));
+        frame_focused(&ctx, false, vec![egui::Event::WindowFocused(false)]);
+        assert!(!crate::ui::dnd::left_window(&ctx), "egui still has the pointer inside");
+        let mut given = None;
+        assert!(carry_out_with(&ctx, || true, |paths| {
+            given = Some(paths.to_vec());
+            Ok(())
+        }));
+        assert_eq!(given.as_deref(), Some(&files[..]), "the system's drag carries every dragged path");
+        assert!(carried_inside(&ctx).is_none(), "Lumen's own drag is over");
+        let mut raw = egui::RawInput::default();
+        end_hand_off(&ctx, &mut raw);
+        run(&ctx, raw.events, |_| ());
+        assert!(!ctx.input(|i| i.pointer.any_down()), "egui does not think a button is held");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_drag_let_go_where_lumen_did_not_see_it_ends_without_a_system_drag() {
+        let dir = fresh_fixture("windows-drag-let-go");
+        std::fs::write(dir.join("a.png"), "x").unwrap();
+        let files = [dir.join("a.png")];
+        let ctx = egui::Context::default();
+        let mut started = false;
+        // Focus lost, then the button let go over another app.
+        dragged_to(&ctx, &files, pos2(600.0, 300.0));
+        frame_focused(&ctx, false, vec![egui::Event::WindowFocused(false)]);
+        assert!(carry_out_with(&ctx, || false, |_| {
+            started = true;
+            Ok(())
+        }));
+        assert!(carried_inside(&ctx).is_none(), "Lumen's own drag is over");
+        // Past the edge, let go before Lumen heard of it.
+        let ctx = egui::Context::default();
+        dragged_to(&ctx, &files, pos2(850.0, 300.0));
+        assert!(carry_out_with(&ctx, || false, |_| {
+            started = true;
+            Ok(())
+        }));
+        assert!(carried_inside(&ctx).is_none());
+        assert!(!started, "nothing is dropped on the app under the pointer");
+        let mut raw = egui::RawInput::default();
+        end_hand_off(&ctx, &mut raw);
+        run(&ctx, raw.events, |_| ());
+        assert!(!ctx.input(|i| i.pointer.any_down()), "egui does not think a button is held");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
