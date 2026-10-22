@@ -38,6 +38,8 @@ pub enum ListEvent {
     RenameEnded(bool),
     /// A column border was dragged and let go: the new widths.
     Resized(Widths),
+    /// A double click on a column's right border: fit the column to its content.
+    Fit(usize),
     /// Right click on a column's header: its menu.
     HeaderMenu(usize),
     /// Middle click on a column's header: hide it (never Name).
@@ -198,6 +200,7 @@ pub fn show(
                 }
             })
             .body(|mut body| {
+                light_hovered_rows(body.ui_mut());
                 band_scroll(body.ui_mut());
                 let clip = body.ui_mut().clip_rect();
                 body.rows(row_height, rows.len(), |mut row| {
@@ -307,8 +310,10 @@ pub fn show(
                     }
                 });
             });
-        if let Some(resized) = column_borders(ui, &cells, &widths) {
-            event = Some(ListEvent::Resized(resized));
+        match column_borders(ui, &cells, &widths) {
+            Some(BorderEvent::Resized(resized)) => event = Some(ListEvent::Resized(resized)),
+            Some(BorderEvent::Fit(column)) => event = Some(ListEvent::Fit(column)),
+            None => {}
         }
         // Everything under the header that is not a folder row (a file row, the
         // gaps between rows, the space below them) drops into the folder on screen.
@@ -662,15 +667,47 @@ pub fn live_widths(ui: &egui::Ui, saved: &Widths) -> Widths {
     }
 }
 
+/// The faint line between two column headers, like File Pilot's.
+pub(crate) fn separator_stroke(visuals: &egui::Visuals) -> egui::Stroke {
+    egui::Stroke::new(1.0, visuals.text_color().gamma_multiply(SEPARATOR_OPACITY))
+}
+
+const SEPARATOR_OPACITY: f32 = 0.15;
+
+/// The hovered row in a table `body` is lit in a translucent cyan, not
+/// egui's grey, like File Pilot's.
+pub fn light_hovered_rows(body: &mut egui::Ui) {
+    let visuals = body.visuals_mut();
+    visuals.widgets.hovered.bg_fill = crate::ui::theme::row_hover(visuals);
+}
+
+/// What a column border was used for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BorderEvent {
+    /// Dragged and let go: the new widths.
+    Resized(Widths),
+    /// Double clicked: fit the column on its left to its content (like Excel).
+    Fit(usize),
+}
+
 /// The draggable border on the right of each header `cells` holds, drawn
-/// over the header. Returns the new widths when a border is let go.
-pub fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths: &Widths) -> Option<Widths> {
+/// over the header. Says when a border is let go after a drag, or double clicked.
+pub fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths: &Widths) -> Option<BorderEvent> {
     let gap = ui.spacing().item_spacing.x;
     let mut event = None;
+    // Under the borders: a faint line in the header after every column but the last.
+    let last_right = cells.iter().filter(|cell| cell.is_positive()).map(|cell| cell.right()).fold(f32::NEG_INFINITY, f32::max);
+    let separator = separator_stroke(ui.visuals());
+    for cell in cells.iter().filter(|cell| cell.is_positive() && cell.right() < last_right) {
+        ui.painter().vline(cell.right() + gap / 2.0, cell.y_range(), separator);
+    }
     for (column, cell) in cells.iter().enumerate().filter(|(_, cell)| cell.is_positive()) {
         let x = cell.right() + gap / 2.0;
         let rect = egui::Rect::from_x_y_ranges(x - BORDER_GRAB..=x + BORDER_GRAB, cell.y_range());
-        let response = ui.interact(rect, egui::Id::new(("lumen_column_border", column)), egui::Sense::DRAG);
+        let response = ui.interact(rect, egui::Id::new(("lumen_column_border", column)), egui::Sense::CLICK | egui::Sense::DRAG);
+        if response.double_clicked() {
+            event = Some(BorderEvent::Fit(column));
+        }
         if response.hovered() || response.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
             let stroke = if response.dragged() { ui.visuals().widgets.active.fg_stroke } else { ui.visuals().widgets.hovered.fg_stroke };
@@ -690,7 +727,7 @@ pub fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], wi
         {
             ui.ctx().data_mut(|d| d.remove::<Drag>(drag_id()));
             let x = pointer.or_else(|| ui.input(|i| i.pointer.latest_pos())).map_or(drag.start_x, |p| p.x);
-            event = Some(drag.at(x));
+            event = Some(BorderEvent::Resized(drag.at(x)));
         }
     }
     event
@@ -920,7 +957,7 @@ pub fn stem_chars(name: &str, is_dir: bool) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1739,9 +1776,14 @@ mod tests {
     }
 
     fn draw_list(ctx: &egui::Context, view: &View, widths: &Widths, events: Vec<egui::Event>) -> Drawn {
+        draw_list_at(ctx, view, widths, events, None)
+    }
+
+    /// `draw_list` at `time`, for double clicks.
+    fn draw_list_at(ctx: &egui::Context, view: &View, widths: &Widths, events: Vec<egui::Event>, time: Option<f64>) -> Drawn {
         let mut event = None;
         let mut output = ctx.run_ui(
-            egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
+            egui::RawInput { events, time, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
             |root| {
                 egui::CentralPanel::default().show(root, |ui| {
                     event = show(ui, view, &[], Sizes { widths: *widths, ..Sizes::default() }, None, None, &FileIcons::default());
@@ -1870,6 +1912,94 @@ mod tests {
         let Some(ListEvent::Resized(new)) = released.event else { panic!("the widths are reported when let go") };
         assert!((new[0] - 370.0).abs() < 1.5, "Name is 50 wider: {new:?}");
         assert_eq!(new[1..], DEFAULT_WIDTHS[1..], "only the dragged column changes");
+    }
+
+    #[test]
+    fn a_double_click_on_a_header_border_fits_the_column_on_its_left_and_does_not_sort() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt", "b.txt"]);
+        let lefts = settled(&ctx, &view, &DEFAULT_WIDTHS);
+        // The border between Type and Date Modified.
+        let border = egui::pos2(lefts[2] - 8.0, 10.0);
+        let click = || vec![egui::Event::PointerMoved(border), button(border, true), button(border, false)];
+        let first = draw_list_at(&ctx, &view, &DEFAULT_WIDTHS, click(), Some(10.0));
+        assert!(first.event.is_none(), "one click on a border neither sorts nor fits");
+        let second = draw_list_at(&ctx, &view, &DEFAULT_WIDTHS, click(), Some(10.1));
+        assert!(matches!(second.event, Some(ListEvent::Fit(1))), "Type, the column on the border's left");
+    }
+
+    /// The x and the height of each faint column separator painted.
+    pub(crate) fn separators(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape]) -> Vec<(f32, egui::Rangef)> {
+        let stroke = separator_stroke(&ctx.global_style().visuals);
+        let mut lines: Vec<(f32, egui::Rangef)> = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::LineSegment { points: [a, b], stroke: line } if *line == stroke && a.x == b.x => Some((a.x, egui::Rangef::new(a.y.min(b.y), a.y.max(b.y)))),
+                _ => None,
+            })
+            .collect();
+        lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+        lines
+    }
+
+    #[test]
+    fn faint_separators_run_between_the_columns_in_the_header_only() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt", "b.txt"]);
+        let lefts = settled(&ctx, &view, &DEFAULT_WIDTHS);
+        let input = egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        let mut output = ctx.run_ui(input, |root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default());
+            });
+        });
+        output.textures_delta.clear();
+        let shapes = output.shapes;
+        let lines = separators(&ctx, &shapes);
+        assert_eq!(lines.len(), COLUMNS.len() - 1, "one between each two columns, none after the last: {lines:?}");
+        for (column, (x, height)) in lines.iter().enumerate() {
+            assert!(*x < lefts[column + 1] && *x > lefts[column], "between {} and {}: {x}", COLUMNS[column].0, COLUMNS[column + 1].0);
+            assert!(height.min < 20.0, "from the header: {height:?}");
+            assert!(height.max < 40.0, "in the header only, not down the rows: {height:?}");
+        }
+    }
+
+    /// Whether a rect at `at` is filled with the translucent cyan of a hovered row.
+    pub(crate) fn hover_lit(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape], at: egui::Pos2) -> bool {
+        let visuals = ctx.global_style().visuals.clone();
+        let fill = crate::ui::theme::accent(&visuals).gamma_multiply(crate::ui::theme::ROW_HOVER_OPACITY);
+        assert_ne!(fill, visuals.widgets.hovered.bg_fill, "not egui's grey");
+        shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == fill && r.rect.contains(at)))
+    }
+
+    #[test]
+    fn the_row_under_the_pointer_is_lit_in_a_translucent_cyan_not_grey() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt", "b.txt"]);
+        let visuals = ctx.global_style().visuals.clone();
+        let cyan = crate::ui::theme::row_hover(&visuals);
+        assert_eq!(cyan, crate::ui::theme::accent(&visuals).gamma_multiply(crate::ui::theme::ROW_HOVER_OPACITY), "the accent, see-through");
+        assert!(cyan.a() < 255, "translucent");
+        settled(&ctx, &view, &DEFAULT_WIDTHS);
+        let input = |events| egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        let mut shapes = Vec::new();
+        let mut at = egui::Pos2::ZERO;
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(input(vec![egui::Event::PointerMoved(at)]), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default());
+                });
+            });
+            output.textures_delta.clear();
+            at = output.shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == "b.txt" => Some(t.pos + egui::vec2(400.0, t.galley.size().y / 2.0)),
+                _ => None,
+            }).expect("b.txt painted");
+            shapes = output.shapes;
+        }
+        assert!(hover_lit(&ctx, &shapes, at), "b.txt's row is lit");
+        let grey = visuals.widgets.hovered.bg_fill;
+        assert!(!shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == grey && r.rect.contains(at))), "not the grey");
     }
 
     #[test]
