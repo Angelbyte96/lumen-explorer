@@ -13,6 +13,7 @@ use crate::ui::file_icons::FileIcons;
 use crate::ui::icons;
 use crate::ui::path_popup::{marked_name, word_ranges};
 
+#[derive(Debug)]
 pub enum ListEvent {
     Select(usize),
     /// Ctrl+click: add or remove the row.
@@ -33,6 +34,8 @@ pub enum ListEvent {
     /// A click below the rows; `menu` for a right click.
     Empty { menu: bool },
     Activate(usize),
+    /// Flattened (Ctrl+E): a click on a nested row's grey folder opens that folder.
+    OpenFolder(usize),
     Sort(SortColumn),
     /// The in-place rename ended: `true` with Enter, `false` with Escape or a click elsewhere.
     RenameEnded(bool),
@@ -209,6 +212,7 @@ pub fn show(
                     let mut on_name = false;
                     // Where the folder's chevron is drawn (Tree).
                     let mut chevron = None;
+                    let mut open_folder = false;
                     row.set_selected(view.is_highlighted(i));
                     let mut row_rect = egui::Rect::NOTHING;
                     // Behind the row's content: where a folder taking a drop is lit.
@@ -245,7 +249,7 @@ pub fn show(
                                             }
                                         } else {
                                             name_label(ui, entry, view.filter());
-                                            folder_label(ui, view.relative_parent(entry));
+                                            open_folder = folder_label(ui, view.relative_parent(entry));
                                         }
                                         // The icon and the name: kept for dragging the entry itself.
                                         on_name = ui.input(|i| i.pointer.press_origin()).is_some_and(|p| ui.min_rect().contains(p));
@@ -293,7 +297,9 @@ pub fn show(
                         let at = response.ctx.input(|input| input.pointer.interact_pos());
                         at.is_some_and(|at| egui::Rect::from_x_y_ranges(c.x_range(), response.rect.y_range()).contains(at))
                     });
-                    if response.secondary_clicked() {
+                    if open_folder {
+                        event = Some(ListEvent::OpenFolder(i));
+                    } else if response.secondary_clicked() {
                         event = Some(ListEvent::Menu(i));
                     } else if on_chevron && (response.clicked() || response.double_clicked()) {
                         event = Some(ListEvent::Unfold(i));
@@ -756,11 +762,12 @@ pub fn name_label(ui: &mut egui::Ui, entry: &Entry, typed: &str) {
 }
 
 /// Flattened (Ctrl+E), the folder an entry from a subfolder is in, dimmed
-/// after its name, like File Pilot: `lumen.pdb > deps`.
-pub fn folder_label(ui: &mut egui::Ui, folder: Option<String>) {
-    if let Some(folder) = folder {
-        ui.add(egui::Label::new(egui::RichText::new(format!("> {folder}")).weak()).selectable(false).truncate());
-    }
+/// after its name, like File Pilot: `lumen.pdb > deps`. `true` when it was
+/// clicked: it opens that folder, like File Pilot.
+pub fn folder_label(ui: &mut egui::Ui, folder: Option<String>) -> bool {
+    let Some(folder) = folder else { return false };
+    let label = egui::Label::new(egui::RichText::new(format!("> {folder}")).weak()).selectable(false).truncate();
+    ui.add(label.sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
 /// `name_label` without its own tooltip when cut: for a cell whose whole
@@ -2504,6 +2511,35 @@ pub(crate) mod tests {
         assert!(matches!(click(blank), Some(ListEvent::Select(2))), "where a file has no chevron, it is the row");
         let date = egui::pos2(500.0, text_rect(&shapes, "src").center().y);
         assert!(matches!(click(date), Some(ListEvent::Select(0))), "the rest of the row selects");
+    }
+
+    /// `/x` flattened, with `src/main.rs` found below it.
+    fn flat_listed() -> View {
+        let mut view = View::default();
+        let top = vec![Entry { path: PathBuf::from("/x/src"), is_dir: true, size: None, ..entry("src") }, entry("a.txt")];
+        view.apply_listing(crate::fs::Listing { id: 1, path: PathBuf::from("/x"), result: Ok(top), elapsed: std::time::Duration::ZERO }, None);
+        view.set_flat(vec![PathBuf::from("/x")]);
+        view.apply_flat(&[PathBuf::from("/x")], vec![Entry { path: PathBuf::from("/x/src/main.rs"), ..entry("main.rs") }]);
+        view
+    }
+
+    #[test]
+    fn a_click_on_a_nested_rows_grey_folder_opens_that_folder() {
+        let ctx = egui::Context::default();
+        let view = flat_listed();
+        let row = view.rows.iter().position(|&i| view.entry(i).name == "main.rs").unwrap();
+        let shapes = settled_tree(&ctx, &view, false);
+        let click = |at: egui::Pos2| {
+            draw_tree(&ctx, &view, false, vec![egui::Event::PointerMoved(at)], None);
+            let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+            let event = draw_tree(&ctx, &view, false, vec![press(true), press(false)], None).0;
+            settled_tree(&ctx, &view, false);
+            event
+        };
+        let opened = click(text_rect(&shapes, "> src").center());
+        assert!(matches!(opened, Some(ListEvent::OpenFolder(r)) if r == row), "the grey folder opens it: {opened:?}");
+        let named = click(text_rect(&shapes, "main.rs").center());
+        assert!(matches!(named, Some(ListEvent::Select(r)) if r == row), "the name still selects: {named:?}");
     }
 
     #[test]
