@@ -3335,6 +3335,9 @@ impl eframe::App for LumenApp {
         // compositor, to be dropped on another app.
         #[cfg(target_os = "linux")]
         self.wayland_dnd.carry_out(&ctx);
+        // On Windows, to the system (OLE), to be dropped on another app.
+        #[cfg(windows)]
+        crate::windows_drag::carry_out(&ctx, self.hwnd);
         // After every target: the label by the pointer while entries are dragged,
         // and what a drag from another app is told: take it, or refuse.
         let preferred = ui::dnd::finish(&ctx);
