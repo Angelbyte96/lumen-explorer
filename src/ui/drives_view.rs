@@ -173,6 +173,8 @@ pub enum DrivesEvent {
     HeaderMenu(usize),
     /// A column border was dragged and let go: the new widths.
     Resized(Widths),
+    /// A double click on a column's right border: fit the column to its content.
+    Fit(usize),
 }
 
 /// Draws the drives as `sort` orders them (the rows come sorted) at `widths`.
@@ -248,8 +250,10 @@ pub fn show(ui: &mut egui::Ui, rows: &[DriveRow], selected: Option<&Path>, sort:
                     }
                 });
             });
-        if let Some(resized) = file_list::column_borders(ui, &cells, &widths) {
-            event = Some(DrivesEvent::Resized(resized));
+        match file_list::column_borders(ui, &cells, &widths) {
+            Some(file_list::BorderEvent::Resized(resized)) => event = Some(DrivesEvent::Resized(resized)),
+            Some(file_list::BorderEvent::Fit(column)) => event = Some(DrivesEvent::Fit(column)),
+            None => {}
         }
     });
     event
@@ -588,6 +592,18 @@ mod tests {
         let Some(DrivesEvent::Resized(new)) = released else { panic!("the widths are reported when let go: {released:?}") };
         assert!((new[0] - 310.0).abs() < 1.5, "Name is 50 wider: {new:?}");
         assert_eq!(new[1..], DEFAULT_WIDTHS[1..], "only the dragged column changes");
+    }
+
+    #[test]
+    fn a_double_click_on_a_header_border_fits_the_column_on_its_left() {
+        let ctx = egui::Context::default();
+        let rows = two_drives();
+        let shapes = settled(&ctx, &rows, None);
+        let ty = text_rect(&shapes, "Type");
+        let border = egui::pos2(ty.min.x - 8.0, ty.center().y);
+        assert_eq!(draw(&ctx, &rows, None, click(border, egui::PointerButton::Primary), Some(10.0)).0, None, "one click neither sorts nor fits");
+        let second = draw(&ctx, &rows, None, click(border, egui::PointerButton::Primary), Some(10.1)).0;
+        assert_eq!(second, Some(DrivesEvent::Fit(0)), "Name, the column on the border's left");
     }
 
     /// File Pilot's This PC at ~1080 px (L18): Name ~270, the others ~150 each.

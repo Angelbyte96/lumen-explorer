@@ -1632,6 +1632,7 @@ impl LumenApp {
                 self.recycle_columns = widths;
                 self.recycle_fit.by_hand();
             }
+            RecycleEvent::Fit(column) => self.run_command(ctx, Command::FitColumn(column)),
         }
     }
 
@@ -1737,6 +1738,7 @@ impl LumenApp {
                     self.drive_columns = widths;
                     self.drive_fit.by_hand();
                 }
+                DrivesEvent::Fit(column) => self.run_command(ctx, Command::FitColumn(column)),
                 DrivesEvent::Select(_) | DrivesEvent::Open(_) | DrivesEvent::Menu(_) => {}
             }
             return;
@@ -3206,6 +3208,7 @@ impl eframe::App for LumenApp {
                 }
                 Some(ListEvent::Sort(column)) => self.tab.view.sort_by(column),
                 Some(ListEvent::Resized(widths)) => self.columns = widths,
+                Some(ListEvent::Fit(column)) => self.run_command(&ctx, Command::FitColumn(column)),
                 Some(ListEvent::CloseColumn(column)) => self.run_command(&ctx, Command::ToggleColumn(column)),
                 Some(ListEvent::HeaderMenu(column)) => {
                     if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
@@ -5593,6 +5596,16 @@ mod tests {
     }
 
     #[test]
+    fn a_double_clicked_border_in_this_pc_fits_that_drive_column_only() {
+        let (ctx, mut app, _) = app_on_this_pc_with_fonts("app-this-pc-border-fit");
+        app.drive_columns = [100.0; 6];
+        app.handle_drives(&ctx, DrivesEvent::Fit(0));
+        assert_eq!(app.drive_columns[0], drives_view::fit_width(&ctx, &app.drives, 0));
+        assert_eq!(app.drive_columns[1..], [100.0; 5], "only that column");
+        assert_eq!(app.columns, ui::file_list::DEFAULT_WIDTHS, "the list's widths are not touched");
+    }
+
+    #[test]
     fn size_column_to_fit_in_this_pc_fits_that_drive_column_and_leaves_the_lists() {
         let (ctx, mut app, _) = app_on_this_pc_with_fonts("app-this-pc-fit-one");
         app.drive_columns = [100.0; 6];
@@ -6027,6 +6040,13 @@ mod tests {
         assert_eq!(app.tab.recycle.of(&app.recycled).iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["notes.txt"], "the pick follows its entry");
         app.handle_recycle(&ctx, RecycleEvent::Resized([1.0, 2.0, 3.0, 4.0, 0.0, 0.0]));
         assert_eq!(app.recycle_columns, [1.0, 2.0, 3.0, 4.0, 0.0, 0.0]);
+        assert_eq!((app.columns, app.drive_columns), (ui::file_list::DEFAULT_WIDTHS, drives_view::DEFAULT_WIDTHS), "the other views keep theirs");
+        // A double clicked border fits its column to the entries, the others stay.
+        ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        app.handle_recycle(&ctx, RecycleEvent::Fit(1));
+        assert_eq!(app.recycle_columns[1], recycle_view::fit_width(&ctx, &app.recycled, 1));
+        assert_ne!(app.recycle_columns[1], 2.0, "fitted to the entries");
+        assert_eq!([app.recycle_columns[0], app.recycle_columns[2], app.recycle_columns[3]], [1.0, 3.0, 4.0], "only that column");
         assert_eq!((app.columns, app.drive_columns), (ui::file_list::DEFAULT_WIDTHS, drives_view::DEFAULT_WIDTHS), "the other views keep theirs");
         // A fresh read keeps the order the headers gave.
         app.run_command(&ctx, Command::Refresh);
