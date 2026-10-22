@@ -48,6 +48,14 @@
       "sessions": 2,
       "memories": 3,
       "prompts": 9
+    },
+    {
+      "id": "dd8a0e2f",
+      "created_by": "Angelbyte",
+      "created_at": "2026-10-22T00:09:46.514579Z",
+      "sessions": 35,
+      "memories": 35,
+      "prompts": 0
     }
   ]
 }
