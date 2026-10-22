@@ -740,6 +740,16 @@ mod tests {
     }
 
     #[test]
+    fn faint_separators_run_between_the_four_columns() {
+        let ctx = egui::Context::default();
+        let rows = three();
+        let shapes = settled(&ctx, &rows, &Scene::default());
+        let lines = file_list::tests::separators(&ctx, &shapes);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].0 < text_rect(&shapes, "Original Location").min.x, "the first one between Name and Original Location");
+    }
+
+    #[test]
     fn a_double_click_on_a_header_border_fits_the_column_on_its_left() {
         let ctx = egui::Context::default();
         let rows = three();

@@ -666,6 +666,14 @@ pub fn live_widths(ui: &egui::Ui, saved: &Widths) -> Widths {
     }
 }
 
+/// The faint line between two columns, from the header down to the list's
+/// bottom, like File Pilot's.
+pub(crate) fn separator_stroke(visuals: &egui::Visuals) -> egui::Stroke {
+    egui::Stroke::new(1.0, visuals.text_color().gamma_multiply(SEPARATOR_OPACITY))
+}
+
+const SEPARATOR_OPACITY: f32 = 0.15;
+
 /// What a column border was used for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BorderEvent {
@@ -680,6 +688,13 @@ pub enum BorderEvent {
 pub fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths: &Widths) -> Option<BorderEvent> {
     let gap = ui.spacing().item_spacing.x;
     let mut event = None;
+    // Under the borders: a faint line after every column but the last, to the list's bottom.
+    let last_right = cells.iter().filter(|cell| cell.is_positive()).map(|cell| cell.right()).fold(f32::NEG_INFINITY, f32::max);
+    let bottom = ui.clip_rect().bottom();
+    let separator = separator_stroke(ui.visuals());
+    for cell in cells.iter().filter(|cell| cell.is_positive() && cell.right() < last_right) {
+        ui.painter().vline(cell.right() + gap / 2.0, cell.top()..=bottom, separator);
+    }
     for (column, cell) in cells.iter().enumerate().filter(|(_, cell)| cell.is_positive()) {
         let x = cell.right() + gap / 2.0;
         let rect = egui::Rect::from_x_y_ranges(x - BORDER_GRAB..=x + BORDER_GRAB, cell.y_range());
@@ -936,7 +951,7 @@ pub fn stem_chars(name: &str, is_dir: bool) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1905,6 +1920,42 @@ mod tests {
         assert!(first.event.is_none(), "one click on a border neither sorts nor fits");
         let second = draw_list_at(&ctx, &view, &DEFAULT_WIDTHS, click(), Some(10.1));
         assert!(matches!(second.event, Some(ListEvent::Fit(1))), "Type, the column on the border's left");
+    }
+
+    /// The x and the height of each faint column separator painted.
+    pub(crate) fn separators(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape]) -> Vec<(f32, egui::Rangef)> {
+        let stroke = separator_stroke(&ctx.global_style().visuals);
+        let mut lines: Vec<(f32, egui::Rangef)> = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::LineSegment { points: [a, b], stroke: line } if *line == stroke && a.x == b.x => Some((a.x, egui::Rangef::new(a.y.min(b.y), a.y.max(b.y)))),
+                _ => None,
+            })
+            .collect();
+        lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+        lines
+    }
+
+    #[test]
+    fn faint_separators_run_between_the_columns_from_the_header_to_the_bottom() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt", "b.txt"]);
+        let lefts = settled(&ctx, &view, &DEFAULT_WIDTHS);
+        let input = egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        let mut output = ctx.run_ui(input, |root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default());
+            });
+        });
+        output.textures_delta.clear();
+        let shapes = output.shapes;
+        let lines = separators(&ctx, &shapes);
+        assert_eq!(lines.len(), COLUMNS.len() - 1, "one between each two columns, none after the last: {lines:?}");
+        for (column, (x, height)) in lines.iter().enumerate() {
+            assert!(*x < lefts[column + 1] && *x > lefts[column], "between {} and {}: {x}", COLUMNS[column].0, COLUMNS[column + 1].0);
+            assert!(height.min < 20.0, "from the header: {height:?}");
+            assert!(height.max > crate::ui::testing::SCREEN.max.y - 40.0, "to the list's bottom, past the rows: {height:?}");
+        }
     }
 
     #[test]
