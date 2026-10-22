@@ -817,9 +817,17 @@ fn next_flat(roots: &[PathBuf], current: &Path, picked: &[PathBuf]) -> Vec<PathB
 /// The entries of a flattened view: the folder's own (as listed, fresher
 /// than the walk's) and what the walk found inside its subfolders, in the
 /// lister's order (folders first, by name) so `visible_rows` can rely on it.
+/// What a hidden folder holds is hidden with it, so Ctrl+H hides it too.
 fn flat_entries(entries: &[Entry], found: &[Entry], current: &Path) -> Vec<Entry> {
     let mut all: Vec<Entry> = entries.to_vec();
-    all.extend(found.iter().filter(|e| e.path.parent() != Some(current)).cloned());
+    all.extend(found.iter().filter(|e| e.path.parent() != Some(current)).map(|e| {
+        let mut e = e.clone();
+        let in_hidden = e.path.parent().and_then(|p| p.strip_prefix(current).ok()).is_some_and(|rel| {
+            rel.components().any(|c| crate::fs::entry::is_hidden_name(&c.as_os_str().to_string_lossy()))
+        });
+        e.hidden |= in_hidden;
+        e
+    }));
     all.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase(), e.path.to_string_lossy().to_lowercase()));
     all
 }
@@ -6734,6 +6742,17 @@ mod tests {
         assert_eq!(v.rows.len(), 6);
         assert_eq!(v.folder_count(), 2);
         assert_eq!(v.hidden_count(), 3, ".git and .env above, .cache inside src");
+    }
+
+    #[test]
+    fn what_a_hidden_folder_holds_is_hidden_with_it() {
+        let mut v = loaded_view();
+        v.set_flat(vec![PathBuf::from("/x")]);
+        v.apply_flat(&[PathBuf::from("/x")], vec![nested(".git", true), nested(".git/objects", true), nested(".git/objects/pack", false), nested("src/main.rs", false)]);
+        assert_eq!(row_paths(&v), ["src", "a.txt", "b.txt", "src/main.rs"], "nothing from .git while hidden files are");
+        assert_eq!(v.hidden_count(), 4, ".git, .env, and the two inside .git");
+        v.toggle_hidden();
+        assert!(row_paths(&v).contains(&".git/objects/pack".to_owned()), "Ctrl+H shows them");
     }
 
     #[test]
