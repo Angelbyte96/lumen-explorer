@@ -1,5 +1,5 @@
 //! The Recycle Bin view (Windows): one row per recycled entry, with the name
-//! it had, where it came from, when it was deleted and its size. Drawn instead
+//! it had, where it came from, its type, when it was deleted and its size. Drawn instead
 //! of the file list, with the same headers: click to sort, borders to resize,
 //! a menu to fit.
 
@@ -9,6 +9,7 @@ use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
 use crate::format::{format_size, format_time};
+use crate::fs::entry::kind_of;
 use crate::recycle_bin::Recycled;
 use crate::ui::{file_list, icons};
 
@@ -17,29 +18,31 @@ use crate::ui::{file_list, icons};
 pub enum RecycleColumn {
     Name,
     Location,
+    Type,
     Deleted,
     Size,
 }
 
 /// Header labels and the column each one sorts, in display order.
-pub const COLUMNS: [(&str, RecycleColumn); 4] = [
+pub const COLUMNS: [(&str, RecycleColumn); 5] = [
     ("Name", RecycleColumn::Name),
     ("Original Location", RecycleColumn::Location),
+    ("Type", RecycleColumn::Type),
     ("Date Deleted", RecycleColumn::Deleted),
     ("Size", RecycleColumn::Size),
 ];
 
 /// Each column's width in points. The shared helpers (borders, Fit All Columns)
-/// work on the list's six columns: these four are its first four, which keeps
-/// the list's priorities (Name, then the two after it, then the small one), and
-/// the last two are unused.
+/// work on the list's six columns: these five are its first five and the last
+/// one is unused.
 pub type Widths = file_list::Widths;
 
-/// Each column's role, in the list's six: Original Location is the long text that
-/// gives first, Date Deleted keeps priority, Size is a number.
+/// Each column's role, in the list's six. Like File Pilot's bin, when the room is short
+/// Name gives first, then Original Location (cut with "…"); Type, Date Deleted and Size
+/// stay whole. Size is right-aligned all the same.
 pub const ROLES: file_list::Roles = {
     use file_list::Role::*;
-    [Name, Text, Short, Numeric, Short, Short]
+    [Name, Path, Short, Short, Short, Short]
 };
 
 /// A fingerprint of what the rows show, to tell when the columns need fitting again.
@@ -48,10 +51,10 @@ pub fn signature(rows: &[Recycled]) -> u64 {
 }
 
 /// The columns the view shows, in the list's six.
-pub const SHOWN: file_list::Shown = [true, true, true, true, false, false];
+pub const SHOWN: file_list::Shown = [true, true, true, true, true, false];
 
 /// The widths the view starts with.
-pub const DEFAULT_WIDTHS: Widths = [260.0, 260.0, 150.0, 90.0, 0.0, 0.0];
+pub const DEFAULT_WIDTHS: Widths = [220.0, 200.0, 100.0, 140.0, 90.0, 0.0];
 
 /// How the entries are ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +81,7 @@ pub fn sort(rows: &mut [Recycled], sort: Option<RecycleSort>) {
         let by_column = match column {
             RecycleColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
             RecycleColumn::Location => a.location.to_lowercase().cmp(&b.location.to_lowercase()),
+            RecycleColumn::Type => kind(a).cmp(&kind(b)),
             RecycleColumn::Deleted => a.deleted.cmp(&b.deleted),
             RecycleColumn::Size => a.size.cmp(&b.size),
         };
@@ -86,10 +90,15 @@ pub fn sort(rows: &mut [Recycled], sort: Option<RecycleSort>) {
     });
 }
 
+/// The entry's type, as the list writes it.
+fn kind(item: &Recycled) -> String {
+    kind_of(&item.original, item.is_dir)
+}
+
 /// The text of each cell of a row. A folder's size is blank when the record has none.
-pub fn cells(item: &Recycled) -> [String; 4] {
+pub fn cells(item: &Recycled) -> [String; 5] {
     let size = if item.is_dir && item.size == 0 { String::new() } else { format_size(item.size) };
-    [item.name.clone(), item.location.clone(), item.deleted.map(format_time).unwrap_or_default(), size]
+    [item.name.clone(), item.location.clone(), kind(item), item.deleted.map(format_time).unwrap_or_default(), size]
 }
 
 /// The entries picked in the view, found by where their content lies in the bin.
@@ -306,9 +315,9 @@ pub fn show(ui: &mut egui::Ui, rows: &[Recycled], look: &Look) -> Option<Recycle
                         // Not selectable, or the text would take the row's click.
                         ui.add(egui::Label::new(&texts[0]).selectable(false).truncate());
                     });
-                    for (text, role) in texts[1..].iter().zip(&ROLES[1..]) {
-                        row.col(|ui| match role {
-                            file_list::Role::Numeric => file_list::number_cell(ui, text),
+                    for (text, (_, column)) in texts.iter().zip(COLUMNS).skip(1) {
+                        row.col(|ui| match column {
+                            RecycleColumn::Size => file_list::number_cell(ui, text),
                             _ => {
                                 ui.add(egui::Label::new(text).selectable(false).truncate());
                             }
@@ -383,26 +392,46 @@ mod tests {
     }
 
     #[test]
-    fn a_row_reads_with_its_original_name_place_date_and_size() {
+    fn a_row_reads_with_its_original_name_place_type_date_and_size() {
         let rows = three();
         let date = crate::format::format_time(rows[0].deleted.unwrap());
-        assert_eq!(cells(&rows[0]), ["beta.txt".to_owned(), "C:\\Users\\Ana".into(), date, "300 B".into()]);
-        assert_eq!(cells(&rows[1])[3], "20 B");
+        assert_eq!(cells(&rows[0]), ["beta.txt".to_owned(), "C:\\Users\\Ana".into(), "TXT file".into(), date, "300 B".into()]);
+        assert_eq!(cells(&rows[1])[4], "20 B");
+    }
+
+    #[test]
+    fn the_type_reads_like_the_lists_folder_extension_file_or_file() {
+        assert_eq!(cells(&three()[1])[2], "PNG file");
+        assert_eq!(cells(&three()[2])[2], "Folder");
+        assert_eq!(cells(&item("N", "C:\\Docs\\Makefile", None, 1, false))[2], "File", "no extension");
+        assert_eq!(cells(&item("D", "C:\\Docs\\v1.2", None, 0, true))[2], "Folder", "a dotted folder is still a folder");
+    }
+
+    #[test]
+    fn type_sits_between_original_location_and_date_deleted() {
+        let labels: Vec<&str> = COLUMNS.iter().map(|(label, _)| *label).collect();
+        assert_eq!(labels, ["Name", "Original Location", "Type", "Date Deleted", "Size"]);
+        let ctx = egui::Context::default();
+        let shapes = settled(&ctx, &three(), &Scene::default());
+        let x = |label| text_rect(&shapes, label).min.x;
+        assert!(x("Original Location") < x("Type") && x("Type") < x("Date Deleted"), "drawn in that order");
+        text_rect(&shapes, "TXT file");
     }
 
     #[test]
     fn a_folder_shows_its_size_only_when_the_record_has_one_and_an_unknown_date_is_blank() {
         let folder = item("F", "C:\\Docs\\empty", None, 0, true);
-        assert_eq!(cells(&folder), ["empty".to_owned(), "C:\\Docs".into(), String::new(), String::new()]);
-        assert_eq!(cells(&three()[2])[3], "4.9 KB");
-        assert_eq!(cells(&item("Z", "C:\\Docs\\zero.txt", None, 0, false))[3], "0 B", "an empty file is 0 B");
+        assert_eq!(cells(&folder), ["empty".to_owned(), "C:\\Docs".into(), "Folder".into(), String::new(), String::new()]);
+        assert_eq!(cells(&three()[2])[4], "4.9 KB");
+        assert_eq!(cells(&item("Z", "C:\\Docs\\zero.txt", None, 0, false))[4], "0 B", "an empty file is 0 B");
     }
 
     #[test]
     fn entries_sort_by_each_column_and_descending_reverses_it() {
         let rows = three();
         use RecycleColumn::*;
-        for (column, asc, desc) in [(Name, "BAC", "CAB"), (Location, "CAB", "BAC"), (Deleted, "ACB", "BCA"), (Size, "BAC", "CAB")] {
+        // Types: A "TXT file", B "PNG file", C "Folder".
+        for (column, asc, desc) in [(Name, "BAC", "CAB"), (Location, "CAB", "BAC"), (Type, "CBA", "ABC"), (Deleted, "ACB", "BCA"), (Size, "BAC", "CAB")] {
             assert_eq!(sorted(&rows, column, false), asc, "{column:?} ascending");
             assert_eq!(sorted(&rows, column, true), desc, "{column:?} descending");
         }
@@ -569,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn the_view_has_its_four_columns_and_shows_each_entry_by_its_original_name() {
+    fn the_view_has_its_five_columns_and_shows_each_entry_by_its_original_name() {
         let ctx = egui::Context::default();
         let rows = three();
         let shapes = settled(&ctx, &rows, &Scene::default());
@@ -712,7 +741,7 @@ mod tests {
             text_rect(&settled(&ctx, &rows, &scene), header).min.x
         };
         let normal = left_of(DEFAULT_WIDTHS, "Original Location");
-        let wide = left_of([400.0, 300.0, 150.0, 90.0, 0.0, 0.0], "Original Location");
+        let wide = left_of([360.0, 200.0, 100.0, 140.0, 90.0, 0.0], "Original Location");
         assert!((wide - normal - 140.0).abs() < 1.5, "Name is 140 wider: {normal} {wide}");
     }
 
@@ -736,7 +765,7 @@ mod tests {
         }
         let released = frame(vec![button(border + egui::vec2(50.0, 0.0), false)]);
         let Some(RecycleEvent::Resized(new)) = released else { panic!("the widths are reported when let go: {released:?}") };
-        assert!((new[0] - 310.0).abs() < 1.5, "Name is 50 wider: {new:?}");
+        assert!((new[0] - 270.0).abs() < 1.5, "Name is 50 wider: {new:?}");
         assert_eq!(new[1..], DEFAULT_WIDTHS[1..], "only the dragged column changes");
     }
 
@@ -755,12 +784,12 @@ mod tests {
     }
 
     #[test]
-    fn faint_separators_run_between_the_four_columns() {
+    fn faint_separators_run_between_the_five_columns() {
         let ctx = egui::Context::default();
         let rows = three();
         let shapes = settled(&ctx, &rows, &Scene::default());
         let lines = file_list::tests::separators(&ctx, &shapes);
-        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines.len(), 4, "{lines:?}");
         assert!(lines[0].0 < text_rect(&shapes, "Original Location").min.x, "the first one between Name and Original Location");
         assert!(lines.iter().all(|(_, height)| height.max < 60.0), "in the header only: {lines:?}");
     }
@@ -778,36 +807,42 @@ mod tests {
         assert_eq!(frame(10.1), Some(RecycleEvent::Fit(0)), "Name, the column on the border's left");
     }
 
-    fn fitted_in(content: [f32; 4], room: f32) -> Widths {
-        let content = [content[0], content[1], content[2], content[3], 0.0, 0.0];
+    fn fitted_in(content: [f32; 5], room: f32) -> Widths {
+        let content = [content[0], content[1], content[2], content[3], content[4], 0.0];
         file_list::fit_all(&content, &SHOWN, &ROLES, room)
     }
 
-    /// L18 (134426): Name cut, Original Location very wide, Date Deleted and Size cut.
+    /// fase-19 L20: when the bin does not fit, Name gives first, then Original Location;
+    /// Type, Date Deleted and Size stay whole until both are at their floors.
     #[test]
-    fn when_the_bin_does_not_fit_original_location_gives_first_and_date_size_and_name_stay_whole() {
-        let fitted = fitted_in([520.0, 640.0, 130.0, 70.0], 1000.0);
-        assert_eq!(fitted, [520.0, 280.0, 130.0, 70.0, 0.0, 0.0], "Original Location takes what is left");
+    fn when_the_bin_does_not_fit_name_gives_first_and_the_other_columns_stay_whole() {
+        let fitted = fitted_in([520.0, 640.0, 100.0, 130.0, 70.0], 1100.0);
+        assert_eq!(fitted, [160.0, 640.0, 100.0, 130.0, 70.0, 0.0], "only Name gives");
     }
 
     #[test]
-    fn the_bin_squeezes_location_to_its_floor_then_size_then_name_and_date_last() {
-        let fitted = fitted_in([520.0, 640.0, 130.0, 70.0], 700.0);
-        assert_eq!(fitted, [406.0, file_list::TEXT_MIN, 130.0, file_list::SMALL_MIN, 0.0, 0.0], "Location at its floor, Size at 44, Name gives next");
-        let narrow = fitted_in([520.0, 640.0, 130.0, 70.0], 400.0);
-        assert!((narrow[..4].iter().sum::<f32>() - 400.0).abs() < 0.5, "{narrow:?}");
-        assert!(narrow[0] >= file_list::NAME_MIN && narrow[0] < file_list::NAME_MIN + 3.0, "Name at its minimum: {narrow:?}");
-        assert!(narrow[1] < file_list::TEXT_MIN && narrow[2] < 130.0, "Location and Date give at the end: {narrow:?}");
-        assert!(narrow[..4].iter().all(|&w| w >= file_list::MIN_WIDTH), "{narrow:?}");
-        assert_eq!(narrow[4..], [0.0, 0.0], "the unused columns stay out");
+    fn once_name_is_at_its_floor_original_location_gives_and_type_date_and_size_stay_whole() {
+        let fitted = fitted_in([520.0, 640.0, 100.0, 130.0, 70.0], 800.0);
+        assert_eq!(fitted, [file_list::NAME_MIN, 380.0, 100.0, 130.0, 70.0, 0.0], "Name at its minimum, the path takes the rest");
+    }
+
+    #[test]
+    fn in_a_very_narrow_window_everything_gives_only_after_name_and_location_reach_their_floors() {
+        let fitted = fitted_in([520.0, 640.0, 100.0, 130.0, 70.0], 500.0);
+        assert!((fitted[..5].iter().sum::<f32>() - 500.0).abs() < 0.5, "{fitted:?}");
+        assert!(fitted[0] >= file_list::NAME_MIN, "{fitted:?}");
+        assert!(fitted[1] <= file_list::TEXT_MIN, "{fitted:?}");
+        assert!(fitted[2] < 100.0 && fitted[3] < 130.0 && fitted[4] < 70.0, "now the short ones give too: {fitted:?}");
+        assert!(fitted[..5].iter().all(|&w| w >= file_list::MIN_WIDTH), "{fitted:?}");
+        assert_eq!(fitted[5], 0.0, "the unused column stays out");
     }
 
     #[test]
     fn when_the_bin_fits_the_spare_room_goes_to_every_column_not_all_to_location_or_name() {
-        let fitted = fitted_in([300.0, 700.0, 140.0, 70.0], 1300.0);
-        assert!((fitted[..4].iter().sum::<f32>() - 1300.0).abs() < 0.5, "{fitted:?}");
-        assert!(fitted[1] <= 700.0 + 90.0 * 700.0 / 1210.0 + 1.0, "Location: its content plus its share: {fitted:?}");
-        assert!(fitted[0] > 320.0 && fitted[2] > 145.0 && fitted[3] > 72.0, "the others grow too: {fitted:?}");
+        let fitted = fitted_in([300.0, 700.0, 100.0, 140.0, 70.0], 1400.0);
+        assert!((fitted[..5].iter().sum::<f32>() - 1400.0).abs() < 0.5, "{fitted:?}");
+        assert!(fitted[1] <= 700.0 + 90.0 * 700.0 / 1310.0 + 1.0, "Location: its content plus its share: {fitted:?}");
+        assert!(fitted[0] > 320.0 && fitted[2] > 103.0 && fitted[3] > 145.0 && fitted[4] > 72.0, "the others grow too: {fitted:?}");
     }
 
     #[test]

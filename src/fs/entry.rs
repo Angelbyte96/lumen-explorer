@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// One row in the file list. Built once per listing; the UI never touches the disk.
@@ -16,13 +16,18 @@ pub struct Entry {
 impl Entry {
     /// "Folder", "PNG file", or "File" when there is no extension.
     pub fn kind(&self) -> String {
-        if self.is_dir {
-            return "Folder".into();
-        }
-        match self.path.extension().map(|e| e.to_string_lossy()) {
-            Some(ext) if !ext.is_empty() => format!("{} file", ext.to_uppercase()),
-            _ => "File".into(),
-        }
+        kind_of(&self.path, self.is_dir)
+    }
+}
+
+/// "Folder", "PNG file", or "File" when there is no extension, for any path.
+pub fn kind_of(path: &Path, is_dir: bool) -> String {
+    if is_dir {
+        return "Folder".into();
+    }
+    match path.extension().map(|e| e.to_string_lossy()) {
+        Some(ext) if !ext.is_empty() => format!("{} file", ext.to_uppercase()),
+        _ => "File".into(),
     }
 }
 
