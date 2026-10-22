@@ -6346,8 +6346,8 @@ mod tests {
         app.run_command(&ctx, Command::FitColumn(1));
         assert_eq!(app.recycle_columns[1], recycle_view::fit_width(&ctx, &app.recycled, 1));
         app.run_command(&ctx, Command::FitAllColumns);
-        let fits: Vec<f32> = (0..4).map(|column| recycle_view::fit_width(&ctx, &app.recycled, column)).collect();
-        assert_eq!(app.recycle_columns[..4], fits[..], "every column of the view, to its content");
+        let fits: Vec<f32> = (0..recycle_view::COLUMNS.len()).map(|column| recycle_view::fit_width(&ctx, &app.recycled, column)).collect();
+        assert_eq!(app.recycle_columns[..5], fits[..], "every column of the view, to its content");
         assert_eq!((app.columns, app.drive_columns), ([100.0; 6], [100.0; 6]), "the lists and the drives keep theirs");
     }
 
@@ -6358,16 +6358,16 @@ mod tests {
         let shown = recycle_view::SHOWN;
         let fitted = |app: &LumenApp, width| {
             let room = ui::file_list::room(&ctx, width, &shown);
-            let total: f32 = app.recycle_columns[..4].iter().sum();
+            let total: f32 = app.recycle_columns[..5].iter().sum();
             assert!((total - room).abs() < 0.5, "{:?} in {room}", app.recycle_columns);
         };
         app.fit_recycle_bin(&ctx, 1080.0);
         fitted(&app, 1080.0);
-        assert_eq!(app.recycle_columns[4..], [0.0, 0.0], "the unused columns stay out");
+        assert_eq!(app.recycle_columns[5], 0.0, "the unused column stays out");
         app.fit_recycle_bin(&ctx, 760.0);
         fitted(&app, 760.0);
         assert_eq!((app.columns, app.drive_columns), (ui::file_list::DEFAULT_WIDTHS, drives_view::DEFAULT_WIDTHS), "the other views keep theirs");
-        let widths = [200.0, 220.0, 150.0, 90.0, 0.0, 0.0];
+        let widths = [200.0, 220.0, 100.0, 150.0, 90.0, 0.0];
         app.handle_recycle(&ctx, RecycleEvent::Resized(widths));
         app.fit_recycle_bin(&ctx, 1200.0);
         assert_eq!(app.recycle_columns, widths, "a dragged border is not overwritten");
