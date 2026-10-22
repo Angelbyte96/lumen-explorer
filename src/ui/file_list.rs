@@ -200,6 +200,7 @@ pub fn show(
                 }
             })
             .body(|mut body| {
+                light_hovered_rows(body.ui_mut());
                 band_scroll(body.ui_mut());
                 let clip = body.ui_mut().clip_rect();
                 body.rows(row_height, rows.len(), |mut row| {
@@ -673,6 +674,13 @@ pub(crate) fn separator_stroke(visuals: &egui::Visuals) -> egui::Stroke {
 }
 
 const SEPARATOR_OPACITY: f32 = 0.15;
+
+/// The hovered row in a table `body` is lit in a translucent cyan, not
+/// egui's grey, like File Pilot's.
+pub fn light_hovered_rows(body: &mut egui::Ui) {
+    let visuals = body.visuals_mut();
+    visuals.widgets.hovered.bg_fill = crate::ui::theme::row_hover(visuals);
+}
 
 /// What a column border was used for.
 #[derive(Debug, Clone, PartialEq)]
@@ -1956,6 +1964,44 @@ pub(crate) mod tests {
             assert!(height.min < 20.0, "from the header: {height:?}");
             assert!(height.max > crate::ui::testing::SCREEN.max.y - 40.0, "to the list's bottom, past the rows: {height:?}");
         }
+    }
+
+    /// Whether a rect at `at` is filled with the translucent cyan of a hovered row.
+    pub(crate) fn hover_lit(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape], at: egui::Pos2) -> bool {
+        let visuals = ctx.global_style().visuals.clone();
+        let fill = crate::ui::theme::accent(&visuals).gamma_multiply(crate::ui::theme::ROW_HOVER_OPACITY);
+        assert_ne!(fill, visuals.widgets.hovered.bg_fill, "not egui's grey");
+        shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == fill && r.rect.contains(at)))
+    }
+
+    #[test]
+    fn the_row_under_the_pointer_is_lit_in_a_translucent_cyan_not_grey() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt", "b.txt"]);
+        let visuals = ctx.global_style().visuals.clone();
+        let cyan = crate::ui::theme::row_hover(&visuals);
+        assert_eq!(cyan, crate::ui::theme::accent(&visuals).gamma_multiply(crate::ui::theme::ROW_HOVER_OPACITY), "the accent, see-through");
+        assert!(cyan.a() < 255, "translucent");
+        settled(&ctx, &view, &DEFAULT_WIDTHS);
+        let input = |events| egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        let mut shapes = Vec::new();
+        let mut at = egui::Pos2::ZERO;
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(input(vec![egui::Event::PointerMoved(at)]), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default());
+                });
+            });
+            output.textures_delta.clear();
+            at = output.shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == "b.txt" => Some(t.pos + egui::vec2(400.0, t.galley.size().y / 2.0)),
+                _ => None,
+            }).expect("b.txt painted");
+            shapes = output.shapes;
+        }
+        assert!(hover_lit(&ctx, &shapes, at), "b.txt's row is lit");
+        let grey = visuals.widgets.hovered.bg_fill;
+        assert!(!shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == grey && r.rect.contains(at))), "not the grey");
     }
 
     #[test]
