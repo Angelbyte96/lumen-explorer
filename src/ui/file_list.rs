@@ -38,6 +38,8 @@ pub enum ListEvent {
     RenameEnded(bool),
     /// A column border was dragged and let go: the new widths.
     Resized(Widths),
+    /// A double click on a column's right border: fit the column to its content.
+    Fit(usize),
     /// Right click on a column's header: its menu.
     HeaderMenu(usize),
     /// Middle click on a column's header: hide it (never Name).
@@ -307,8 +309,10 @@ pub fn show(
                     }
                 });
             });
-        if let Some(resized) = column_borders(ui, &cells, &widths) {
-            event = Some(ListEvent::Resized(resized));
+        match column_borders(ui, &cells, &widths) {
+            Some(BorderEvent::Resized(resized)) => event = Some(ListEvent::Resized(resized)),
+            Some(BorderEvent::Fit(column)) => event = Some(ListEvent::Fit(column)),
+            None => {}
         }
         // Everything under the header that is not a folder row (a file row, the
         // gaps between rows, the space below them) drops into the folder on screen.
@@ -662,15 +666,27 @@ pub fn live_widths(ui: &egui::Ui, saved: &Widths) -> Widths {
     }
 }
 
+/// What a column border was used for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BorderEvent {
+    /// Dragged and let go: the new widths.
+    Resized(Widths),
+    /// Double clicked: fit the column on its left to its content (like Excel).
+    Fit(usize),
+}
+
 /// The draggable border on the right of each header `cells` holds, drawn
-/// over the header. Returns the new widths when a border is let go.
-pub fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths: &Widths) -> Option<Widths> {
+/// over the header. Says when a border is let go after a drag, or double clicked.
+pub fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], widths: &Widths) -> Option<BorderEvent> {
     let gap = ui.spacing().item_spacing.x;
     let mut event = None;
     for (column, cell) in cells.iter().enumerate().filter(|(_, cell)| cell.is_positive()) {
         let x = cell.right() + gap / 2.0;
         let rect = egui::Rect::from_x_y_ranges(x - BORDER_GRAB..=x + BORDER_GRAB, cell.y_range());
-        let response = ui.interact(rect, egui::Id::new(("lumen_column_border", column)), egui::Sense::DRAG);
+        let response = ui.interact(rect, egui::Id::new(("lumen_column_border", column)), egui::Sense::CLICK | egui::Sense::DRAG);
+        if response.double_clicked() {
+            event = Some(BorderEvent::Fit(column));
+        }
         if response.hovered() || response.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
             let stroke = if response.dragged() { ui.visuals().widgets.active.fg_stroke } else { ui.visuals().widgets.hovered.fg_stroke };
@@ -690,7 +706,7 @@ pub fn column_borders(ui: &mut egui::Ui, cells: &[egui::Rect; COLUMNS.len()], wi
         {
             ui.ctx().data_mut(|d| d.remove::<Drag>(drag_id()));
             let x = pointer.or_else(|| ui.input(|i| i.pointer.latest_pos())).map_or(drag.start_x, |p| p.x);
-            event = Some(drag.at(x));
+            event = Some(BorderEvent::Resized(drag.at(x)));
         }
     }
     event
@@ -1739,9 +1755,14 @@ mod tests {
     }
 
     fn draw_list(ctx: &egui::Context, view: &View, widths: &Widths, events: Vec<egui::Event>) -> Drawn {
+        draw_list_at(ctx, view, widths, events, None)
+    }
+
+    /// `draw_list` at `time`, for double clicks.
+    fn draw_list_at(ctx: &egui::Context, view: &View, widths: &Widths, events: Vec<egui::Event>, time: Option<f64>) -> Drawn {
         let mut event = None;
         let mut output = ctx.run_ui(
-            egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
+            egui::RawInput { events, time, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() },
             |root| {
                 egui::CentralPanel::default().show(root, |ui| {
                     event = show(ui, view, &[], Sizes { widths: *widths, ..Sizes::default() }, None, None, &FileIcons::default());
@@ -1870,6 +1891,20 @@ mod tests {
         let Some(ListEvent::Resized(new)) = released.event else { panic!("the widths are reported when let go") };
         assert!((new[0] - 370.0).abs() < 1.5, "Name is 50 wider: {new:?}");
         assert_eq!(new[1..], DEFAULT_WIDTHS[1..], "only the dragged column changes");
+    }
+
+    #[test]
+    fn a_double_click_on_a_header_border_fits_the_column_on_its_left_and_does_not_sort() {
+        let ctx = egui::Context::default();
+        let view = listed(&["a.txt", "b.txt"]);
+        let lefts = settled(&ctx, &view, &DEFAULT_WIDTHS);
+        // The border between Type and Date Modified.
+        let border = egui::pos2(lefts[2] - 8.0, 10.0);
+        let click = || vec![egui::Event::PointerMoved(border), button(border, true), button(border, false)];
+        let first = draw_list_at(&ctx, &view, &DEFAULT_WIDTHS, click(), Some(10.0));
+        assert!(first.event.is_none(), "one click on a border neither sorts nor fits");
+        let second = draw_list_at(&ctx, &view, &DEFAULT_WIDTHS, click(), Some(10.1));
+        assert!(matches!(second.event, Some(ListEvent::Fit(1))), "Type, the column on the border's left");
     }
 
     #[test]

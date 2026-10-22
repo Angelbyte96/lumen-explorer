@@ -235,6 +235,8 @@ pub enum RecycleEvent {
     HeaderMenu(usize),
     /// A column border was dragged and let go: the new widths.
     Resized(Widths),
+    /// A double click on a column's right border: fit the column to its content.
+    Fit(usize),
 }
 
 /// What the view draws besides the rows.
@@ -326,8 +328,10 @@ pub fn show(ui: &mut egui::Ui, rows: &[Recycled], look: &Look) -> Option<Recycle
                     }
                 });
             });
-        if let Some(resized) = file_list::column_borders(ui, &cell_rects, &widths) {
-            event = Some(RecycleEvent::Resized(resized));
+        match file_list::column_borders(ui, &cell_rects, &widths) {
+            Some(file_list::BorderEvent::Resized(resized)) => event = Some(RecycleEvent::Resized(resized)),
+            Some(file_list::BorderEvent::Fit(column)) => event = Some(RecycleEvent::Fit(column)),
+            None => {}
         }
     });
     event
@@ -733,6 +737,19 @@ mod tests {
         let Some(RecycleEvent::Resized(new)) = released else { panic!("the widths are reported when let go: {released:?}") };
         assert!((new[0] - 310.0).abs() < 1.5, "Name is 50 wider: {new:?}");
         assert_eq!(new[1..], DEFAULT_WIDTHS[1..], "only the dragged column changes");
+    }
+
+    #[test]
+    fn a_double_click_on_a_header_border_fits_the_column_on_its_left() {
+        let ctx = egui::Context::default();
+        let rows = three();
+        let scene = Scene::default();
+        let shapes = settled(&ctx, &rows, &scene);
+        let place = text_rect(&shapes, "Original Location");
+        let border = egui::pos2(place.min.x - 8.0, place.center().y);
+        let frame = |time| draw(&ctx, &rows, &scene, click(border, egui::PointerButton::Primary, egui::Modifiers::NONE), egui::Modifiers::NONE, Some(time)).0;
+        assert_eq!(frame(10.0), None, "one click neither sorts nor fits");
+        assert_eq!(frame(10.1), Some(RecycleEvent::Fit(0)), "Name, the column on the border's left");
     }
 
     fn fitted_in(content: [f32; 4], room: f32) -> Widths {
