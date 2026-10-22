@@ -116,6 +116,11 @@ pub struct View {
     /// An entry inside an unfolded folder to select once that folder's read
     /// lands (a renamed child is not listed under its new name before).
     want: Option<PathBuf>,
+    /// Ctrl+E: the folders whose contents are listed all the way down, with
+    /// the folder's own entries (the folder itself for all of it). Empty: not flattened.
+    flat: Vec<PathBuf>,
+    /// What the walk of `flat` found, once it landed.
+    flat_found: Vec<Entry>,
 }
 
 impl View {
@@ -141,6 +146,8 @@ impl View {
                     self.drop_picks();
                     self.unselected = false;
                     self.tree.clear();
+                    self.flat.clear();
+                    self.flat_found.clear();
                 }
                 // Reloading with folders unfolded: the cursor stays where it was.
                 let before = (same_folder && !self.tree.is_empty()).then(|| (self.selected_entry().map(|e| e.path.clone()), self.selected));
@@ -290,14 +297,16 @@ impl View {
     /// Ctrl+A: every row of the folder the cursor is in. In the Tree view a
     /// cursor inside an unfolded folder picks what that folder holds, and one
     /// at the top picks the top rows, not the unfolded children.
+    /// Flattened, every row shown.
     pub fn select_all(&mut self) {
         self.unselected = false;
         let folder = self.selected_entry().and_then(|e| e.path.parent()).unwrap_or(&self.current).to_path_buf();
+        let flat = self.is_flat();
         self.picks = self
             .rows
             .iter()
             .map(|&i| &self.entry(i).path)
-            .filter(|path| path.parent() == Some(folder.as_path()))
+            .filter(|path| flat || path.parent() == Some(folder.as_path()))
             .cloned()
             .collect();
     }
@@ -456,6 +465,16 @@ impl View {
         self.rows.get(row).is_some_and(|&i| self.picks.contains(&self.entry(i).path))
     }
 
+    /// The folders picked among the rows shown (not the cursor row alone).
+    pub fn picked_folders(&self) -> Vec<PathBuf> {
+        (0..self.rows.len())
+            .filter(|&row| self.is_picked(row))
+            .map(|row| self.entry(self.rows[row]))
+            .filter(|e| e.is_dir)
+            .map(|e| e.path.clone())
+            .collect()
+    }
+
     /// Picked rows shown.
     pub fn picked_count(&self) -> usize {
         (0..self.rows.len()).filter(|&row| self.is_picked(row)).count()
@@ -530,8 +549,10 @@ impl View {
         self.rows.iter().filter(|&&i| self.entry(i).is_dir).count()
     }
 
+    /// Hidden entries that could be shown: flattened, the ones inside too.
     pub fn hidden_count(&self) -> usize {
-        self.entries.iter().filter(|e| e.hidden).count()
+        let listed = if self.is_flat() { &self.kids } else { &self.entries };
+        listed.iter().filter(|e| e.hidden).count()
     }
 
     /// The entry a `rows` index stands for: one of the folder's own, or one
@@ -624,6 +645,68 @@ impl View {
         }
     }
 
+    /// Whether the rows include what subfolders hold (Ctrl+E).
+    pub fn is_flat(&self) -> bool {
+        !self.flat.is_empty()
+    }
+
+    /// The folders listed all the way down; empty when not flattened.
+    pub fn flat_roots(&self) -> &[PathBuf] {
+        &self.flat
+    }
+
+    /// Flattens `roots`; what they hold shows once [`View::apply_flat`] brings
+    /// their walk. The Tree view's unfolded folders are folded.
+    pub fn set_flat(&mut self, roots: Vec<PathBuf>) {
+        let keep = self.selected_entry().map(|e| e.path.clone());
+        self.tree.clear();
+        self.want = None;
+        self.flat = roots;
+        self.flat_found.clear();
+        self.rebuild_rows(keep.as_deref());
+    }
+
+    /// Lists the folder alone again. The cursor goes to the folder's own
+    /// entry that held it, and picks inside subfolders are dropped.
+    pub fn clear_flat(&mut self) {
+        if !self.is_flat() {
+            return;
+        }
+        let current = self.current.clone();
+        let keep = self
+            .selected_entry()
+            .and_then(|e| e.path.ancestors().find(|a| a.parent() == Some(current.as_path())).map(Path::to_path_buf));
+        self.flat.clear();
+        self.flat_found.clear();
+        self.picks.retain(|pick| pick.parent() == Some(current.as_path()));
+        self.anchor.take_if(|anchor| anchor.parent() != Some(current.as_path()));
+        self.rebuild_rows(keep.as_deref());
+    }
+
+    /// Shows a finished walk; one of other roots (an earlier Ctrl+E) is dropped.
+    pub fn apply_flat(&mut self, roots: &[PathBuf], found: Vec<Entry>) {
+        if roots != self.flat.as_slice() {
+            return;
+        }
+        let keep = self.selected_entry().map(|e| e.path.clone());
+        let row = self.selected;
+        self.flat_found = found;
+        self.rebuild_rows(None);
+        let last = self.rows.len().checked_sub(1);
+        self.selected = keep.and_then(|path| self.row_of_path(&path)).or_else(|| Some(row?.min(last?)));
+    }
+
+    /// Flattened, the folder an entry from a subfolder is in, relative to
+    /// the one shown ("src > util"); `None` for the folder's own entries.
+    pub fn relative_parent(&self, entry: &Entry) -> Option<String> {
+        if !self.is_flat() {
+            return None;
+        }
+        let rel = entry.path.parent()?.strip_prefix(&self.current).ok()?;
+        let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+        (!parts.is_empty()).then(|| parts.join(" > "))
+    }
+
     /// Folds every folder (another view is shown).
     pub fn fold_all(&mut self) {
         if !self.tree.is_empty() {
@@ -642,8 +725,19 @@ impl View {
     }
 
     fn rebuild_rows(&mut self, keep: Option<&Path>) {
-        let top = visible_rows(&self.entries, &self.totals, self.show_hidden, &self.filter, self.sort);
-        (self.rows, self.kids, self.depths) = tree_rows(&self.entries, top, &self.tree, &self.totals, self.show_hidden, self.sort);
+        if self.is_flat() {
+            // Flattened, `kids` holds every entry listed and `rows` index it.
+            self.kids = flat_entries(&self.entries, &self.flat_found, &self.current);
+            let offset = self.entries.len();
+            self.rows = visible_rows(&self.kids, &self.totals, self.show_hidden, &self.filter, self.sort)
+                .into_iter()
+                .map(|i| offset + i)
+                .collect();
+            self.depths.clear();
+        } else {
+            let top = visible_rows(&self.entries, &self.totals, self.show_hidden, &self.filter, self.sort);
+            (self.rows, self.kids, self.depths) = tree_rows(&self.entries, top, &self.tree, &self.totals, self.show_hidden, self.sort);
+        }
         self.selected = keep
             .and_then(|path| self.row_of_path(path))
             .or((!self.rows.is_empty()).then_some(0));
@@ -651,7 +745,11 @@ impl View {
 
     /// The row of the folder's own entry called `name`.
     fn row_of_name(&self, name: &str) -> Option<usize> {
-        (0..self.rows.len()).find(|&row| self.depth(row) == 0 && self.entry(self.rows[row]).name == name)
+        // Flattened, every row is at depth 0: one from a subfolder can share the name.
+        (0..self.rows.len()).find(|&row| {
+            let entry = self.entry(self.rows[row]);
+            self.depth(row) == 0 && entry.name == name && (!self.is_flat() || entry.path.parent() == Some(self.current.as_path()))
+        })
     }
 
     fn row_of_path(&self, path: &Path) -> Option<usize> {
@@ -689,6 +787,49 @@ fn tree_rows(
         pending.extend((0..order.len()).rev().map(|k| (first + k, depth + 1)));
     }
     (rows, kids, depths)
+}
+
+/// The folders to flatten after Ctrl+E, from those flattened now (`roots`)
+/// and the folders picked: none picked, all of `current` or nothing; picked
+/// ones all listed already, those taken out; else those added.
+fn next_flat(roots: &[PathBuf], current: &Path, picked: &[PathBuf]) -> Vec<PathBuf> {
+    let whole = roots.iter().any(|root| root == current);
+    if picked.is_empty() || whole {
+        return if roots.is_empty() && picked.is_empty() { vec![current.to_path_buf()] } else { Vec::new() };
+    }
+    let listed = |pick: &PathBuf| roots.iter().any(|root| pick.starts_with(root));
+    if picked.iter().all(listed) {
+        // Out with the roots holding a picked folder or held by one.
+        return roots
+            .iter()
+            .filter(|root| !picked.iter().any(|pick| pick.starts_with(root) || root.starts_with(pick)))
+            .cloned()
+            .collect();
+    }
+    let mut next: Vec<PathBuf> = roots.to_vec();
+    next.extend(picked.iter().filter(|pick| !listed(pick)).cloned());
+    // A folder inside another one listed is listed with it.
+    let all = next.clone();
+    next.retain(|root| !all.iter().any(|other| other != root && root.starts_with(other)));
+    next
+}
+
+/// The entries of a flattened view: the folder's own (as listed, fresher
+/// than the walk's) and what the walk found inside its subfolders, in the
+/// lister's order (folders first, by name) so `visible_rows` can rely on it.
+/// What a hidden folder holds is hidden with it, so Ctrl+H hides it too.
+fn flat_entries(entries: &[Entry], found: &[Entry], current: &Path) -> Vec<Entry> {
+    let mut all: Vec<Entry> = entries.to_vec();
+    all.extend(found.iter().filter(|e| e.path.parent() != Some(current)).map(|e| {
+        let mut e = e.clone();
+        let in_hidden = e.path.parent().and_then(|p| p.strip_prefix(current).ok()).is_some_and(|rel| {
+            rel.components().any(|c| crate::fs::entry::is_hidden_name(&c.as_os_str().to_string_lossy()))
+        });
+        e.hidden |= in_hidden;
+        e
+    }));
+    all.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase(), e.path.to_string_lossy().to_lowercase()));
+    all
 }
 
 /// The folder every one of `paths` is in, when they all share one.
@@ -1091,6 +1232,10 @@ pub struct Tab {
     lister: Lister,
     /// Reads the folders unfolded in the Tree view.
     readers: Readers,
+    /// Walks what a flattened view (Ctrl+E) lists; `None` once it landed.
+    flattener: Option<fs::flat::Flattener>,
+    /// The flattened view needs a walk (Ctrl+E, a reload): started next frame.
+    flat_due: bool,
     /// Id of the listing currently on screen (or the last one that failed).
     shown_id: u64,
     /// Entry to select once the pending listing arrives, by name.
@@ -1127,6 +1272,8 @@ impl Tab {
             view,
             lister: Lister::new(log),
             readers: Readers::new(),
+            flattener: None,
+            flat_due: false,
             shown_id: 0,
             select_after_load: None,
             select_path_after_load: None,
@@ -2762,6 +2909,11 @@ impl LumenApp {
             // Opening the Recycle Bin again, even from itself, reads the bins again.
             self.recycle_stale |= self.on_recycle_bin();
             self.watcher.watch(&self.tab.view.current);
+            // A reload of a flattened folder walks it again; another folder is not flattened.
+            self.tab.flat_due = self.tab.view.is_flat();
+            if !self.tab.flat_due {
+                self.tab.flattener = None;
+            }
             if self.tab.pending_nav != NavKind::Refresh && !self.on_marker() {
                 self.recents.visit(&self.tab.view.current);
                 self.visits.visit(&self.tab.view.current, unix_now());
@@ -2793,6 +2945,42 @@ impl LumenApp {
             let ctx = ctx.clone();
             let id = self.tab.readers.request(folder.clone(), move || ctx.request_repaint());
             self.tab.view.tree.started(&folder, id);
+        }
+    }
+
+    /// Starts the walk the flattened view is waiting for.
+    fn walk_flat(&mut self, ctx: &egui::Context) {
+        if !std::mem::take(&mut self.tab.flat_due) || !self.tab.view.is_flat() {
+            return;
+        }
+        let ctx = ctx.clone();
+        // Replacing an earlier walk drops it, which cancels it.
+        self.tab.flattener = Some(fs::flat::Flattener::start(self.tab.view.flat_roots().to_vec(), move || ctx.request_repaint()));
+    }
+
+    /// Shows the flatten walk once it is done.
+    fn poll_flat(&mut self) {
+        if let Some((roots, found)) = self.tab.flattener.as_ref().and_then(fs::flat::Flattener::poll) {
+            self.tab.flattener = None;
+            self.tab.view.apply_flat(&roots, found);
+        }
+    }
+
+    /// Ctrl+E: lists what the subfolders hold too, or the folder alone again.
+    /// With folders picked, it lists or takes out what those hold alone.
+    fn toggle_flat(&mut self) {
+        if self.on_marker() {
+            return;
+        }
+        let view = &self.tab.view;
+        let next = next_flat(view.flat_roots(), &view.current, &view.picked_folders());
+        if next.is_empty() {
+            self.tab.view.clear_flat();
+            self.tab.flattener = None;
+            self.tab.flat_due = false;
+        } else {
+            self.tab.view.set_flat(next);
+            self.tab.flat_due = true;
         }
     }
 
@@ -2885,6 +3073,7 @@ impl LumenApp {
             Action::Cancel if self.on_recycle_bin() && self.tab.recycle.count() > 0 => self.tab.recycle.clear(),
             Action::FocusPathBar => self.path_popup.open(),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
+            Action::ToggleFlat => self.toggle_flat(),
             Action::ZoomIn => self.tab.view_size = self.tab.view_size.bigger(),
             Action::ZoomOut => self.tab.view_size = self.tab.view_size.smaller(),
             Action::ZoomReset => self.tab.view_size = ui::view_size::ViewSize::default(),
@@ -3016,6 +3205,8 @@ impl eframe::App for LumenApp {
         }
         self.poll_kids();
         self.read_kids(&ctx);
+        self.poll_flat();
+        self.walk_flat(&ctx);
 
         self.refresh_if_changed(&ctx);
         self.poll_recycle(&ctx);
@@ -3932,6 +4123,93 @@ mod tests {
         assert_eq!(trash.hint(), "Enter to confirm · Esc to cancel", "as before");
         let paste = Dialog::Paste { source: "/x/a".into(), target: "/y/a".into(), mode: Mode::Copy };
         assert_eq!(paste.hint(), "Enter to replace · Esc to skip");
+    }
+
+    /// Runs the frames that start and land the tab's flatten walk.
+    fn land_flat(ctx: &egui::Context, app: &mut LumenApp) {
+        app.walk_flat(ctx);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.tab.flattener.is_some() {
+            assert!(Instant::now() < deadline, "the walk never landed");
+            app.poll_flat();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn ctrl_e_lists_what_the_subfolders_hold_and_again_lists_the_folder_alone() {
+        let (ctx, mut app, dir) = app_in("app-flat-toggle");
+        std::fs::create_dir(dir.join("sub/deeper")).unwrap();
+        std::fs::write(dir.join("sub/c.txt"), "C").unwrap();
+        std::fs::write(dir.join("sub/deeper/d.txt"), "D").unwrap();
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        let names: Vec<&str> = app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i).name.as_str()).collect();
+        assert_eq!(names, ["deeper", "sub", "a.txt", "b.txt", "c.txt", "d.txt"]);
+        assert_eq!(app.tab.view.folder_count(), 2);
+        let d = app.tab.view.entry(app.tab.view.rows[5]).clone();
+        assert_eq!(app.tab.view.relative_parent(&d).as_deref(), Some("sub > deeper"));
+        app.handle_action(&ctx, Action::ToggleFlat);
+        let names: Vec<&str> = app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i).name.as_str()).collect();
+        assert_eq!(names, ["sub", "a.txt", "b.txt"]);
+        assert!(app.tab.flattener.is_none(), "nothing left walking");
+    }
+
+    #[test]
+    fn a_flattened_folder_reloaded_after_a_change_walks_again() {
+        let (ctx, mut app, dir) = app_in("app-flat-reload");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        std::fs::write(dir.join("sub/new.txt"), "N").unwrap();
+        app.navigate_as(&ctx, NavKind::Refresh, dir.clone(), None);
+        land(&mut app);
+        land_flat(&ctx, &mut app);
+        assert!(app.tab.view.lists(&dir.join("sub/new.txt")));
+    }
+
+    #[test]
+    fn ctrl_e_on_picked_folders_lists_only_what_they_hold() {
+        let (ctx, mut app, dir) = app_in("app-flat-partial");
+        std::fs::create_dir(dir.join("other")).unwrap();
+        std::fs::write(dir.join("sub/c.txt"), "C").unwrap();
+        std::fs::write(dir.join("other/o.txt"), "O").unwrap();
+        app.tab.view.apply_refresh(listing_of(&dir));
+        // A click on a file, then a Ctrl+click on `sub` (the first one keeps the cursor row picked).
+        let a = app.tab.view.row_of_path(&dir.join("a.txt")).unwrap();
+        app.tab.view.select_row(a);
+        let sub = app.tab.view.row_of_path(&dir.join("sub")).unwrap();
+        app.tab.view.toggle_pick(sub);
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        assert!(app.tab.view.lists(&dir.join("sub/c.txt")));
+        assert!(!app.tab.view.lists(&dir.join("other/o.txt")), "a folder not picked stays folded");
+        assert_eq!(app.tab.view.rows.len(), 5, "other, sub, a.txt, b.txt, c.txt");
+        // The same folders again: the folder alone.
+        app.handle_action(&ctx, Action::ToggleFlat);
+        assert!(!app.tab.view.is_flat());
+        assert_eq!(app.tab.view.rows.len(), 4);
+    }
+
+    #[test]
+    fn picked_folders_are_flattened_the_cursor_alone_flattens_everything() {
+        let x = PathBuf::from("/x");
+        let (a, b) = (x.join("a"), x.join("b"));
+        assert_eq!(next_flat(&[], &x, &[]), [x.clone()], "nothing picked: all of it");
+        assert_eq!(next_flat(&[x.clone()], &x, &[]), Vec::<PathBuf>::new(), "again: off");
+        assert_eq!(next_flat(&[], &x, &[a.clone()]), [a.clone()]);
+        assert_eq!(next_flat(&[a.clone()], &x, &[b.clone()]), [a.clone(), b.clone()], "another folder is added");
+        assert_eq!(next_flat(&[a.clone(), b.clone()], &x, &[a.clone()]), [b.clone()], "one already listed is taken out");
+        assert_eq!(next_flat(&[a.clone()], &x, &[a.join("deep")]), Vec::<PathBuf>::new(), "inside a listed one: already listed, so out with it");
+        assert_eq!(next_flat(&[a.clone()], &x, &[]), Vec::<PathBuf>::new(), "nothing picked: off");
+        assert_eq!(next_flat(&[x.clone()], &x, &[a.clone()]), Vec::<PathBuf>::new(), "all of it listed: off");
+    }
+
+    #[test]
+    fn ctrl_e_does_nothing_on_this_pc() {
+        let (ctx, mut app, _dir) = app_in("app-flat-marker");
+        app.tab.view.apply_listing(ok_listing(&crate::places::this_pc().to_string_lossy(), Vec::new()), None);
+        app.handle_action(&ctx, Action::ToggleFlat);
+        assert!(!app.tab.view.is_flat());
     }
 
     #[test]
@@ -6419,6 +6697,117 @@ mod tests {
         ];
         v.apply_listing(ok_listing("/x", entries), None);
         v
+    }
+
+    /// An entry below `/x`, at `rel` ("src/util/a.txt").
+    fn nested(rel: &str, is_dir: bool) -> Entry {
+        let path = PathBuf::from("/x").join(rel);
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        Entry { hidden: name.starts_with('.'), size: (!is_dir).then_some(1), modified: None, name, path, is_dir }
+    }
+
+    /// `loaded_view` flattened, with what its walk found below `/x`.
+    fn flat_view() -> View {
+        let mut v = loaded_view();
+        v.set_flat(vec![PathBuf::from("/x")]);
+        let found = vec![
+            nested("src", true),
+            nested("src/main.rs", false),
+            nested("src/util", true),
+            nested("src/util/a.txt", false),
+            nested("src/.cache", false),
+            nested("a.txt", false),
+        ];
+        v.apply_flat(&[PathBuf::from("/x")], found);
+        v
+    }
+
+    fn row_paths(v: &View) -> Vec<String> {
+        (0..v.rows.len())
+            .map(|row| v.entry(v.rows[row]).path.strip_prefix("/x").unwrap().to_string_lossy().replace('\\', "/"))
+            .collect()
+    }
+
+    #[test]
+    fn a_flattened_view_lists_what_the_subfolders_hold_sorted_with_the_rest() {
+        let v = flat_view();
+        // Folders first, then by name; each entry once, hidden ones left out.
+        assert_eq!(row_paths(&v), ["src", "src/util", "a.txt", "src/util/a.txt", "b.txt", "src/main.rs"]);
+        assert!(v.is_flat());
+    }
+
+    #[test]
+    fn a_flattened_view_counts_every_row_it_lists() {
+        let v = flat_view();
+        assert_eq!(v.rows.len(), 6);
+        assert_eq!(v.folder_count(), 2);
+        assert_eq!(v.hidden_count(), 3, ".git and .env above, .cache inside src");
+    }
+
+    #[test]
+    fn what_a_hidden_folder_holds_is_hidden_with_it() {
+        let mut v = loaded_view();
+        v.set_flat(vec![PathBuf::from("/x")]);
+        v.apply_flat(&[PathBuf::from("/x")], vec![nested(".git", true), nested(".git/objects", true), nested(".git/objects/pack", false), nested("src/main.rs", false)]);
+        assert_eq!(row_paths(&v), ["src", "a.txt", "b.txt", "src/main.rs"], "nothing from .git while hidden files are");
+        assert_eq!(v.hidden_count(), 4, ".git, .env, and the two inside .git");
+        v.toggle_hidden();
+        assert!(row_paths(&v).contains(&".git/objects/pack".to_owned()), "Ctrl+H shows them");
+    }
+
+    #[test]
+    fn a_nested_row_names_its_folder_relative_to_the_one_shown() {
+        let v = flat_view();
+        let parent = |rel: &str| v.relative_parent(&nested(rel, false));
+        assert_eq!(parent("a.txt"), None, "the folder's own entries name none");
+        assert_eq!(parent("src/main.rs").as_deref(), Some("src"));
+        assert_eq!(parent("src/util/a.txt").as_deref(), Some("src > util"));
+        assert_eq!(loaded_view().relative_parent(&nested("src/main.rs", false)), None, "only while flattened");
+    }
+
+    #[test]
+    fn a_walk_of_other_roots_is_ignored() {
+        let mut v = loaded_view();
+        v.set_flat(vec![PathBuf::from("/x")]);
+        v.apply_flat(&[PathBuf::from("/elsewhere")], vec![nested("src/main.rs", false)]);
+        assert_eq!(row_paths(&v), ["src", "a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn turning_the_flattened_view_off_lists_the_folder_alone_again() {
+        let mut v = flat_view();
+        v.clear_flat();
+        assert!(!v.is_flat());
+        assert_eq!(row_paths(&v), ["src", "a.txt", "b.txt"]);
+        assert_eq!(v.hidden_count(), 2);
+    }
+
+    #[test]
+    fn another_folder_is_not_flattened_but_a_reload_stays_so() {
+        let mut v = flat_view();
+        v.apply_refresh(ok_listing("/x", vec![entry("src", true), entry("a.txt", false), entry("b.txt", false)]));
+        assert!(v.is_flat());
+        assert_eq!(v.rows.len(), 6);
+        v.apply_listing(ok_listing("/y", vec![entry("c.txt", false)]), None);
+        assert!(!v.is_flat());
+        assert_eq!(v.rows.len(), 1);
+    }
+
+    #[test]
+    fn select_all_in_a_flattened_view_picks_every_row() {
+        let mut v = flat_view();
+        v.select_all();
+        assert_eq!(v.picked_count(), 6);
+    }
+
+    #[test]
+    fn the_cursor_stays_on_its_entry_when_the_walk_lands() {
+        let mut v = loaded_view();
+        let b = v.row_of_path(Path::new("/x/b.txt")).unwrap();
+        v.select_row(b);
+        v.set_flat(vec![PathBuf::from("/x")]);
+        v.apply_flat(&[PathBuf::from("/x")], vec![nested("src/main.rs", false), nested("src/a.txt", false)]);
+        assert_eq!(v.selected_entry().unwrap().path, Path::new("/x/b.txt"));
     }
 
     fn row_names(v: &View) -> Vec<&str> {
