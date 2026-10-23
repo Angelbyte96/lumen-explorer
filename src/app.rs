@@ -1867,6 +1867,60 @@ impl LumenApp {
         self.tab.drive = Some(self.drives[to(at, last).min(last)].path.clone());
     }
 
+    /// A click, drag or key the folder's list reported this frame.
+    fn handle_list(&mut self, ctx: &egui::Context, event: Option<ListEvent>) {
+        if !matches!(event, Some(ListEvent::Band { .. } | ListEvent::Cells { .. })) {
+            self.tab.view.end_band();
+        }
+        match event {
+            Some(ListEvent::Select(i)) => self.tab.view.select_row(i),
+            Some(ListEvent::Toggle(i)) => self.tab.view.toggle_pick(i),
+            Some(ListEvent::Menu(i)) => {
+                if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                    self.open_entry_menu(i, pos);
+                }
+            }
+            Some(ListEvent::Unfold(i)) => {
+                self.tab.view.toggle_open(i);
+                self.read_kids(ctx);
+            }
+            Some(ListEvent::Extend(i)) => self.tab.view.extend_to(i),
+            Some(ListEvent::Band { start, end, add }) => self.tab.view.select_band(start, end, add),
+            Some(ListEvent::Cells { cells, cursor, add }) => self.tab.view.select_cells(&cells, cursor, add),
+            Some(ListEvent::Activate(i)) => {
+                self.tab.view.select_row(i);
+                self.activate_selected(ctx);
+            }
+            Some(ListEvent::OpenFolder(i)) => self.open_folder_of(ctx, i),
+            Some(ListEvent::Sort(column)) => self.tab.view.sort_by(column),
+            Some(ListEvent::Resized(widths)) => self.columns = widths,
+            Some(ListEvent::Fit(column)) => self.run_command(ctx, Command::FitColumn(column)),
+            Some(ListEvent::CloseColumn(column)) => self.run_command(ctx, Command::ToggleColumn(column)),
+            Some(ListEvent::HeaderMenu(column)) => {
+                if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                    self.context_menu = Some(ContextMenu::new(crate::menu::column_menu(column, &self.shown_columns, &self.column_order), pos));
+                    self.context_on_entry = false;
+                }
+            }
+            Some(ListEvent::RenameEnded(submit)) => {
+                if let Some(edit) = self.rename.take()
+                    && submit
+                {
+                    self.finish_rename(ctx, edit, false);
+                }
+            }
+            // Below the rows: a click ends a multiple selection, a right click
+            // opens the folder's menu.
+            Some(ListEvent::Empty { menu: false }) => self.tab.view.unselect(),
+            Some(ListEvent::Empty { menu: true }) => {
+                if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                    self.open_background_menu(pos);
+                }
+            }
+            None => {}
+        }
+    }
+
     /// The This PC view's click, double click or right click on a drive or a header.
     fn handle_drives(&mut self, ctx: &egui::Context, event: DrivesEvent) {
         let (DrivesEvent::Select(i) | DrivesEvent::Open(i) | DrivesEvent::Menu(i)) = event else {
@@ -3385,56 +3439,7 @@ impl eframe::App for LumenApp {
             // After drawing: the icons the list just asked for go out this frame.
             self.file_icons.poll(&ctx);
             self.thumbnails.poll(&ctx);
-            if !matches!(event, Some(ListEvent::Band { .. } | ListEvent::Cells { .. })) {
-                self.tab.view.end_band();
-            }
-            match event {
-                Some(ListEvent::Select(i)) => self.tab.view.select_row(i),
-                Some(ListEvent::Toggle(i)) => self.tab.view.toggle_pick(i),
-                Some(ListEvent::Menu(i)) => {
-                    if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                        self.open_entry_menu(i, pos);
-                    }
-                }
-                Some(ListEvent::Unfold(i)) => {
-                    self.tab.view.toggle_open(i);
-                    self.read_kids(&ctx);
-                }
-                Some(ListEvent::Extend(i)) => self.tab.view.extend_to(i),
-                Some(ListEvent::Band { start, end, add }) => self.tab.view.select_band(start, end, add),
-                Some(ListEvent::Cells { cells, cursor, add }) => self.tab.view.select_cells(&cells, cursor, add),
-                Some(ListEvent::Activate(i)) => {
-                    self.tab.view.select_row(i);
-                    self.activate_selected(&ctx);
-                }
-                Some(ListEvent::OpenFolder(i)) => self.open_folder_of(&ctx, i),
-                Some(ListEvent::Sort(column)) => self.tab.view.sort_by(column),
-                Some(ListEvent::Resized(widths)) => self.columns = widths,
-                Some(ListEvent::Fit(column)) => self.run_command(&ctx, Command::FitColumn(column)),
-                Some(ListEvent::CloseColumn(column)) => self.run_command(&ctx, Command::ToggleColumn(column)),
-                Some(ListEvent::HeaderMenu(column)) => {
-                    if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                        self.context_menu = Some(ContextMenu::new(crate::menu::column_menu(column, &self.shown_columns, &self.column_order), pos));
-                        self.context_on_entry = false;
-                    }
-                }
-                Some(ListEvent::RenameEnded(submit)) => {
-                    if let Some(edit) = self.rename.take()
-                        && submit
-                    {
-                        self.finish_rename(&ctx, edit, false);
-                    }
-                }
-                // Below the rows: a click ends a multiple selection, a right click
-                // opens the folder's menu.
-                Some(ListEvent::Empty { menu: false }) => self.tab.view.unselect(),
-                Some(ListEvent::Empty { menu: true }) => {
-                    if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                        self.open_background_menu(pos);
-                    }
-                }
-                None => {}
-            }
+            self.handle_list(&ctx, event);
             });
         });
 
@@ -4162,6 +4167,21 @@ mod tests {
         assert_eq!(app.tab.view.selected_entry().map(|e| e.name.as_str()), Some("d.txt"), "the row it came from is selected");
         app.handle_action(&ctx, Action::Back);
         assert_eq!(app.tab.lister.last_requested(), Some(dir), "Back returns");
+    }
+
+    #[test]
+    fn the_lists_open_folder_event_opens_the_folder_the_row_is_in() {
+        let (ctx, mut app, dir) = app_in("app-flat-open-folder-event");
+        std::fs::create_dir(dir.join("sub/deeper")).unwrap();
+        std::fs::write(dir.join("sub/deeper/d.txt"), "D").unwrap();
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        let row = app.tab.view.rows.iter().position(|&i| app.tab.view.entry(i).name == "d.txt").unwrap();
+        app.handle_list(&ctx, Some(ListEvent::OpenFolder(row)));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub/deeper")), "opens the folder it is in");
+        land(&mut app);
+        assert!(!app.tab.view.is_flat(), "the folder alone");
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.name.as_str()), Some("d.txt"), "the row it came from is selected");
     }
 
     #[test]
