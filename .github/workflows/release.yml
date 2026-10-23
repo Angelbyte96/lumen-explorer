@@ -54,13 +54,14 @@ jobs:
       - name: Check the tag matches Cargo.toml
         if: startsWith(github.ref, 'refs/tags/')
         run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"
+      - name: Install the test and packaging tools
+        # poppler-utils: the PDF preview tests run pdftoppm.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils dpkg-dev desktop-file-utils
       - uses: dtolnay/rust-toolchain@stable
       - name: Test
         run: cargo test --locked
       - name: Build release
         run: cargo build --release --locked
-      - name: Install the packaging tools
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends dpkg-dev desktop-file-utils
       - name: Check the packaging script
         run: scripts/test-deb.sh "$(mktemp -d)"
       - name: Build the .deb
