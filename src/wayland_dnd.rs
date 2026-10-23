@@ -170,11 +170,17 @@ fn payload_for(mime: &str, paths: &[PathBuf], transfer: &Transfer) -> Option<Vec
     }
 }
 
-/// Whether to hand a drag over to the compositor now: Lumen carries one, its
-/// pointer is outside the window, the press that holds the grab is known (the
+/// Whether to hand a drag over to the compositor now: Lumen carries one, it
+/// is leaving (`goes_out`), the press that holds the grab is known (the
 /// serial `start_drag` needs) and that grab has not started one already.
-fn should_start(carried: bool, outside: bool, serial: Option<u32>, started: bool) -> bool {
-    carried && outside && serial.is_some() && !started
+fn should_start(carried: bool, leaving: bool, serial: Option<u32>, started: bool) -> bool {
+    carried && leaving && serial.is_some() && !started
+}
+
+/// Whether Lumen carries a drag this frame and it goes out (`goes_out`).
+fn leaving(ctx: &egui::Context) -> bool {
+    crate::ui::dnd::carried_inside(ctx).is_some()
+        && goes_out(crate::ui::dnd::left_window(ctx), ctx.input(|i| i.modifiers.alt))
 }
 
 /// Whether a drag Lumen carries goes to the compositor: past the window's
@@ -502,9 +508,9 @@ impl Receiver {
         worker.shared.flush();
     }
 
-    /// After the list is drawn: when an entry carried inside Lumen has its
-    /// pointer past the window's edge, hands it to the compositor as a drag out
-    /// (once per press) and ends egui's own drag, whose release egui will never
+    /// After the list is drawn: when an entry carried inside Lumen is leaving
+    /// (past the window's edge, or Alt held), hands it to the compositor as a
+    /// drag out (once per press) and ends egui's own drag, whose release egui will never
     /// see. Returns whether it did.
     pub fn carry_out(&mut self, ctx: &egui::Context) -> bool {
         let Setup::Running(worker) = &mut self.state else { return false };
@@ -513,8 +519,7 @@ impl Receiver {
         }
         let drag = crate::ui::dnd::carried_inside(ctx);
         let serial = worker.shared.grab.lock().ok().and_then(|grab| grab.press);
-        let outside = drag.is_some() && goes_out(crate::ui::dnd::left_window(ctx), ctx.input(|i| i.modifiers.alt));
-        if !should_start(drag.is_some(), outside, serial, worker.shared.started(serial)) {
+        if !should_start(drag.is_some(), leaving(ctx), serial, worker.shared.started(serial)) {
             return false;
         }
         let (Some(drag), Some(serial)) = (drag, serial) else { return false };
@@ -1259,6 +1264,30 @@ mod tests {
         assert!(goes_out(true, false), "past the edge, as before");
         assert!(goes_out(true, true));
         assert!(!goes_out(false, false), "inside, no Alt: the drag stays Lumen's");
+    }
+
+    #[test]
+    fn the_drag_lumen_carries_leaves_with_alt_held_or_past_the_edge() {
+        let ctx = egui::Context::default();
+        let at = |pos: egui::Pos2, alt: bool| {
+            let input = egui::RawInput {
+                events: vec![egui::Event::ModifiersChanged(egui::Modifiers { alt, ..egui::Modifiers::NONE }), egui::Event::PointerMoved(pos)],
+                screen_rect: Some(crate::ui::testing::SCREEN),
+                ..egui::RawInput::default()
+            };
+            ctx.run_ui(input, |_| ()).drop_without_applying_deltas();
+        };
+        let inside = egui::pos2(400.0, 300.0);
+        let past_the_edge = egui::pos2(850.0, 300.0);
+        at(inside, true);
+        assert!(!leaving(&ctx), "Alt held, but nothing carried");
+        egui::DragAndDrop::set_payload(&ctx, Drag { paths: vec![PathBuf::from("/tmp/a")] });
+        at(inside, false);
+        assert!(!leaving(&ctx), "inside, no Alt: the drag stays Lumen's");
+        at(inside, true);
+        assert!(leaving(&ctx), "Alt held inside the window: Alt+Tab may follow");
+        at(past_the_edge, false);
+        assert!(leaving(&ctx), "past the edge");
     }
 
     #[test]

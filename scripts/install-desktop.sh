@@ -54,12 +54,26 @@ case $bin_dir in
         ;;
 esac
 
-# Any step that fails stops the script (set -e): say so, plainly.
-finished=false
-trap '[ "$finished" = true ] || echo "Lumen was NOT installed: the step above failed." >&2' EXIT
+# Any step that fails stops the script (set -e): say so, plainly, and say
+# whether the binary had already been replaced.
+done_upto=nothing
+failed() {
+    case $done_upto in
+        nothing) echo "Lumen was NOT installed: the step above failed." ;;
+        binary) echo "Lumen was only partly installed: $bin_dir/lumen was replaced, but the step above failed." ;;
+    esac >&2
+}
+trap failed EXIT
 
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -n 1)
 commit=$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo "no git")
+# Tracked edits are built in too, so the commit alone would not name this build.
+# Exit 1 means changes; any other failure (128) proves nothing either way.
+if [ "$commit" = "no git" ] || git -C "$root" diff --quiet HEAD 2>/dev/null; then
+    :
+elif [ $? -eq 1 ]; then
+    commit="$commit with uncommitted changes"
+fi
 
 # Always build: cargo does nothing when the binary is already up to date.
 echo "[1/4] Building Lumen $version (release; the first build takes a few minutes)..."
@@ -69,7 +83,10 @@ binary=${CARGO_TARGET_DIR:-$root/target}/release/lumen
 echo "[2/4] Installing the binary..."
 mkdir -p "$bin_dir" "$apps" "$icons/scalable/apps" "$icons/256x256/apps"
 bin_dir=$(cd "$bin_dir" && pwd) # the Exec path must be absolute
-cp "$binary" "$bin_dir/lumen.tmp" && mv "$bin_dir/lumen.tmp" "$bin_dir/lumen"
+# Two commands, not `cp && mv`: set -e does not stop on a failure inside &&.
+cp "$binary" "$bin_dir/lumen.tmp"
+mv "$bin_dir/lumen.tmp" "$bin_dir/lumen"
+done_upto=binary
 
 echo "[3/4] Installing the menu entry and icon..."
 cp "$root/assets/lumen.svg" "$icons/scalable/apps/lumen.svg"
@@ -86,6 +103,6 @@ mv "$apps/lumen.desktop.tmp" "$apps/lumen.desktop"
 echo "[4/4] Refreshing the app menu..."
 refresh
 
-finished=true
+done_upto=all
 echo "Done: Lumen $version ($commit) is installed at $bin_dir/lumen"
 echo "It shows up in the app menu as \"Lumen\" (it may take a few seconds). Close a running Lumen to use this one."
