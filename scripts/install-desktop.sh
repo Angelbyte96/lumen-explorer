@@ -67,11 +67,10 @@ trap failed EXIT
 
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -n 1)
 commit=$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo "no git")
-# Tracked edits are built in too, so the commit alone would not name this build.
-# Exit 1 means changes; any other failure (128) proves nothing either way.
-if [ "$commit" = "no git" ] || git -C "$root" diff --quiet HEAD 2>/dev/null; then
-    :
-elif [ $? -eq 1 ]; then
+# Edits and new files are built in too (Cargo picks up an untracked build.rs or
+# src/bin/), so the commit alone would not name this build. When git fails
+# (exit 128), it proves nothing either way.
+if [ "$commit" != "no git" ] && changes=$(git -C "$root" status --porcelain 2>/dev/null) && [ -n "$changes" ]; then
     commit="$commit with uncommitted changes"
 fi
 
