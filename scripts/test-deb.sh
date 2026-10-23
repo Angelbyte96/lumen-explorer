@@ -29,6 +29,8 @@ field() { dpkg-deb --field "$deb" "$1"; }
 [ "$(field Architecture)" = "$arch" ] || fail "Architecture: $(field Architecture)"
 [ "$(field Maintainer)" = "Angelbyte96 <108975993+Angelbyte96@users.noreply.github.com>" ] || fail "Maintainer: $(field Maintainer)"
 [ "$(field Section)" = utils ] || fail "Section: $(field Section)"
+# Optional tools Lumen runs: xdg-open (files), pdftoppm (PDF preview), gio (Open With).
+[ "$(field Recommends)" = "xdg-utils, poppler-utils, libglib2.0-bin" ] || fail "Recommends: $(field Recommends)"
 [ "$(field Homepage)" = "https://github.com/Angelbyte96/lumen-explorer" ] || fail "Homepage: $(field Homepage)"
 field Description | head -n 1 | grep -qxF "A fast, lightweight, keyboard-first file explorer" || fail "Description: $(field Description)"
 depends=$(field Depends)
