@@ -15,7 +15,8 @@ out=$("$install")
 entry=$XDG_DATA_HOME/applications/lumen.desktop
 
 # Every step is announced, and the last line says what was installed where.
-version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -n 1)
+# The version comes from cargo, not from the installer's own Cargo.toml parse.
+version=$(cargo pkgid --manifest-path "$root/Cargo.toml" | sed 's/.*[@#]//')
 for step in "[1/4] Building Lumen" "[2/4] Installing the binary" "[3/4] Installing the menu entry and icon" "[4/4] Refreshing the app menu"; do
     printf '%s\n' "$out" | grep -qF "$step" || fail "step not shown: $step"
 done
@@ -35,6 +36,28 @@ fi
 printf '%s\n' "$err" | grep -qF "Lumen was NOT installed" || fail "failure message: $err"
 [ ! -e "$t/fail/bin/lumen" ] || fail "failed build installed a binary"
 rm -rf "$t/fake" "$t/fail"
+
+# A step that fails after the binary was replaced does not claim nothing was installed.
+mkdir -p "$t/part/applications/lumen.desktop.tmp"
+if err=$(XDG_DATA_HOME="$t/part" LUMEN_BIN_DIR="$t/part/bin" "$install" 2>&1 >/dev/null); then
+    fail "failed menu entry reported success"
+fi
+printf '%s\n' "$err" | grep -qxF "Lumen was only partly installed: $t/part/bin/lumen was replaced, but the step above failed." ||
+    fail "partial failure message: $err"
+printf '%s\n' "$err" | grep -qF "NOT installed" && fail "partial failure says NOT installed: $err"
+rm -rf "$t/part"
+
+# The summary names uncommitted changes, which the commit alone would hide.
+mkdir -p "$t/fake"
+printf '#!/bin/sh\ncase $* in *rev-parse*) echo abc1234 ;; *diff*) exit $DIRTY ;; esac\n' >"$t/fake/git"
+chmod +x "$t/fake/git"
+for dirty in 0 1; do
+    out=$(DIRTY=$dirty PATH="$t/fake:$PATH" "$install")
+    [ $dirty = 1 ] && want="abc1234 with uncommitted changes" || want=abc1234
+    printf '%s\n' "$out" | grep -qxF "Done: Lumen $version ($want) is installed at $LUMEN_BIN_DIR/lumen" ||
+        fail "summary with DIRTY=$dirty: $(printf '%s\n' "$out" | grep Done)"
+done
+rm -rf "$t/fake"
 
 # Extra arguments are refused and change nothing.
 if "$install" --uninstall extra 2>/dev/null; then fail "extra argument accepted"; fi
