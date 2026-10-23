@@ -83,7 +83,9 @@ binary=${CARGO_TARGET_DIR:-$root/target}/release/lumen
 echo "[2/4] Installing the binary..."
 mkdir -p "$bin_dir" "$apps" "$icons/scalable/apps" "$icons/256x256/apps"
 bin_dir=$(cd "$bin_dir" && pwd) # the Exec path must be absolute
-cp "$binary" "$bin_dir/lumen.tmp" && mv "$bin_dir/lumen.tmp" "$bin_dir/lumen"
+# Two commands, not `cp && mv`: set -e does not stop on a failure inside &&.
+cp "$binary" "$bin_dir/lumen.tmp"
+mv "$bin_dir/lumen.tmp" "$bin_dir/lumen"
 done_upto=binary
 
 echo "[3/4] Installing the menu entry and icon..."
