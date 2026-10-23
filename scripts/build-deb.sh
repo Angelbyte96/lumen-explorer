@@ -79,7 +79,7 @@ Architecture: $arch
 Maintainer: Angelbyte96 <108975993+Angelbyte96@users.noreply.github.com>
 Installed-Size: $size
 Depends: $linked, $loaded
-Recommends: xdg-utils
+Recommends: xdg-utils, poppler-utils, libglib2.0-bin
 Section: utils
 Priority: optional
 Homepage: https://github.com/Angelbyte96/lumen-explorer
