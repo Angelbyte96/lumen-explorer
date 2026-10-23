@@ -47,6 +47,18 @@ printf '%s\n' "$err" | grep -qxF "Lumen was only partly installed: $t/part/bin/l
 printf '%s\n' "$err" | grep -qF "NOT installed" && fail "partial failure says NOT installed: $err"
 rm -rf "$t/part"
 
+# A binary that cannot be copied stops the script before anything is replaced.
+mkdir -p "$t/ro/bin"
+chmod a-w "$t/ro/bin"
+if err=$(XDG_DATA_HOME="$t/ro" LUMEN_BIN_DIR="$t/ro/bin" "$install" 2>&1 >/dev/null); then
+    chmod u+w "$t/ro/bin"
+    fail "failed copy reported success"
+fi
+chmod u+w "$t/ro/bin"
+printf '%s\n' "$err" | grep -qxF "Lumen was NOT installed: the step above failed." || fail "failed copy message: $err"
+[ ! -e "$t/ro/applications/lumen.desktop" ] || fail "failed copy went on to the menu entry"
+rm -rf "$t/ro"
+
 # The summary names uncommitted changes, which the commit alone would hide.
 mkdir -p "$t/fake"
 printf '#!/bin/sh\ncase $* in *rev-parse*) echo abc1234 ;; *diff*) exit $DIRTY ;; esac\n' >"$t/fake/git"
