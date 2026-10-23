@@ -2767,7 +2767,7 @@ impl LumenApp {
         self.tabs[self.active] = Some(old);
         self.active = index;
         self.tab.view.scroll = Some(Scroll::Instant);
-        self.watcher.watch(&self.tab.view.current);
+        self.watcher.watch(&self.tab.view.current, self.tab.view.flat_roots());
         // A listing still in flight shows fresh contents anyway.
         if !self.tab.lister.is_pending(self.tab.shown_id) {
             self.navigate_as(ctx, NavKind::Refresh, self.tab.view.current.clone(), None);
@@ -2972,7 +2972,7 @@ impl LumenApp {
         if to.is_some() {
             // Opening the Recycle Bin again, even from itself, reads the bins again.
             self.recycle_stale |= self.on_recycle_bin();
-            self.watcher.watch(&self.tab.view.current);
+            self.watcher.watch(&self.tab.view.current, self.tab.view.flat_roots());
             // A reload of a flattened folder walks it again; another folder is not flattened.
             self.tab.flat_due = self.tab.view.is_flat();
             if !self.tab.flat_due {
@@ -3046,6 +3046,8 @@ impl LumenApp {
             self.tab.view.set_flat(next);
             self.tab.flat_due = true;
         }
+        // A change inside a folder listed all the way down reloads the view too.
+        self.watcher.watch(&self.tab.view.current, self.tab.view.flat_roots());
     }
 
     /// Shows the unfolded folders the readers finished.
@@ -4201,6 +4203,50 @@ mod tests {
         let names: Vec<&str> = app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i).name.as_str()).collect();
         assert_eq!(names, ["sub", "a.txt", "b.txt"]);
         assert!(app.tab.flattener.is_none(), "nothing left walking");
+    }
+
+    #[test]
+    fn ctrl_e_watches_the_subfolders_listed_and_again_only_the_folder() {
+        let (ctx, mut app, dir) = app_in("app-flat-watch");
+        std::fs::create_dir(dir.join("sub/deeper")).unwrap();
+        app.handle_action(&ctx, Action::ToggleFlat);
+        std::fs::write(dir.join("sub/deeper/new.txt"), "").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(app.watcher.take_changed(), "a change in a subfolder of the flattened view");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        // Not on Windows: there the subfolder's own date changes too, which the folder reports.
+        #[cfg(not(windows))]
+        {
+            std::fs::write(dir.join("sub/deeper/other.txt"), "").unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(!app.watcher.take_changed(), "listed alone again, the subfolders are not watched");
+        }
+    }
+
+    /// End to end, as on screen: the watcher's news schedule the reload, the
+    /// reload walks again, and the new file deep down becomes a row.
+    #[test]
+    fn a_file_created_deep_inside_a_flattened_folder_shows_up_by_itself() {
+        let (ctx, mut app, dir) = app_in("app-flat-watch-e2e");
+        std::fs::create_dir(dir.join("sub/deeper")).unwrap();
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        let names = |app: &LumenApp| app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i).name.clone()).collect::<Vec<_>>();
+        assert!(!names(&app).contains(&"new.txt".to_string()));
+        std::fs::write(dir.join("sub/deeper/new.txt"), "N").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !names(&app).contains(&"new.txt".to_string()) {
+            assert!(Instant::now() < deadline, "the flattened view never showed the new file");
+            app.refresh_if_changed(&ctx);
+            if app.tab.lister.is_pending(app.tab.shown_id) {
+                land(&mut app);
+                land_flat(&ctx, &mut app);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let row = app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i)).find(|e| e.name == "new.txt").unwrap().clone();
+        assert_eq!(app.tab.view.relative_parent(&row).as_deref(), Some("sub > deeper"), "with its folder dimmed after it");
+        assert!(app.tab.view.is_flat(), "still flattened after the reload");
     }
 
     #[test]
