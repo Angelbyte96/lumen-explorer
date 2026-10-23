@@ -91,15 +91,9 @@ pub mod testing {
     /// Lays out, then presses and releases the primary button at `pos`;
     /// returns what `ui` returned on the release frame.
     pub fn click<R>(ctx: &egui::Context, pos: Pos2, mut ui: impl FnMut(&mut egui::Ui) -> R) -> R {
-        let button = |pressed| Event::PointerButton {
-            pos,
-            button: PointerButton::Primary,
-            pressed,
-            modifiers: egui::Modifiers::NONE,
-        };
         frame(ctx, vec![Event::PointerMoved(pos)], &mut ui);
-        frame(ctx, vec![button(true)], &mut ui);
-        frame(ctx, vec![button(false)], &mut ui)
+        frame(ctx, vec![button(pos, true, egui::Modifiers::NONE)], &mut ui);
+        frame(ctx, vec![button(pos, false, egui::Modifiers::NONE)], &mut ui)
     }
 
     /// Like `frame`, with the shapes it drew too.
@@ -113,6 +107,7 @@ pub mod testing {
         (out.expect("the frame ran"), output.shapes)
     }
 
+    /// The primary button pressed or let go at `at` with `modifiers` down.
     fn button(at: Pos2, pressed: bool, modifiers: egui::Modifiers) -> Event {
         Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers }
     }

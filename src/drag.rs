@@ -80,7 +80,7 @@ mod tests {
     const SHIFT: Keys = Keys { ctrl: false, shift: true };
     const BOTH: Keys = Keys { ctrl: true, shift: true };
 
-    /// `dir` with `a.txt`, `sub/` and `sub/deep/`.
+    /// `dir` with `a.txt`, `sub/`, `sub/deep/` and `other/`.
     fn fixture(name: &str) -> PathBuf {
         let dir = fresh_fixture(name);
         std::fs::write(dir.join("a.txt"), "A").unwrap();
