@@ -1,1 +1,4 @@
 /target
+
+# Engram memory exports live in their own repo, never here.
+.engram/
