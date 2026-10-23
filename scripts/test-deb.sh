@@ -5,9 +5,9 @@
 set -eu
 
 [ $# -eq 1 ] || { echo "Usage: $0 <empty scratch dir>" >&2; exit 2; }
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 build=$root/scripts/build-deb.sh
-t=$(cd "$1" && pwd)
+t=$(CDPATH='' cd -- "$1" && pwd)
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -n 1)
@@ -34,7 +34,7 @@ field Description | head -n 1 | grep -qxF "A fast, lightweight, keyboard-first f
 depends=$(field Depends)
 # From dpkg-shlibdeps (linked), then what winit and glutin load at run time.
 printf '%s\n' "$depends" | grep -q "^libc6 (>= [0-9.]*)" || fail "Depends has no versioned libc6: $depends"
-for lib in libegl1 libgl1 libwayland-client0 libwayland-egl1 libxkbcommon0 libxkbcommon-x11-0 libx11-6 libx11-xcb1 libxcb1 libxcursor1 libxi6; do
+for lib in libegl1 libgl1 libxrender1 libwayland-client0 libwayland-egl1 libxkbcommon0 libxkbcommon-x11-0 libx11-6 libx11-xcb1 libxcb1 libxcursor1 libxi6; do
     printf '%s\n' "$depends" | tr ',' '\n' | sed 's/^ *//' | grep -qx "$lib" || fail "Depends lacks $lib: $depends"
 done
 
@@ -88,5 +88,24 @@ if err=$("$build" "$t/nope" "$t/out" 2>&1 >/dev/null); then fail "missing binary
 if err=$("$build" "$t/lumen" "$t/none" 2>&1 >/dev/null); then fail "missing out dir accepted"; else code=$?; fi
 [ "$code" -eq 1 ] && [ "$err" = "No folder at $t/none" ] || fail "missing out dir: exit $code, said: $err"
 [ -z "$(ls -A "$t/out")" ] || fail "refused builds left: $(ls -A "$t/out")"
+
+# A file that links nothing: refused plainly, exit 1, nothing built.
+printf '#!/bin/sh\n' >"$t/script"
+if err=$("$build" "$t/script" "$t/out" 2>&1 >/dev/null); then fail "script accepted"; else code=$?; fi
+[ "$code" -eq 1 ] && [ "$err" = "dpkg-shlibdeps found no libraries in $t/script" ] || fail "script: exit $code, said: $err"
+[ -z "$(ls -A "$t/out")" ] || fail "refused script left: $(ls -A "$t/out")"
+
+# A failed dpkg-deb leaves no half-written package behind.
+mkdir -p "$t/fake"
+printf '#!/bin/sh\n[ "$1" = --root-owner-group ] || exec /usr/bin/dpkg-deb "$@"\n: >"$4"\nexit 2\n' >"$t/fake/dpkg-deb"
+chmod +x "$t/fake/dpkg-deb"
+if PATH="$t/fake:$PATH" "$build" "$t/lumen" "$t/out" >/dev/null 2>&1; then fail "failed dpkg-deb reported success"; fi
+[ -z "$(ls -A "$t/out")" ] || fail "failed dpkg-deb left: $(ls -A "$t/out")"
+rm -rf "$t/fake"
+
+# A relative out dir with CDPATH set still names one absolute package.
+mkdir "$t/rel"
+out=$(cd "$t" && CDPATH="$t" "$build" lumen rel)
+[ "$out" = "Built $t/rel/lumen_${version}_$arch.deb" ] || fail "CDPATH: $out"
 
 echo "build-deb.sh: all checks passed"

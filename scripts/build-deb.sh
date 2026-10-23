@@ -15,16 +15,17 @@ set -eu
 binary=$1
 [ -f "$binary" ] || { echo "No binary at $binary" >&2; exit 1; }
 [ -d "$2" ] || { echo "No folder at $2" >&2; exit 1; }
-out=$(cd "$2" && pwd)
+# CDPATH unset: a cd through it would also print the folder.
+out=$(CDPATH='' cd -- "$2" && pwd)
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -n 1)
 description=$(sed -n 's/^description = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -n 1)
 arch=$(dpkg --print-architecture)
 deb=$out/lumen_${version}_$arch.deb
 
 stage=$(mktemp -d)
-trap 'rm -rf "$stage"' EXIT
+trap 'rm -rf "$stage" "$deb.tmp"' EXIT
 umask 022
 pkg=$stage/pkg
 install -D -m 0755 "$binary" "$pkg/usr/bin/lumen"
@@ -63,11 +64,11 @@ EOF
 # wants a debian/control beside it.
 mkdir "$stage/debian"
 printf 'Source: lumen\n\nPackage: lumen\nArchitecture: any\n' >"$stage/debian/control"
-linked=$(cd "$stage" && dpkg-shlibdeps -O "$pkg/usr/bin/lumen" 2>/dev/null | sed -n 's/^shlibs:Depends=//p')
+linked=$(CDPATH='' cd -- "$stage" && dpkg-shlibdeps -O "$pkg/usr/bin/lumen" 2>/dev/null | sed -n 's/^shlibs:Depends=//p')
 [ -n "$linked" ] || { echo "dpkg-shlibdeps found no libraries in $binary" >&2; exit 1; }
 # What winit and glutin open at run time (Wayland, X11, OpenGL): ldd does not
 # show them, and Lumen does not start without them.
-loaded="libegl1, libgl1, libwayland-client0, libwayland-egl1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6"
+loaded="libegl1, libgl1, libxrender1, libwayland-client0, libwayland-egl1, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6"
 size=$(du -k -s "$pkg" | cut -f 1)
 
 mkdir "$pkg/DEBIAN"

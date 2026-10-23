@@ -35,7 +35,8 @@ jobs:
       - name: Name the .exe
         run: |
           mkdir dist
-          cp target/release/lumen.exe "dist/lumen-$GITHUB_REF_NAME-windows-x86_64.exe"
+          # A branch run by hand may hold a slash (feat/x): no subfolder in the name.
+          cp target/release/lumen.exe "dist/lumen-${GITHUB_REF_NAME//\//-}-windows-x86_64.exe"
       - uses: actions/upload-artifact@v7
         with:
           name: release-windows
@@ -74,8 +75,9 @@ jobs:
 
   publish:
     # Only once both files are built: a failed platform publishes nothing.
+    # Only for a pushed tag: a run by hand publishes nothing, even on a tag.
     needs: [windows, linux]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release and upload its files
