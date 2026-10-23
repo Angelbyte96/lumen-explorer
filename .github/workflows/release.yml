@@ -1,14 +1,18 @@
-# Publish a GitHub Release with the Windows .exe when a version tag is pushed:
+# Publish a GitHub Release with the Windows .exe and the Linux .deb when a
+# version tag is pushed:
 #   git tag v0.1.0 && git push origin v0.1.0
 # The tag must match the version in Cargo.toml. Releases are public.
+# Run by hand (Actions tab, "Release", Run workflow) it builds both files as
+# artifacts of the run and publishes nothing.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
-  contents: write # create the release and upload the .exe
+  contents: read
 
 jobs:
   windows:
@@ -19,21 +23,76 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          persist-credentials: false # later steps get the token only where needed
+          persist-credentials: false
       - name: Check the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
         run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"
       - uses: dtolnay/rust-toolchain@stable
       - name: Test
         run: cargo test --locked
       - name: Build release
         run: cargo build --release --locked
+      - name: Name the .exe
+        run: |
+          mkdir dist
+          # A branch run by hand may hold a slash (feat/x): no subfolder in the name.
+          cp target/release/lumen.exe "dist/lumen-${GITHUB_REF_NAME//\//-}-windows-x86_64.exe"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows
+          path: dist/
+          if-no-files-found: error
+
+  linux:
+    # The oldest supported runner: its glibc (2.39) is the oldest the .deb
+    # installs on (Ubuntu 24.04, Debian 13).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Check the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --locked
+      - name: Build release
+        run: cargo build --release --locked
+      - name: Install the packaging tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends dpkg-dev desktop-file-utils
+      - name: Check the packaging script
+        run: scripts/test-deb.sh "$(mktemp -d)"
+      - name: Build the .deb
+        run: |
+          mkdir dist
+          scripts/build-deb.sh target/release/lumen dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-linux
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    # Only once both files are built: a failed platform publishes nothing.
+    # Only for a pushed tag: a run by hand publishes nothing, even on a tag.
+    needs: [windows, linux]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload its files
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          exe="lumen-$GITHUB_REF_NAME-windows-x86_64.exe"
-          cp target/release/lumen.exe "$exe"
-          gh release create "$GITHUB_REF_NAME" "$exe" \
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
             --title "Lumen $GITHUB_REF_NAME" \
             --generate-notes \
             --verify-tag
