@@ -66,14 +66,21 @@ rm -rf "$t/ro"
 
 # The summary names uncommitted changes, which the commit alone would hide:
 # edits and new files (an untracked build.rs is built too). When git cannot
-# tell (exit 128), it claims nothing and the install still goes on.
+# tell (exit 128), it claims nothing and the install still goes on. The fake
+# git, like one set to status.showUntrackedFiles=no, lists new files only when
+# asked to.
 mkdir -p "$t/fake"
 cat >"$t/fake/git" <<'EOF'
 #!/bin/sh
 case $* in
     *rev-parse*) echo abc1234 ;;
-    *diff*) case $TREE in edited) exit 1 ;; broken) exit 128 ;; esac ;;
-    *status*) case $TREE in edited) echo ' M src/app.rs' ;; untracked) echo '?? build.rs' ;; broken) exit 128 ;; esac ;;
+    *status*)
+        case $TREE in
+            edited) echo ' M src/app.rs' ;;
+            untracked) case $* in *--untracked-files=normal*) echo '?? build.rs' ;; esac ;;
+            broken) exit 128 ;;
+        esac
+        ;;
 esac
 EOF
 chmod +x "$t/fake/git"
