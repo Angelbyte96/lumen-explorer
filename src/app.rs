@@ -4222,14 +4222,14 @@ mod tests {
     fn picked_folders_are_flattened_the_cursor_alone_flattens_everything() {
         let x = PathBuf::from("/x");
         let (a, b) = (x.join("a"), x.join("b"));
-        assert_eq!(next_flat(&[], &x, &[]), [x.clone()], "nothing picked: all of it");
-        assert_eq!(next_flat(&[x.clone()], &x, &[]), Vec::<PathBuf>::new(), "again: off");
-        assert_eq!(next_flat(&[], &x, &[a.clone()]), [a.clone()]);
-        assert_eq!(next_flat(&[a.clone()], &x, &[b.clone()]), [a.clone(), b.clone()], "another folder is added");
-        assert_eq!(next_flat(&[a.clone(), b.clone()], &x, &[a.clone()]), [b.clone()], "one already listed is taken out");
-        assert_eq!(next_flat(&[a.clone()], &x, &[a.join("deep")]), Vec::<PathBuf>::new(), "inside a listed one: already listed, so out with it");
-        assert_eq!(next_flat(&[a.clone()], &x, &[]), Vec::<PathBuf>::new(), "nothing picked: off");
-        assert_eq!(next_flat(&[x.clone()], &x, &[a.clone()]), Vec::<PathBuf>::new(), "all of it listed: off");
+        assert_eq!(next_flat(&[], &x, &[]), vec![x.clone()], "nothing picked: all of it");
+        assert_eq!(next_flat(std::slice::from_ref(&x), &x, &[]), Vec::<PathBuf>::new(), "again: off");
+        assert_eq!(next_flat(&[], &x, std::slice::from_ref(&a)), vec![a.clone()]);
+        assert_eq!(next_flat(std::slice::from_ref(&a), &x, std::slice::from_ref(&b)), [a.clone(), b.clone()], "another folder is added");
+        assert_eq!(next_flat(&[a.clone(), b.clone()], &x, std::slice::from_ref(&a)), vec![b.clone()], "one already listed is taken out");
+        assert_eq!(next_flat(std::slice::from_ref(&a), &x, &[a.join("deep")]), Vec::<PathBuf>::new(), "inside a listed one: already listed, so out with it");
+        assert_eq!(next_flat(std::slice::from_ref(&a), &x, &[]), Vec::<PathBuf>::new(), "nothing picked: off");
+        assert_eq!(next_flat(std::slice::from_ref(&x), &x, std::slice::from_ref(&a)), Vec::<PathBuf>::new(), "all of it listed: off");
     }
 
     #[test]
