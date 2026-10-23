@@ -49,14 +49,26 @@ fn carry_out_with(
 /// Whether the primary button is really held now, whichever window has the
 /// pointer (egui only knows what Lumen's window was told).
 fn button_held() -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
     use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
-    // SAFETY: plain queries. GetAsyncKeyState reads the physical buttons, so
-    // with them swapped the primary one is the right.
+    // SAFETY: plain queries.
     unsafe {
-        let primary = if GetSystemMetrics(SM_SWAPBUTTON) != 0 { VK_RBUTTON } else { VK_LBUTTON };
-        GetAsyncKeyState(primary.0 as i32) < 0
+        let primary = primary_button(GetSystemMetrics(SM_SWAPBUTTON) != 0);
+        is_down(GetAsyncKeyState(primary.0 as i32))
     }
+}
+
+/// The physical button that is the primary one: GetAsyncKeyState reads the
+/// physical buttons, so with them swapped it is the right.
+fn primary_button(swapped: bool) -> windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LBUTTON, VK_RBUTTON};
+    if swapped { VK_RBUTTON } else { VK_LBUTTON }
+}
+
+/// A GetAsyncKeyState answer says the key is down now: its high bit. The low
+/// bit only says it was pressed since an earlier call.
+fn is_down(state: i16) -> bool {
+    state < 0
 }
 
 /// Runs the system's drag of `paths` until it ends. On winit's thread, which
@@ -165,6 +177,21 @@ mod tests {
         frame(vec![press]);
         frame(vec![egui::Event::PointerMoved(pos2(500.0, 300.0))]);
         frame(vec![egui::Event::PointerMoved(to)]);
+    }
+
+    #[test]
+    fn the_primary_button_is_the_right_one_when_the_buttons_are_swapped() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LBUTTON, VK_RBUTTON};
+        assert_eq!(primary_button(false), VK_LBUTTON);
+        assert_eq!(primary_button(true), VK_RBUTTON);
+    }
+
+    #[test]
+    fn a_button_is_held_only_while_its_high_bit_is_set() {
+        assert!(is_down(i16::MIN), "down now");
+        assert!(is_down(i16::MIN | 1), "down now, pressed since the last call too");
+        assert!(!is_down(0), "up");
+        assert!(!is_down(1), "pressed since the last call but let go");
     }
 
     #[test]
