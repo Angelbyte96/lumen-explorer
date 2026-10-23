@@ -103,7 +103,8 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
         let title = section(ui, "Places", true, |ui| {
             for place in sidebar.places {
                 let marker = places::is_marker(&place.path);
-                let icon = if place.trash || places::is_recycle_bin(&place.path) {
+                let trash = place.trash || places::is_recycle_bin(&place.path);
+                let icon = if trash {
                     ItemIcon::Glyph(TRASH)
                 } else if marker {
                     ItemIcon::Glyph(COMPUTER)
@@ -112,7 +113,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
                 };
                 // Not the trash: a drop there would skip its bookkeeping (what it held, and where from).
                 // Nor This PC or the Recycle Bin, which are no folders to drop into.
-                let folder = (!place.trash && !marker).then_some(&place.path);
+                let folder = (!trash && !marker).then_some(&place.path);
                 let response = drop_target(ui, folder, |ui| item(ui, icon, place.icon, &place.label, &place.path.display().to_string(), &place.path, sidebar.current, sidebar.icons));
                 rows.push(Row { rect: response.rect, kind: RowKind::Item(place.path.clone()) });
                 if response.clicked() {

@@ -2450,7 +2450,7 @@ impl LumenApp {
             self.tab.view.error = Some("Nothing can be dropped into the trash".into());
             return;
         }
-        if self.busy() {
+        if self.refuse_when_busy() {
             return;
         }
         self.start_batch(ctx, paths, dest, mode);
@@ -2472,7 +2472,7 @@ impl LumenApp {
     /// Pastes the clipboard into `dest`: the folder on screen, or a folder's
     /// own Paste in the Windows menu.
     fn paste_into(&mut self, ctx: &egui::Context, dest: PathBuf) {
-        if places::is_marker(&dest) || self.busy() {
+        if places::is_marker(&dest) || self.refuse_when_busy() {
             return;
         }
         let Some(Clip { paths, mode }) = self.clipboard.clone() else {
@@ -2490,8 +2490,8 @@ impl LumenApp {
         notice.into_iter().chain(error).min()
     }
 
-    /// A copy or move is already running: says so.
-    fn busy(&mut self) -> bool {
+    /// A copy or move is already running: says so in the error line.
+    fn refuse_when_busy(&mut self) -> bool {
         let busy = self.job.is_some() || self.batch.is_some();
         if busy {
             self.tab.view.error = Some("Another operation is still running".into());

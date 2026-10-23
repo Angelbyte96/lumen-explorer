@@ -12,7 +12,8 @@ use crate::app::View;
 use crate::drag::{Drag, Keys};
 use crate::fs::transfer::Mode;
 
-/// A drop the list took this frame, for the app to run.
+/// A drop a target took this frame (the list, a side panel folder or a
+/// tab), for the app to run.
 #[derive(Clone)]
 pub struct Dropped {
     pub drag: Drag,
