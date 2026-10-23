@@ -28,6 +28,23 @@ No sudo: the binary goes to `~/.local/bin/lumen`, the menu entry to
 `~/.local/share/icons/hicolor`. Lumen then shows up as "Lumen" in the GNOME
 app grid, and can be pinned to the dock.
 
+Or, system-wide, the `.deb` of a release (built on Ubuntu 24.04: it installs
+on Ubuntu 24.04 or later and Debian 13):
+
+```sh
+sudo apt install ./lumen_<version>_amd64.deb   # sudo apt remove lumen to remove it
+```
+
+It puts the binary at `/usr/bin/lumen`, with the same menu entry and icon.
+To build one yourself from a release build:
+
+```sh
+scripts/build-deb.sh target/release/lumen <out dir>  # prints Built <out dir>/lumen_<version>_<arch>.deb
+scripts/test-deb.sh "$(mktemp -d)"                   # checks the package, no root needed
+```
+
+A package built locally needs your system's glibc or newer.
+
 The icon is `assets/lumen.svg`; after editing it, run
 `python3 scripts/render_icon.py` (needs Pillow) to regenerate `assets/lumen.png`,
 which the binary uses as its window icon, and `assets/lumen.ico`, which
