@@ -48,26 +48,40 @@ printf '%s\n' "$err" | grep -qF "NOT installed" && fail "partial failure says NO
 rm -rf "$t/part"
 
 # A binary that cannot be copied stops the script before anything is replaced.
+# Root writes into a read-only folder anyway, so there the check cannot run.
 mkdir -p "$t/ro/bin"
 chmod a-w "$t/ro/bin"
-if err=$(XDG_DATA_HOME="$t/ro" LUMEN_BIN_DIR="$t/ro/bin" "$install" 2>&1 >/dev/null); then
-    chmod u+w "$t/ro/bin"
-    fail "failed copy reported success"
+if touch "$t/ro/bin/probe" 2>/dev/null; then
+    echo "skipped: the failed copy check (a read-only folder is still writable here, as for root)"
+else
+    if err=$(XDG_DATA_HOME="$t/ro" LUMEN_BIN_DIR="$t/ro/bin" "$install" 2>&1 >/dev/null); then
+        chmod u+w "$t/ro/bin"
+        fail "failed copy reported success"
+    fi
+    printf '%s\n' "$err" | grep -qxF "Lumen was NOT installed: the step above failed." || fail "failed copy message: $err"
+    [ ! -e "$t/ro/applications/lumen.desktop" ] || fail "failed copy went on to the menu entry"
 fi
 chmod u+w "$t/ro/bin"
-printf '%s\n' "$err" | grep -qxF "Lumen was NOT installed: the step above failed." || fail "failed copy message: $err"
-[ ! -e "$t/ro/applications/lumen.desktop" ] || fail "failed copy went on to the menu entry"
 rm -rf "$t/ro"
 
-# The summary names uncommitted changes, which the commit alone would hide.
+# The summary names uncommitted changes, which the commit alone would hide:
+# edits and new files (an untracked build.rs is built too). When git cannot
+# tell (exit 128), it claims nothing and the install still goes on.
 mkdir -p "$t/fake"
-printf '#!/bin/sh\ncase $* in *rev-parse*) echo abc1234 ;; *diff*) exit $DIRTY ;; esac\n' >"$t/fake/git"
+cat >"$t/fake/git" <<'EOF'
+#!/bin/sh
+case $* in
+    *rev-parse*) echo abc1234 ;;
+    *diff*) case $TREE in edited) exit 1 ;; broken) exit 128 ;; esac ;;
+    *status*) case $TREE in edited) echo ' M src/app.rs' ;; untracked) echo '?? build.rs' ;; broken) exit 128 ;; esac ;;
+esac
+EOF
 chmod +x "$t/fake/git"
-for dirty in 0 1; do
-    out=$(DIRTY=$dirty PATH="$t/fake:$PATH" "$install")
-    [ $dirty = 1 ] && want="abc1234 with uncommitted changes" || want=abc1234
+for tree in clean edited untracked broken; do
+    out=$(TREE=$tree PATH="$t/fake:$PATH" "$install") || fail "install failed with TREE=$tree"
+    case $tree in edited | untracked) want="abc1234 with uncommitted changes" ;; *) want=abc1234 ;; esac
     printf '%s\n' "$out" | grep -qxF "Done: Lumen $version ($want) is installed at $LUMEN_BIN_DIR/lumen" ||
-        fail "summary with DIRTY=$dirty: $(printf '%s\n' "$out" | grep Done)"
+        fail "summary with TREE=$tree: $(printf '%s\n' "$out" | grep Done)"
 done
 rm -rf "$t/fake"
 
