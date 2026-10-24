@@ -3056,9 +3056,7 @@ impl LumenApp {
             }
             self.tab.view.apply_flat(&roots, walked.found);
             // A change inside a folder listed reloads the view too.
-            let current = &self.tab.view.current;
-            let folders: Vec<PathBuf> = walked.folders.into_iter().filter(|folder| folder != current).collect();
-            self.watcher.watch(current, &folders);
+            self.watcher.watch(&self.tab.view.current, &walked.folders);
             self.check_refused();
         }
     }
