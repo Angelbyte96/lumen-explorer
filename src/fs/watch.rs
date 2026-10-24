@@ -41,7 +41,35 @@ pub struct Watcher {
 struct Order {
     generation: u64,
     path: Option<PathBuf>,
-    folders: Vec<PathBuf>,
+    plan: Plan,
+}
+
+/// How an order's folders are handed to the system.
+#[derive(Clone, Default, Debug, PartialEq)]
+struct Plan {
+    /// Watched each on its own.
+    alone: Vec<PathBuf>,
+    /// Watched all the way down, the order's folder maybe among them.
+    trees: Vec<PathBuf>,
+}
+
+impl Plan {
+    /// inotify (Linux) has no watch all the way down: each folder costs one
+    /// watch. On Windows a handle on a folder keeps every folder above it
+    /// from being renamed or trashed, while one watch all the way down costs
+    /// a single handle: there the topmost folders are watched that way.
+    /// `folders` holds `path` when the whole tree is listed.
+    fn new(path: &Path, folders: &[PathBuf], per_folder: bool) -> Self {
+        if per_folder {
+            return Self { alone: folders.iter().filter(|f| *f != path).cloned().collect(), trees: Vec::new() };
+        }
+        if folders.iter().any(|f| f == path) {
+            return Self { alone: Vec::new(), trees: vec![path.to_path_buf()] };
+        }
+        let all: HashSet<&Path> = folders.iter().map(PathBuf::as_path).collect();
+        let tops = folders.iter().filter(|f| !f.parent().is_some_and(|up| all.contains(up))).cloned().collect();
+        Self { alone: Vec::new(), trees: tops }
+    }
 }
 
 /// Whose news count, for the newest order.
@@ -50,20 +78,22 @@ struct Scope {
     generation: u64,
     path: Option<PathBuf>,
     folders: HashSet<PathBuf>,
+    trees: Vec<PathBuf>,
     /// Whether that order gave up on its folders, until taken.
     refused: bool,
 }
 
 impl Scope {
-    fn new(generation: u64, path: Option<&Path>, folders: &[PathBuf]) -> Self {
-        Self { generation, path: path.map(Path::to_path_buf), folders: folders.iter().cloned().collect(), refused: false }
+    fn new(generation: u64, path: Option<&Path>, plan: &Plan) -> Self {
+        let (folders, trees) = (plan.alone.iter().cloned().collect(), plan.trees.clone());
+        Self { generation, path: path.map(Path::to_path_buf), folders, trees, refused: false }
     }
 
     /// Whether a change at `path` is in a folder watched (or one of them).
     fn covers(&self, path: &Path) -> bool {
         let Some(watched) = self.path.as_deref() else { return false };
         let ours = |folder: &Path| folder == watched || self.folders.contains(folder);
-        ours(path) || path.parent().is_some_and(ours)
+        ours(path) || path.parent().is_some_and(ours) || self.trees.iter().any(|tree| path.starts_with(tree))
     }
 }
 
@@ -144,7 +174,8 @@ impl Watcher {
     }
 
     /// Starts watching `path` instead of the previous folder, and `folders`
-    /// (what a flattened view walked inside it), each on its own. A folder
+    /// (what a flattened view walked: `path` too when it walked the whole
+    /// tree), as [`Plan::new`] says. A folder
     /// that cannot be watched (gone, no permission) just does not refresh.
     /// More than [`WATCH_LIMIT`] folders, or the system's watches running
     /// out, and nothing is watched: [`Watcher::take_refused`] says so.
@@ -166,7 +197,7 @@ impl Watcher {
             // News from the old folder no longer matter; the new one was just listed.
             self.changed.store(false, Ordering::SeqCst);
         }
-        if folders.len() > WATCH_LIMIT {
+        if folders.iter().filter(|f| *f != path).count() > WATCH_LIMIT {
             self.forget();
             // Its reload would walk them all again.
             self.changed.store(false, Ordering::SeqCst);
@@ -189,9 +220,10 @@ impl Watcher {
     /// Tells notify's thread whose news count now, then the watch thread what to watch.
     fn order(&mut self, path: Option<&Path>, folders: &[PathBuf]) {
         self.generation += 1;
-        *lock(&self.scope) = Scope::new(self.generation, path, folders);
+        let plan = path.map(|path| Plan::new(path, folders, !cfg!(windows))).unwrap_or_default();
+        *lock(&self.scope) = Scope::new(self.generation, path, &plan);
         if let Some(orders) = &self.orders {
-            let _ = orders.send(Order { generation: self.generation, path: path.map(Path::to_path_buf), folders: folders.to_vec() });
+            let _ = orders.send(Order { generation: self.generation, path: path.map(Path::to_path_buf), plan });
         }
     }
 
@@ -249,11 +281,11 @@ impl Drop for Hold {
 /// when already: a folder deleted and made anew under the same name lost
 /// its watch. Unwatched first: on Windows notify would keep the old handle
 /// open, reading, for good.
-fn rewatch(inner: &mut impl notify::Watcher, registered: &mut HashSet<PathBuf>, path: &Path) -> notify::Result<()> {
+fn rewatch(inner: &mut impl notify::Watcher, registered: &mut HashSet<PathBuf>, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
     if registered.remove(path) {
         let _ = inner.unwatch(path);
     }
-    inner.watch(path, RecursiveMode::NonRecursive)?;
+    inner.watch(path, mode)?;
     registered.insert(path.to_path_buf());
     Ok(())
 }
@@ -267,7 +299,8 @@ fn run(orders: Receiver<Order>, mut inner: impl notify::Watcher, scope: &Mutex<S
             order = newer;
         }
         drop(probe.moved.wait_while(lock(&probe.held), |held| *held).unwrap_or_else(|e| e.into_inner()));
-        let wanted: HashSet<&PathBuf> = order.path.iter().chain(&order.folders).collect();
+        let plan = &order.plan;
+        let wanted: HashSet<&PathBuf> = order.path.iter().chain(&plan.alone).chain(&plan.trees).collect();
         registered.retain(|old| {
             let keep = wanted.contains(old);
             if !keep {
@@ -275,12 +308,14 @@ fn run(orders: Receiver<Order>, mut inner: impl notify::Watcher, scope: &Mutex<S
             }
             keep
         });
+        let mode = |folder: &PathBuf| if plan.trees.contains(folder) { RecursiveMode::Recursive } else { RecursiveMode::NonRecursive };
         if let Some(path) = &order.path
-            && rewatch(&mut inner, &mut registered, path).is_ok()
+            && rewatch(&mut inner, &mut registered, path, mode(path)).is_ok()
         {
             // One gone or not readable just does not refresh; only the
             // system's watches running out gives up on them all.
-            let refused = order.folders.iter().any(|folder| match rewatch(&mut inner, &mut registered, folder) {
+            let others = plan.alone.iter().chain(&plan.trees).filter(|folder| *folder != path);
+            let refused = others.into_iter().any(|folder| match rewatch(&mut inner, &mut registered, folder, mode(folder)) {
                 Ok(()) => false,
                 Err(e) => matches!(e.kind, notify::ErrorKind::MaxFilesWatch),
             });
@@ -317,12 +352,14 @@ mod tests {
 
     #[test]
     fn only_news_from_the_folder_watched_now_count() {
-        let now = &Scope::new(1, Some(Path::new("/home/u/b")), &[PathBuf::from("/home/u/b/sub")]);
+        let plan = Plan { alone: vec![PathBuf::from("/home/u/b/sub")], trees: vec![PathBuf::from("/home/u/b/deep")] };
+        let now = &Scope::new(1, Some(Path::new("/home/u/b")), &plan);
         let none = &Scope::default();
         assert!(concerns(&created("/home/u/b/x"), now));
         assert!(concerns(&created("/home/u/b"), now), "the folder itself");
         assert!(concerns(&created("/home/u/b/sub/x"), now), "a folder watched besides it");
         assert!(!concerns(&created("/home/u/b/other/x"), now), "a subfolder not watched");
+        assert!(concerns(&created("/home/u/b/deep/er/x"), now), "inside a folder watched all the way down");
         assert!(!concerns(&created("/home/u/a/x"), now), "late news from the folder left");
         assert!(!concerns(&created("/home/u/bc/x"), now), "a folder whose name starts the same");
         assert!(!concerns(&created("/home/u/b/x"), none), "nothing watched");
@@ -517,6 +554,20 @@ mod tests {
         std::fs::write(dir.join("elsewhere/x"), "").unwrap();
         std::thread::sleep(SETTLE);
         assert!(!w.take_changed());
+    }
+
+    #[test]
+    fn on_windows_the_topmost_folders_are_watched_all_the_way_down() {
+        let p = |s: &str| PathBuf::from(s);
+        let walked = [p("/x/a"), p("/x/a/b"), p("/x/c"), p("/x/c/d/e")];
+        let elsewhere = Plan::new(Path::new("/x"), &walked, true);
+        assert_eq!(elsewhere, Plan { alone: walked.to_vec(), trees: vec![] }, "inotify: each folder alone");
+        let picked = Plan::new(Path::new("/x"), &walked, false);
+        assert_eq!(picked, Plan { alone: vec![], trees: vec![p("/x/a"), p("/x/c"), p("/x/c/d/e")] }, "no handle under another");
+        let mut whole = walked.to_vec();
+        whole.insert(0, p("/x"));
+        assert_eq!(Plan::new(Path::new("/x"), &whole, false), Plan { alone: vec![], trees: vec![p("/x")] }, "one handle");
+        assert_eq!(Plan::new(Path::new("/x"), &whole, true).alone, walked, "the folder itself is watched anyway");
     }
 
     #[test]
