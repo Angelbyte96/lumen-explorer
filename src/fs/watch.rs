@@ -245,6 +245,19 @@ impl Drop for Hold {
     }
 }
 
+/// Watches `path` alone and notes it in `registered`. Watched again even
+/// when already: a folder deleted and made anew under the same name lost
+/// its watch. Unwatched first: on Windows notify would keep the old handle
+/// open, reading, for good.
+fn rewatch(inner: &mut impl notify::Watcher, registered: &mut HashSet<PathBuf>, path: &Path) -> notify::Result<()> {
+    if registered.remove(path) {
+        let _ = inner.unwatch(path);
+    }
+    inner.watch(path, RecursiveMode::NonRecursive)?;
+    registered.insert(path.to_path_buf());
+    Ok(())
+}
+
 /// The watch thread: carries out the newest order, watching and unwatching
 /// only what changed since the last one, until the [`Watcher`] is dropped.
 fn run(orders: Receiver<Order>, mut inner: impl notify::Watcher, scope: &Mutex<Scope>, probe: &Probe, wake: &dyn Fn()) {
@@ -263,18 +276,12 @@ fn run(orders: Receiver<Order>, mut inner: impl notify::Watcher, scope: &Mutex<S
             keep
         });
         if let Some(path) = &order.path
-            && inner.watch(path, RecursiveMode::NonRecursive).is_ok()
+            && rewatch(&mut inner, &mut registered, path).is_ok()
         {
-            registered.insert(path.clone());
-            // Watched again even when already: a folder deleted and made
-            // anew under the same name lost its watch. One gone or not
-            // readable just does not refresh; only the system's watches
-            // running out gives up on them all.
-            let refused = order.folders.iter().any(|folder| match inner.watch(folder, RecursiveMode::NonRecursive) {
-                Ok(()) => {
-                    registered.insert(folder.clone());
-                    false
-                }
+            // One gone or not readable just does not refresh; only the
+            // system's watches running out gives up on them all.
+            let refused = order.folders.iter().any(|folder| match rewatch(&mut inner, &mut registered, folder) {
+                Ok(()) => false,
                 Err(e) => matches!(e.kind, notify::ErrorKind::MaxFilesWatch),
             });
             if refused {
@@ -287,6 +294,11 @@ fn run(orders: Receiver<Order>, mut inner: impl notify::Watcher, scope: &Mutex<S
                     drop(scope);
                     wake();
                 }
+            }
+        } else {
+            // The folder is gone (or this is `forget`): nothing of it stays watched.
+            for old in registered.drain() {
+                let _ = inner.unwatch(&old);
             }
         }
         *lock(&probe.applied) = order.generation;
@@ -543,6 +555,52 @@ mod tests {
         fn kind() -> notify::WatcherKind {
             RecommendedWatcher::kind()
         }
+    }
+
+    /// Notify's own watcher, telling when a path is watched again without
+    /// an unwatch first: on Windows notify then leaks the old handle.
+    struct Strict(RecommendedWatcher, HashSet<PathBuf>);
+
+    static WATCHED_TWICE: AtomicBool = AtomicBool::new(false);
+
+    impl notify::Watcher for Strict {
+        fn new<F: notify::EventHandler>(handler: F, config: Config) -> notify::Result<Self> {
+            RecommendedWatcher::new(handler, config).map(|inner| Strict(inner, HashSet::new()))
+        }
+
+        fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
+            if !self.1.insert(path.to_path_buf()) {
+                WATCHED_TWICE.store(true, Ordering::SeqCst);
+            }
+            self.0.watch(path, mode)
+        }
+
+        fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+            self.1.remove(path);
+            self.0.unwatch(path)
+        }
+
+        fn kind() -> notify::WatcherKind {
+            RecommendedWatcher::kind()
+        }
+    }
+
+    #[test]
+    fn a_folder_is_never_watched_twice_without_an_unwatch() {
+        let dir = fresh_fixture("watch-no-double");
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        let mut w = Watcher::start::<Strict>(|| {});
+        w.watch(&dir, &[dir.join("a")]);
+        w.settle();
+        // A flattened view reloaded, then listed alone again.
+        w.watch(&dir, &[dir.join("a")]);
+        w.settle();
+        w.watch(&dir, &[]);
+        w.settle();
+        assert!(!WATCHED_TWICE.load(Ordering::SeqCst));
+        std::fs::write(dir.join("top.txt"), "").unwrap();
+        std::thread::sleep(SETTLE);
+        assert!(w.take_changed(), "still watched");
     }
 
     #[test]
