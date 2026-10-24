@@ -3100,6 +3100,18 @@ impl LumenApp {
         }
     }
 
+    /// Lists the open folder again, keeping the selection and the sort order
+    /// (a flattened view walks again once it lands). Never supersedes a
+    /// navigation, nor restarts a flatten walk (a busy tree would never
+    /// finish): returns whether it listed.
+    fn reload_if_idle(&mut self, ctx: &egui::Context) -> bool {
+        if self.tab.lister.is_pending(self.tab.shown_id) || self.tab.flattener.is_some() {
+            return false;
+        }
+        self.navigate_as(ctx, NavKind::Refresh, self.tab.view.current.clone(), None);
+        true
+    }
+
     /// Reloads the open folder a moment after it changed on disk.
     fn refresh_if_changed(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
@@ -3107,14 +3119,9 @@ impl LumenApp {
         if self.watcher.take_changed() {
             self.refresh.note_change(now);
         }
-        if self.refresh.take_due(now) {
-            if self.tab.lister.is_pending(self.tab.shown_id) || self.tab.flattener.is_some() {
-                // Never supersede a navigation, nor restart a flatten walk
-                // (a busy tree would never finish); try again once it has landed.
-                self.refresh.note_change(now);
-            } else {
-                self.navigate_as(ctx, NavKind::Refresh, self.tab.view.current.clone(), None);
-            }
+        if self.refresh.take_due(now) && !self.reload_if_idle(ctx) {
+            // Try again once the listing or the walk has landed.
+            self.refresh.note_change(now);
         }
         if let Some(wait) = self.refresh.wait(now) {
             ctx.request_repaint_after(wait);
@@ -3185,6 +3192,11 @@ impl LumenApp {
             Action::FocusPathBar => self.path_popup.open(),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
             Action::ToggleFlat => self.toggle_flat(),
+            // The drives or the bins are read again there, as the menu's Refresh does.
+            Action::Reload if self.on_marker() => self.run_command(ctx, Command::Refresh),
+            Action::Reload => {
+                self.reload_if_idle(ctx);
+            }
             Action::ZoomIn => self.tab.view_size = self.tab.view_size.bigger(),
             Action::ZoomOut => self.tab.view_size = self.tab.view_size.smaller(),
             Action::ZoomReset => self.tab.view_size = ui::view_size::ViewSize::default(),
@@ -4897,6 +4909,49 @@ mod tests {
         assert_eq!(app.tab.lister.last_requested(), Some(dir.clone()));
         land(&mut app);
         assert_eq!(selection_names(&app.tab.view), ["b.txt"]);
+    }
+
+    #[test]
+    fn f5_reads_the_open_folder_again_and_keeps_the_selection() {
+        let (ctx, mut app, dir) = app_in("app-f5-reload");
+        pick(&mut app, &["b.txt"]);
+        let asked = app.tab.lister.latest_id();
+        app.handle_action(&ctx, Action::Reload);
+        assert_ne!(app.tab.lister.latest_id(), asked, "the folder is listed again");
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.clone()));
+        assert_eq!(app.tab.pending_nav, NavKind::Refresh, "like a reload after a change on disk");
+        let asked = app.tab.lister.latest_id();
+        app.handle_action(&ctx, Action::Reload);
+        assert_eq!(app.tab.lister.latest_id(), asked, "a listing in flight is not superseded");
+        std::fs::write(dir.join("c.txt"), "C").unwrap();
+        land(&mut app);
+        assert_eq!(selection_names(&app.tab.view), ["b.txt"]);
+        assert!(row_names(&app.tab.view).contains(&"c.txt"), "and it shows what changed");
+    }
+
+    #[test]
+    fn f5_on_a_flattened_view_lists_and_walks_it_again() {
+        let (ctx, mut app, dir) = app_in("app-f5-flat");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        std::fs::write(dir.join("sub/new.txt"), "N").unwrap();
+        app.handle_action(&ctx, Action::Reload);
+        assert_eq!(app.tab.pending_nav, NavKind::Refresh);
+        land(&mut app);
+        assert!(app.tab.view.is_flat(), "still flattened");
+        assert!(app.tab.flat_due, "and walked again");
+        land_flat(&ctx, &mut app);
+        assert!(row_names(&app.tab.view).contains(&"new.txt"), "what the walk found shows up");
+    }
+
+    #[test]
+    fn f5_on_this_pc_reads_the_drives_again() {
+        let (ctx, mut app, _) = app_on_this_pc("app-f5-this-pc");
+        app.disks.0 = Some(Instant::now());
+        let asked = app.tab.lister.latest_id();
+        app.handle_action(&ctx, Action::Reload);
+        assert_eq!(app.disks.0, None, "read again on the next frame");
+        assert_eq!(app.tab.lister.latest_id(), asked, "no folder listed");
     }
 
     #[test]
