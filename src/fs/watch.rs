@@ -1,26 +1,78 @@
 //! Watches the open folder so the list can reload itself when something changes.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+#[cfg(test)]
+use std::time::Duration;
 
 use notify::event::{AccessKind, AccessMode};
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
+use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode};
 
-/// Watches one folder at a time: not its subfolders, unless the view lists
-/// what they hold (Ctrl+E), then those listed all the way down.
+/// The most folders a flattened view watches: each costs the system one
+/// watch (inotify allows 65,536 per user, for every program).
+pub const WATCH_LIMIT: usize = 5_000;
+
+/// Watches one folder at a time, and, when the view lists what its
+/// subfolders hold (Ctrl+E), each of the folders listed. The system is told
+/// on a thread of its own: thousands of folders take a while to watch, and
+/// as long again to unwatch.
 pub struct Watcher {
-    inner: Option<RecommendedWatcher>,
+    orders: Option<Sender<Order>>,
     watched: Option<PathBuf>,
-    /// The folders watched all the way down, as asked in [`Watcher::watch`].
-    deep: Vec<PathBuf>,
-    /// Every path handed to notify, to unwatch them all.
-    registered: Vec<PathBuf>,
-    /// The same, for notify's thread: unwatching is not immediate on every
-    /// system, and news from a folder left behind must not count.
-    current: Arc<Mutex<Option<PathBuf>>>,
+    /// The folders watched besides `watched`, as asked in [`Watcher::watch`].
+    folders: Vec<PathBuf>,
+    /// Counts the orders, so the watch thread can tell the newest.
+    generation: u64,
+    /// The same, for notify's thread: unwatching is not immediate, and news
+    /// from a folder left behind must not count.
+    scope: Arc<Mutex<Scope>>,
     /// Set by notify's thread, cleared by [`Watcher::take_changed`].
     changed: Arc<AtomicBool>,
+    #[cfg(test)]
+    probe: Arc<Probe>,
+}
+
+/// What the watch thread is asked to watch: `path` and `folders`, nothing
+/// else; `path` `None` watches nothing.
+struct Order {
+    generation: u64,
+    path: Option<PathBuf>,
+    folders: Vec<PathBuf>,
+}
+
+/// Whose news count, for the newest order.
+#[derive(Default)]
+struct Scope {
+    generation: u64,
+    path: Option<PathBuf>,
+    folders: HashSet<PathBuf>,
+    /// Whether that order gave up on its folders, until taken.
+    refused: bool,
+}
+
+impl Scope {
+    fn new(generation: u64, path: Option<&Path>, folders: &[PathBuf]) -> Self {
+        Self { generation, path: path.map(Path::to_path_buf), folders: folders.iter().cloned().collect(), refused: false }
+    }
+
+    /// Whether a change at `path` is in a folder watched (or one of them).
+    fn covers(&self, path: &Path) -> bool {
+        let Some(watched) = self.path.as_deref() else { return false };
+        let ours = |folder: &Path| folder == watched || self.folders.contains(folder);
+        ours(path) || path.parent().is_some_and(ours)
+    }
+}
+
+/// What the watch thread has done, for the tests to wait on or hold it.
+#[derive(Default)]
+struct Probe {
+    applied: Mutex<u64>,
+    held: Mutex<bool>,
+    moved: Condvar,
 }
 
 /// Opening or reading (Lumen's own listing does both) is not a change;
@@ -33,43 +85,71 @@ fn is_change(kind: &EventKind) -> bool {
     }
 }
 
-/// Whether `event` tells of a change in `watched`, the folder watched now:
-/// news that arrive late from a folder left behind, or with nothing
-/// watched, do not count. An error counts while a folder is watched.
-fn concerns(event: &notify::Result<notify::Event>, watched: Option<&Path>) -> bool {
-    let Some(watched) = watched else { return false };
+/// Whether `event` tells of a change in a folder watched now: news that
+/// arrive late from a folder left behind, or with nothing watched, do not
+/// count. An error counts while a folder is watched.
+fn concerns(event: &notify::Result<notify::Event>, scope: &Scope) -> bool {
+    if scope.path.is_none() {
+        return false;
+    }
     match event {
         Err(_) => true,
-        Ok(e) => is_change(&e.kind) && (e.paths.is_empty() || e.paths.iter().any(|path| path.starts_with(watched))),
+        Ok(e) => is_change(&e.kind) && (e.paths.is_empty() || e.paths.iter().any(|path| scope.covers(path))),
     }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Watcher {
     /// `wake` runs on notify's thread on the first change after each
-    /// [`Watcher::take_changed`], so a burst wakes the UI once.
-    pub fn new(wake: impl Fn() + Send + 'static) -> Self {
+    /// [`Watcher::take_changed`], so a burst wakes the UI once, and on the
+    /// watch thread when it gives up on an order's folders.
+    pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self::start::<RecommendedWatcher>(wake)
+    }
+
+    /// [`Watcher::new`] on the backend `W`.
+    fn start<W: notify::Watcher + Send + 'static>(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        let wake = Arc::new(wake);
         let changed = Arc::new(AtomicBool::new(false));
-        let current: Arc<Mutex<Option<PathBuf>>> = Arc::default();
-        let (flag, now) = (changed.clone(), current.clone());
+        let scope: Arc<Mutex<Scope>> = Arc::default();
+        let probe: Arc<Probe> = Arc::default();
+        let (flag, now, woken) = (changed.clone(), scope.clone(), wake.clone());
         let handler = move |event: notify::Result<notify::Event>| {
             // An error (e.g. the kernel queue overflowed) may hide changes: reload.
-            let ours = concerns(&event, now.lock().unwrap_or_else(|e| e.into_inner()).as_deref());
+            let ours = concerns(&event, &lock(&now));
             if ours && !flag.swap(true, Ordering::SeqCst) {
-                wake();
+                woken();
             }
         };
         // Like the flatten walk, a link is not entered.
-        let inner = RecommendedWatcher::new(handler, Config::default().with_follow_symlinks(false)).ok();
-        Self { inner, watched: None, deep: Vec::new(), registered: Vec::new(), current, changed }
+        let orders = W::new(handler, Config::default().with_follow_symlinks(false)).ok().map(|inner| {
+            let (tx, rx) = mpsc::channel();
+            let (scope, probe) = (scope.clone(), probe.clone());
+            thread::spawn(move || run(rx, inner, &scope, &probe, &*wake));
+            tx
+        });
+        Self {
+            orders,
+            watched: None,
+            folders: Vec::new(),
+            generation: 0,
+            scope,
+            changed,
+            #[cfg(test)]
+            probe,
+        }
     }
 
-    /// Starts watching `path` instead of the previous folder, and the folders
-    /// in `deep` (the view's flattened roots, `path` itself or folders inside
-    /// it) all the way down. A folder that cannot be watched (no permission,
-    /// too many watches) just does not refresh; one that cannot be watched
-    /// all the way down is watched alone.
-    pub fn watch(&mut self, path: &Path, deep: &[PathBuf]) {
-        if self.watched.as_deref() == Some(path) && self.deep == deep {
+    /// Starts watching `path` instead of the previous folder, and `folders`
+    /// (what a flattened view walked inside it), each on its own. A folder
+    /// that cannot be watched (gone, no permission) just does not refresh.
+    /// More than [`WATCH_LIMIT`] folders, or the system's watches running
+    /// out, and nothing is watched: [`Watcher::take_refused`] says so.
+    pub fn watch(&mut self, path: &Path, folders: &[PathBuf]) {
+        if self.watched.as_deref() == Some(path) && folders.is_empty() && self.folders.is_empty() {
             return;
         }
         // A marker (This PC, the Recycle Bin) is no folder, and as a relative path it could name one.
@@ -79,54 +159,138 @@ impl Watcher {
             self.changed.store(false, Ordering::SeqCst);
             return;
         }
-        if self.inner.is_none() {
+        if self.orders.is_none() {
             return;
         }
-        let same_folder = self.watched.as_deref() == Some(path);
-        self.forget();
-        if !same_folder {
+        if self.watched.as_deref() != Some(path) {
             // News from the old folder no longer matter; the new one was just listed.
             self.changed.store(false, Ordering::SeqCst);
         }
-        let Some(inner) = &mut self.inner else { return };
-        let whole = deep.iter().any(|root| root == path);
-        let watched = (whole && inner.watch(path, RecursiveMode::Recursive).is_ok())
-            || inner.watch(path, RecursiveMode::NonRecursive).is_ok();
-        if !watched {
+        if folders.len() > WATCH_LIMIT {
+            self.forget();
+            // Its reload would walk them all again.
+            self.changed.store(false, Ordering::SeqCst);
+            lock(&self.scope).refused = true;
             return;
         }
-        self.registered.push(path.to_path_buf());
-        for root in deep.iter().filter(|root| *root != path) {
-            if inner.watch(root, RecursiveMode::Recursive).is_ok() {
-                self.registered.push(root.clone());
-            }
-        }
+        self.order(Some(path), folders);
         self.watched = Some(path.to_path_buf());
-        self.deep = deep.to_vec();
-        self.set_current(Some(path.to_path_buf()));
+        self.folders = folders.to_vec();
     }
 
-    fn set_current(&self, path: Option<PathBuf>) {
-        *self.current.lock().unwrap_or_else(|e| e.into_inner()) = path;
+    /// Watches `path` alone, unless it is the folder watched already: then
+    /// its folders stay watched too.
+    pub fn watch_folder(&mut self, path: &Path) {
+        if self.watched.as_deref() != Some(path) {
+            self.watch(path, &[]);
+        }
+    }
+
+    /// Tells notify's thread whose news count now, then the watch thread what to watch.
+    fn order(&mut self, path: Option<&Path>, folders: &[PathBuf]) {
+        self.generation += 1;
+        *lock(&self.scope) = Scope::new(self.generation, path, folders);
+        if let Some(orders) = &self.orders {
+            let _ = orders.send(Order { generation: self.generation, path: path.map(Path::to_path_buf), folders: folders.to_vec() });
+        }
     }
 
     /// Stops watching, e.g. because the folder was deleted; the next
     /// [`Watcher::watch`] starts afresh even for the same path.
     pub fn forget(&mut self) {
-        // First: news from the old folder no longer count, even late ones.
-        self.set_current(None);
+        self.order(None, &[]);
         self.watched = None;
-        self.deep.clear();
-        for old in self.registered.drain(..) {
-            if let Some(inner) = &mut self.inner {
-                let _ = inner.unwatch(&old);
-            }
-        }
+        self.folders.clear();
+    }
+
+    /// Whether the last [`Watcher::watch`] gave up on its folders, once.
+    pub fn take_refused(&self) -> bool {
+        std::mem::take(&mut lock(&self.scope).refused)
     }
 
     /// Whether something changed since the last call.
     pub fn take_changed(&self) -> bool {
         self.changed.swap(false, Ordering::SeqCst)
+    }
+
+    /// Waits until the watch thread has carried out every order so far.
+    #[cfg(test)]
+    pub(crate) fn settle(&self) {
+        let applied = lock(&self.probe.applied);
+        let (applied, timeout) = self
+            .probe
+            .moved
+            .wait_timeout_while(applied, Duration::from_secs(10), |applied| *applied < self.generation)
+            .unwrap_or_else(|e| e.into_inner());
+        drop(applied);
+        assert!(!timeout.timed_out(), "the watch thread never got to the last order");
+    }
+
+    /// Keeps the watch thread from carrying out orders while the result lives.
+    #[cfg(test)]
+    fn hold(&self) -> Hold {
+        *lock(&self.probe.held) = true;
+        Hold(self.probe.clone())
+    }
+}
+
+#[cfg(test)]
+struct Hold(Arc<Probe>);
+
+#[cfg(test)]
+impl Drop for Hold {
+    fn drop(&mut self) {
+        *lock(&self.0.held) = false;
+        self.0.moved.notify_all();
+    }
+}
+
+/// The watch thread: carries out the newest order, watching and unwatching
+/// only what changed since the last one, until the [`Watcher`] is dropped.
+fn run(orders: Receiver<Order>, mut inner: impl notify::Watcher, scope: &Mutex<Scope>, probe: &Probe, wake: &dyn Fn()) {
+    let mut registered: HashSet<PathBuf> = HashSet::new();
+    while let Ok(mut order) = orders.recv() {
+        while let Ok(newer) = orders.try_recv() {
+            order = newer;
+        }
+        drop(probe.moved.wait_while(lock(&probe.held), |held| *held).unwrap_or_else(|e| e.into_inner()));
+        let wanted: HashSet<&PathBuf> = order.path.iter().chain(&order.folders).collect();
+        registered.retain(|old| {
+            let keep = wanted.contains(old);
+            if !keep {
+                let _ = inner.unwatch(old);
+            }
+            keep
+        });
+        if let Some(path) = &order.path
+            && inner.watch(path, RecursiveMode::NonRecursive).is_ok()
+        {
+            registered.insert(path.clone());
+            // Watched again even when already: a folder deleted and made
+            // anew under the same name lost its watch. One gone or not
+            // readable just does not refresh; only the system's watches
+            // running out gives up on them all.
+            let refused = order.folders.iter().any(|folder| match inner.watch(folder, RecursiveMode::NonRecursive) {
+                Ok(()) => {
+                    registered.insert(folder.clone());
+                    false
+                }
+                Err(e) => matches!(e.kind, notify::ErrorKind::MaxFilesWatch),
+            });
+            if refused {
+                for old in registered.drain() {
+                    let _ = inner.unwatch(&old);
+                }
+                let mut scope = lock(scope);
+                if scope.generation == order.generation {
+                    *scope = Scope { generation: order.generation, refused: true, ..Scope::default() };
+                    drop(scope);
+                    wake();
+                }
+            }
+        }
+        *lock(&probe.applied) = order.generation;
+        probe.moved.notify_all();
     }
 }
 
@@ -141,18 +305,21 @@ mod tests {
 
     #[test]
     fn only_news_from_the_folder_watched_now_count() {
-        let now = Path::new("/home/u/b");
-        assert!(concerns(&created("/home/u/b/x"), Some(now)));
-        assert!(concerns(&created("/home/u/b"), Some(now)), "the folder itself");
-        assert!(!concerns(&created("/home/u/a/x"), Some(now)), "late news from the folder left");
-        assert!(!concerns(&created("/home/u/bc/x"), Some(now)), "a folder whose name starts the same");
-        assert!(!concerns(&created("/home/u/b/x"), None), "nothing watched");
-        assert!(concerns(&Err(notify::Error::generic("overflow")), Some(now)), "an error may hide changes");
-        assert!(!concerns(&Err(notify::Error::generic("overflow")), None));
+        let now = &Scope::new(1, Some(Path::new("/home/u/b")), &[PathBuf::from("/home/u/b/sub")]);
+        let none = &Scope::default();
+        assert!(concerns(&created("/home/u/b/x"), now));
+        assert!(concerns(&created("/home/u/b"), now), "the folder itself");
+        assert!(concerns(&created("/home/u/b/sub/x"), now), "a folder watched besides it");
+        assert!(!concerns(&created("/home/u/b/other/x"), now), "a subfolder not watched");
+        assert!(!concerns(&created("/home/u/a/x"), now), "late news from the folder left");
+        assert!(!concerns(&created("/home/u/bc/x"), now), "a folder whose name starts the same");
+        assert!(!concerns(&created("/home/u/b/x"), none), "nothing watched");
+        assert!(concerns(&Err(notify::Error::generic("overflow")), now), "an error may hide changes");
+        assert!(!concerns(&Err(notify::Error::generic("overflow")), none));
         let opened = Ok(notify::Event::new(EventKind::Access(AccessKind::Open(AccessMode::Read))).add_path(PathBuf::from("/home/u/b/x")));
-        assert!(!concerns(&opened, Some(now)), "reading is not a change");
+        assert!(!concerns(&opened, now), "reading is not a change");
         let pathless = Ok(notify::Event::new(EventKind::Any));
-        assert!(concerns(&pathless, Some(now)), "no path given: it may be ours");
+        assert!(concerns(&pathless, now), "no path given: it may be ours");
     }
     use std::sync::mpsc;
     use std::time::Duration;
@@ -173,6 +340,7 @@ mod tests {
         let dir = fresh_fixture("watch-change");
         let (mut w, woke) = watcher();
         w.watch(&dir, &[]);
+        w.settle();
         std::fs::write(dir.join("new.txt"), "x").unwrap();
         std::fs::write(dir.join("other.txt"), "y").unwrap();
         woke.recv_timeout(Duration::from_secs(2)).expect("change woke the UI");
@@ -195,6 +363,7 @@ mod tests {
         std::thread::sleep(SETTLE);
         let (mut w, _woke) = watcher();
         w.watch(&dir, &[]);
+        w.settle();
         crate::fs::lister::read_entries(&dir).unwrap();
         std::fs::read(dir.join("a.txt")).unwrap();
         std::thread::sleep(SETTLE);
@@ -206,10 +375,12 @@ mod tests {
         let dir = fresh_fixture("watch-this-pc");
         let (mut w, _woke) = watcher();
         w.watch(&dir, &[]);
+        w.settle();
         assert_eq!(w.watched.as_deref(), Some(dir.as_path()));
         // News from the folder that came in just before leaving it.
         w.changed.store(true, Ordering::SeqCst);
         w.watch(&crate::places::this_pc(), &[]);
+        w.settle();
         assert_eq!(w.watched, None);
         std::fs::write(dir.join("x"), "").unwrap();
         std::thread::sleep(SETTLE);
@@ -221,8 +392,10 @@ mod tests {
         let dir = fresh_fixture("watch-recycle-bin");
         let (mut w, _woke) = watcher();
         w.watch(&dir, &[]);
+        w.settle();
         w.changed.store(true, Ordering::SeqCst);
         w.watch(&crate::places::recycle_bin(), &[]);
+        w.settle();
         assert_eq!(w.watched, None);
         std::fs::write(dir.join("x"), "").unwrap();
         std::thread::sleep(SETTLE);
@@ -236,7 +409,9 @@ mod tests {
         std::fs::create_dir_all(dir.join("b")).unwrap();
         let (mut w, _woke) = watcher();
         w.watch(&dir.join("a"), &[]);
+        w.settle();
         w.watch(&dir.join("b"), &[]);
+        w.settle();
         std::fs::write(dir.join("a/x"), "").unwrap();
         std::thread::sleep(SETTLE);
         assert!(!w.take_changed());
@@ -255,6 +430,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         let (mut w, _woke) = watcher();
         w.watch(&dir, &[]);
+        w.settle();
         std::fs::write(dir.join("sub/deep.txt"), "").unwrap();
         std::thread::sleep(SETTLE);
         assert!(!w.take_changed());
@@ -265,7 +441,8 @@ mod tests {
         let dir = fresh_fixture("watch-deep");
         std::fs::create_dir_all(dir.join("sub/deeper")).unwrap();
         let (mut w, _woke) = watcher();
-        w.watch(&dir, std::slice::from_ref(&dir));
+        w.watch(&dir, &[dir.join("sub"), dir.join("sub/deeper")]);
+        w.settle();
         std::fs::write(dir.join("sub/deeper/x.txt"), "").unwrap();
         std::thread::sleep(SETTLE);
         assert!(w.take_changed(), "a change two levels down");
@@ -279,7 +456,8 @@ mod tests {
         std::fs::create_dir_all(dir.join("a/inner")).unwrap();
         std::fs::create_dir_all(dir.join("b")).unwrap();
         let (mut w, _woke) = watcher();
-        w.watch(&dir, &[dir.join("a")]);
+        w.watch(&dir, &[dir.join("a"), dir.join("a/inner")]);
+        w.settle();
         std::fs::write(dir.join("b/x"), "").unwrap();
         std::thread::sleep(SETTLE);
         assert!(!w.take_changed(), "a subfolder not flattened");
@@ -298,8 +476,10 @@ mod tests {
         let dir = fresh_fixture("watch-deep-off");
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         let (mut w, _woke) = watcher();
-        w.watch(&dir, std::slice::from_ref(&dir));
+        w.watch(&dir, &[dir.join("sub")]);
+        w.settle();
         w.watch(&dir, &[]);
+        w.settle();
         std::fs::write(dir.join("sub/x"), "").unwrap();
         std::thread::sleep(SETTLE);
         assert!(!w.take_changed(), "the subfolder is no longer watched");
@@ -319,10 +499,105 @@ mod tests {
         std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("open/sub/link")).unwrap();
         let (mut w, _woke) = watcher();
         let open = dir.join("open");
-        w.watch(&open, std::slice::from_ref(&open));
+        // What `fs::flat::walk` entered: not the link.
+        w.watch(&open, &[open.join("sub")]);
+        w.settle();
         std::fs::write(dir.join("elsewhere/x"), "").unwrap();
         std::thread::sleep(SETTLE);
         assert!(!w.take_changed());
+    }
+
+    #[test]
+    fn more_folders_than_the_limit_are_not_watched_and_it_says_so() {
+        let dir = fresh_fixture("watch-limit");
+        let (mut w, _woke) = watcher();
+        let folders: Vec<PathBuf> = (0..=WATCH_LIMIT).map(|i| dir.join(format!("d{i}"))).collect();
+        w.watch(&dir, &folders);
+        w.settle();
+        assert!(w.take_refused(), "too many folders");
+        assert!(!w.take_refused(), "said once");
+        std::fs::write(dir.join("top.txt"), "").unwrap();
+        std::thread::sleep(SETTLE);
+        assert!(!w.take_changed(), "not even the folder itself: its reload would walk them all again");
+    }
+
+    /// Notify's own watcher, but the system's watches run out at a folder named `full`.
+    struct Full(RecommendedWatcher);
+
+    impl notify::Watcher for Full {
+        fn new<F: notify::EventHandler>(handler: F, config: Config) -> notify::Result<Self> {
+            RecommendedWatcher::new(handler, config).map(Full)
+        }
+
+        fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
+            if path.file_name().is_some_and(|name| name == "full") {
+                return Err(notify::Error::new(notify::ErrorKind::MaxFilesWatch));
+            }
+            self.0.watch(path, mode)
+        }
+
+        fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+            self.0.unwatch(path)
+        }
+
+        fn kind() -> notify::WatcherKind {
+            RecommendedWatcher::kind()
+        }
+    }
+
+    #[test]
+    fn when_the_systems_watches_run_out_every_watch_is_released() {
+        let dir = fresh_fixture("watch-refused");
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("full")).unwrap();
+        let (tx, woke) = mpsc::channel();
+        let mut w = Watcher::start::<Full>(move || {
+            let _ = tx.send(());
+        });
+        w.watch(&dir, &[dir.join("a"), dir.join("full")]);
+        woke.recv_timeout(Duration::from_secs(2)).expect("giving up wakes the UI");
+        w.settle();
+        assert!(w.take_refused());
+        std::fs::write(dir.join("a/x"), "").unwrap();
+        std::fs::write(dir.join("top.txt"), "").unwrap();
+        std::thread::sleep(SETTLE);
+        assert!(!w.take_changed(), "nothing stays watched");
+    }
+
+    #[test]
+    fn a_folder_gone_before_it_is_watched_is_skipped() {
+        let dir = fresh_fixture("watch-gone");
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        let (mut w, _woke) = watcher();
+        w.watch(&dir, &[dir.join("gone"), dir.join("a")]);
+        w.settle();
+        assert!(!w.take_refused(), "a build tool's folder may come and go");
+        std::fs::write(dir.join("a/x"), "").unwrap();
+        std::thread::sleep(SETTLE);
+        assert!(w.take_changed(), "the others are watched");
+    }
+
+    #[test]
+    fn watching_folders_does_not_wait_for_the_system() {
+        let dir = fresh_fixture("watch-async");
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        let (mut w, _woke) = watcher();
+        let hold = w.hold();
+        let (done_tx, done) = mpsc::channel();
+        let folders = [dir.join("a")];
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                w.watch(&dir, &folders);
+                let _ = done_tx.send(());
+            });
+            let returned = done.recv_timeout(Duration::from_secs(2)).is_ok();
+            drop(hold);
+            assert!(returned, "watch() returned while the folders were still being watched");
+        });
+        w.settle();
+        std::fs::write(dir.join("a/x"), "").unwrap();
+        std::thread::sleep(SETTLE);
+        assert!(w.take_changed(), "watched once the thread got to it");
     }
 
     #[test]
@@ -330,8 +605,10 @@ mod tests {
         let dir = fresh_fixture("watch-deep-keep");
         let (mut w, _woke) = watcher();
         w.watch(&dir, &[]);
+        w.settle();
         w.changed.store(true, Ordering::SeqCst);
-        w.watch(&dir, std::slice::from_ref(&dir));
+        w.watch(&dir, &[dir.join("sub")]);
+        w.settle();
         assert!(w.take_changed(), "the folder's own change still needs its reload");
     }
 
@@ -342,12 +619,15 @@ mod tests {
         std::fs::create_dir(&open).unwrap();
         let (mut w, _woke) = watcher();
         w.watch(&open, &[]);
+        w.settle();
         std::fs::remove_dir(&open).unwrap();
         std::thread::sleep(SETTLE);
         w.take_changed();
         w.forget();
+        w.settle();
         std::fs::create_dir(&open).unwrap();
         w.watch(&open, &[]);
+        w.settle();
         std::fs::write(open.join("x"), "").unwrap();
         std::thread::sleep(SETTLE);
         assert!(w.take_changed());
@@ -358,6 +638,7 @@ mod tests {
         let dir = fresh_fixture("watch-missing");
         let (mut w, _woke) = watcher();
         w.watch(&dir.join("gone"), &[]);
+        w.settle();
         assert!(!w.take_changed());
     }
 
