@@ -87,7 +87,12 @@ pub enum News {
     /// without a path, the watched folder itself, or too many folders.
     All,
     /// What these folders hold changed (an entry made, removed, renamed or written).
-    Folders(HashSet<PathBuf>),
+    Folders {
+        folders: HashSet<PathBuf>,
+        /// The entries made, removed or renamed in them: one that is a folder
+        /// listed before may be another folder of the same name now.
+        touched: HashSet<PathBuf>,
+    },
 }
 
 /// The news gathered since the last take.
@@ -95,6 +100,19 @@ pub enum News {
 struct Pending {
     all: bool,
     folders: HashSet<PathBuf>,
+    touched: HashSet<PathBuf>,
+}
+
+/// Whether `kind` makes, removes or renames an entry that may be a folder
+/// (not one that is surely a file): the news name its path.
+fn names_entry(kind: &EventKind) -> bool {
+    use notify::event::{CreateKind, ModifyKind, RemoveKind};
+    match kind {
+        EventKind::Create(kind) => *kind != CreateKind::File,
+        EventKind::Remove(kind) => *kind != RemoveKind::File,
+        EventKind::Modify(ModifyKind::Name(_)) => true,
+        _ => false,
+    }
 }
 
 /// Adds `event` to `pending` when it tells of a change in a folder watched
@@ -110,6 +128,9 @@ fn note(pending: &mut Pending, event: &notify::Result<notify::Event>, scope: &Sc
                     // The watched folder itself: the folder holding it is not listed.
                     Some(folder) if scope.path.as_deref() != Some(path.as_path()) => {
                         pending.folders.insert(folder.to_path_buf());
+                        if names_entry(&e.kind) {
+                            pending.touched.insert(path.clone());
+                        }
                     }
                     _ => pending.all = true,
                 }
@@ -117,9 +138,10 @@ fn note(pending: &mut Pending, event: &notify::Result<notify::Event>, scope: &Sc
         }
         _ => pending.all = true,
     }
-    if pending.all || pending.folders.len() > NEWS_LIMIT {
+    if pending.all || pending.folders.len() > NEWS_LIMIT || pending.touched.len() > NEWS_LIMIT {
         pending.all = true;
         pending.folders.clear();
+        pending.touched.clear();
     }
     true
 }
@@ -307,8 +329,13 @@ impl Watcher {
     }
 
     /// Whether the last [`Watcher::watch`] gave up on its folders, once.
-    pub fn take_refused(&self) -> bool {
-        std::mem::take(&mut lock(&self.scope).refused)
+    /// Nothing stays watched then, so the next watch of the same folders is ordered again.
+    pub fn take_refused(&mut self) -> bool {
+        let refused = std::mem::take(&mut lock(&self.scope).refused);
+        if refused {
+            self.ordered = None;
+        }
+        refused
     }
 
     /// What changed since the last call (or [`Watcher::take_changed`]), if anything.
@@ -317,9 +344,9 @@ impl Watcher {
         if !self.changed.swap(false, Ordering::SeqCst) {
             return None;
         }
-        let Pending { all, folders } = std::mem::take(&mut *pending);
+        let Pending { all, folders, touched } = std::mem::take(&mut *pending);
         // Set with no folder named: only a test does that, and it means anything.
-        Some(if all || folders.is_empty() { News::All } else { News::Folders(folders) })
+        Some(if all || folders.is_empty() { News::All } else { News::Folders { folders, touched } })
     }
 
     /// Whether something changed since the last call.
@@ -332,6 +359,12 @@ impl Watcher {
         let mut pending = lock(&self.pending);
         *pending = Pending::default();
         self.changed.store(false, Ordering::SeqCst);
+    }
+
+    /// How many orders were sent so far.
+    #[cfg(test)]
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Waits until the watch thread has carried out every order so far.
@@ -440,7 +473,7 @@ mod tests {
     }
 
     fn folders(paths: &[&str]) -> Option<News> {
-        Some(News::Folders(paths.iter().map(PathBuf::from).collect()))
+        Some(News::Folders { folders: paths.iter().map(PathBuf::from).collect(), touched: HashSet::new() })
     }
 
     fn taken(pending: &mut Pending) -> Option<News> {
@@ -448,7 +481,7 @@ mod tests {
         if p.all {
             Some(News::All)
         } else {
-            (!p.folders.is_empty()).then_some(News::Folders(p.folders))
+            (!p.folders.is_empty()).then_some(News::Folders { folders: p.folders, touched: p.touched })
         }
     }
 
@@ -464,7 +497,7 @@ mod tests {
             .add_path(PathBuf::from("/home/u/b/sub/old"))
             .add_path(PathBuf::from("/home/u/b/new")));
         assert!(note(&mut pending, &renamed, scope));
-        assert_eq!(taken(&mut pending), folders(&["/home/u/b/sub", "/home/u/b"]), "a move names both folders");
+        assert_eq!(taken(&mut pending), touching(&["/home/u/b/sub", "/home/u/b"], &["/home/u/b/sub/old", "/home/u/b/new"]), "a move names both folders");
         assert!(!note(&mut pending, &created("/home/u/a/x"), scope), "a folder not watched");
         let opened = Ok(notify::Event::new(EventKind::Access(AccessKind::Open(AccessMode::Read))).add_path(PathBuf::from("/home/u/b/x")));
         assert!(!note(&mut pending, &opened, scope), "reading is not a change");
@@ -498,7 +531,7 @@ mod tests {
         w.settle();
         std::fs::write(dir.join("sub/deeper/x.txt"), "").unwrap();
         std::thread::sleep(SETTLE);
-        let Some(News::Folders(changed)) = w.take_news() else { panic!("the folder is named") };
+        let Some(News::Folders { folders: changed, .. }) = w.take_news() else { panic!("the folder is named") };
         assert!(changed.contains(&dir.join("sub/deeper")), "{changed:?}");
         assert!(changed.iter().all(|f| f.starts_with(&dir)), "{changed:?}");
         assert_eq!(w.take_news(), None, "told once");
@@ -918,6 +951,94 @@ mod tests {
         assert!(is_change(&EventKind::Access(AccessKind::Close(AccessMode::Write))));
         assert!(!is_change(&EventKind::Access(AccessKind::Open(AccessMode::Any))));
         assert!(!is_change(&EventKind::Access(AccessKind::Close(AccessMode::Read))));
+    }
+
+    fn touching(folders: &[&str], touched: &[&str]) -> Option<News> {
+        Some(News::Folders { folders: folders.iter().map(PathBuf::from).collect(), touched: touched.iter().map(PathBuf::from).collect() })
+    }
+
+    fn event(kind: EventKind, paths: &[&str]) -> notify::Result<notify::Event> {
+        Ok(paths.iter().fold(notify::Event::new(kind), |event, path| event.add_path(PathBuf::from(path))))
+    }
+
+    #[test]
+    fn news_name_the_folders_made_removed_or_renamed() {
+        use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
+        let plan = Plan { alone: vec![PathBuf::from("/home/u/b/sub")], trees: vec![] };
+        let scope = &Scope::new(1, Some(Path::new("/home/u/b")), &plan);
+        let mut pending = Pending::default();
+        assert!(note(&mut pending, &event(EventKind::Remove(RemoveKind::Folder), &["/home/u/b/sub/dist"]), scope));
+        assert!(note(&mut pending, &event(EventKind::Create(CreateKind::Folder), &["/home/u/b/sub/dist"]), scope));
+        assert_eq!(taken(&mut pending), touching(&["/home/u/b/sub"], &["/home/u/b/sub/dist"]), "a folder removed and made anew");
+        for mode in [RenameMode::From, RenameMode::To, RenameMode::Any] {
+            assert!(note(&mut pending, &event(EventKind::Modify(ModifyKind::Name(mode)), &["/home/u/b/sub/old"]), scope));
+            assert_eq!(taken(&mut pending), touching(&["/home/u/b/sub"], &["/home/u/b/sub/old"]), "{mode:?}");
+        }
+        let both = event(EventKind::Modify(ModifyKind::Name(RenameMode::Both)), &["/home/u/b/sub/old", "/home/u/b/new"]);
+        assert!(note(&mut pending, &both, scope));
+        assert_eq!(taken(&mut pending), touching(&["/home/u/b/sub", "/home/u/b"], &["/home/u/b/sub/old", "/home/u/b/new"]), "both paths of a move");
+        assert!(note(&mut pending, &event(EventKind::Remove(RemoveKind::Any), &["/home/u/b/x"]), scope));
+        assert_eq!(taken(&mut pending), touching(&["/home/u/b"], &["/home/u/b/x"]), "whatever it was");
+    }
+
+    #[test]
+    fn a_file_made_or_written_is_not_named_but_its_folder_is() {
+        use notify::event::{CreateKind, ModifyKind, RemoveKind};
+        let plan = Plan { alone: vec![PathBuf::from("/home/u/b/sub")], trees: vec![] };
+        let scope = &Scope::new(1, Some(Path::new("/home/u/b")), &plan);
+        let mut pending = Pending::default();
+        assert!(note(&mut pending, &event(EventKind::Create(CreateKind::File), &["/home/u/b/sub/a.txt"]), scope));
+        assert!(note(&mut pending, &event(EventKind::Remove(RemoveKind::File), &["/home/u/b/sub/b.txt"]), scope));
+        assert!(note(&mut pending, &event(EventKind::Modify(ModifyKind::Any), &["/home/u/b/sub/c.txt"]), scope));
+        assert_eq!(taken(&mut pending), touching(&["/home/u/b/sub"], &[]), "a big copy does not fill the list");
+    }
+
+    #[test]
+    fn news_say_everything_when_too_many_entries_were_named() {
+        use notify::event::CreateKind;
+        let plan = Plan { alone: vec![PathBuf::from("/home/u/b/sub")], trees: vec![] };
+        let scope = &Scope::new(1, Some(Path::new("/home/u/b")), &plan);
+        let mut pending = Pending::default();
+        for i in 0..=NEWS_LIMIT {
+            note(&mut pending, &event(EventKind::Create(CreateKind::Folder), &[&format!("/home/u/b/sub/d{i}")]), scope);
+        }
+        assert!(pending.touched.is_empty() && pending.folders.is_empty());
+        assert_eq!(taken(&mut pending), Some(News::All));
+    }
+
+    #[test]
+    fn a_folder_removed_and_made_anew_is_named_by_the_real_watcher() {
+        let dir = fresh_fixture("watch-news-replaced");
+        std::fs::create_dir_all(dir.join("sub/dist")).unwrap();
+        let (mut w, _woke) = watcher();
+        w.watch(&dir, &[dir.join("sub"), dir.join("sub/dist")]);
+        w.settle();
+        std::fs::remove_dir_all(dir.join("sub/dist")).unwrap();
+        std::fs::create_dir(dir.join("sub/dist")).unwrap();
+        std::thread::sleep(SETTLE);
+        let Some(News::Folders { folders, touched }) = w.take_news() else { panic!("the folder is named") };
+        assert!(folders.contains(&dir.join("sub")), "{folders:?}");
+        assert!(touched.contains(&dir.join("sub/dist")), "{touched:?}");
+    }
+
+    #[test]
+    fn a_refusal_forgets_the_plan_so_the_same_watch_is_ordered_again() {
+        let dir = fresh_fixture("watch-refused-again");
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("full")).unwrap();
+        let (tx, woke) = mpsc::channel();
+        let mut w = Watcher::start::<Full>(move || {
+            let _ = tx.send(());
+        });
+        let folders = [dir.join("a"), dir.join("full")];
+        w.watch(&dir, &folders);
+        woke.recv_timeout(Duration::from_secs(2)).expect("giving up wakes the UI");
+        w.settle();
+        w.watch(&dir, &folders);
+        let ordered = w.generation();
+        assert!(w.take_refused());
+        w.watch(&dir, &folders);
+        assert_eq!(w.generation(), ordered + 1, "nothing is watched any more: it is ordered again");
     }
 
     #[test]
