@@ -3047,6 +3047,23 @@ impl LumenApp {
         self.tab.flattener = Some(fs::flat::Flattener::start(self.tab.view.flat_roots().to_vec(), move || ctx.request_repaint()));
     }
 
+    /// "Listing subfolders… N items" while a flatten walk runs.
+    fn walking(&self) -> Option<String> {
+        self.tab.flattener.as_ref().map(|f| ui::status_bar::walking_text(f.found()))
+    }
+
+    /// Stops the running flatten walk; the folder is listed alone again.
+    /// `false` when there was none.
+    fn cancel_flat(&mut self) -> bool {
+        if self.tab.flattener.take().is_none() {
+            return false;
+        }
+        self.tab.view.clear_flat();
+        self.tab.flat_due = false;
+        self.watcher.watch(&self.tab.view.current, &[]);
+        true
+    }
+
     /// Shows the flatten walk once it is done.
     fn poll_flat(&mut self) {
         if let Some((roots, walked)) = self.tab.flattener.as_ref().and_then(fs::flat::Flattener::poll) {
@@ -3279,6 +3296,10 @@ impl LumenApp {
                     self.notice = Some("Calculation cancelled".into());
                     self.hold_absorbed = true;
                 }
+                if !self.hold_absorbed && self.cancel_flat() {
+                    self.notice = Some("Listing cancelled".into());
+                    self.hold_absorbed = true;
+                }
                 if !self.hold_absorbed {
                     if self.job.is_some() {
                         self.cancel_job();
@@ -3328,6 +3349,10 @@ impl eframe::App for LumenApp {
         self.read_kids(&ctx);
         self.poll_flat();
         self.walk_flat(&ctx);
+        if self.tab.flattener.is_some() {
+            // The status island counts what the walk found so far.
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
 
         self.refresh_if_changed(&ctx);
         self.poll_recycle(&ctx);
@@ -3535,6 +3560,7 @@ impl eframe::App for LumenApp {
                     let name = file_name(&c.path).unwrap_or_default();
                     ui::status_bar::counting_text(&name, &c.progress)
                 }),
+                walking: self.walking(),
                 view: self.tab.view_size,
             },
         );
@@ -4334,6 +4360,30 @@ mod tests {
         let row = app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i)).find(|e| e.name == "new.txt").unwrap().clone();
         assert_eq!(app.tab.view.relative_parent(&row).as_deref(), Some("sub > deeper"), "with its folder dimmed after it");
         assert!(app.tab.view.is_flat(), "still flattened after the reload");
+    }
+
+    #[test]
+    fn escape_stops_the_flatten_walk_and_lists_the_folder_alone() {
+        let (ctx, mut app, _dir) = app_in("app-flat-escape");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        app.walk_flat(&ctx);
+        assert!(app.walking().is_some_and(|text| text.starts_with("Listing subfolders… ")), "the status island tells the walk");
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.tab.flattener.is_none(), "the walk is stopped");
+        assert!(!app.tab.view.is_flat(), "the folder alone");
+        assert!(!app.tab.flat_due, "and no walk starts again");
+        assert_eq!(app.notice.as_deref(), Some("Listing cancelled"));
+        assert_eq!(app.walking(), None);
+    }
+
+    #[test]
+    fn escape_with_no_walk_running_does_not_unflatten_the_view() {
+        let (ctx, mut app, _dir) = app_in("app-flat-escape-idle");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(app.tab.view.is_flat());
+        assert_eq!(app.notice, None);
     }
 
     #[test]
