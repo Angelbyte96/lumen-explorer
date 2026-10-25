@@ -3,7 +3,7 @@
 //! thread because a big tree can take seconds to walk.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::thread;
@@ -23,7 +23,8 @@ pub struct Walk {
 /// Folders that cannot be read are skipped, and a link to a folder is listed
 /// but not entered, so a link back up cannot loop. Returns `None` when
 /// `cancel` is set.
-pub fn walk(roots: &[PathBuf], cancel: &AtomicBool) -> Option<Walk> {
+/// `seen` keeps how many entries it found so far.
+pub fn walk(roots: &[PathBuf], cancel: &AtomicBool, seen: &AtomicUsize) -> Option<Walk> {
     let mut found = Vec::new();
     let mut folders = Vec::new();
     // A stack, not recursion: a very deep tree cannot overflow it.
@@ -36,6 +37,7 @@ pub fn walk(roots: &[PathBuf], cancel: &AtomicBool) -> Option<Walk> {
         read.sort_by_cached_key(|f| (!f.entry.is_dir, f.entry.name.to_lowercase()));
         pending.extend(read.iter().filter(|f| f.entry.is_dir && !f.link).map(|f| f.entry.path.clone()).rev());
         found.extend(read.into_iter().map(|f| f.entry));
+        seen.store(found.len(), Ordering::Relaxed);
         folders.push(dir);
     }
     (!cancel.load(Ordering::Relaxed)).then_some(Walk { found, folders })
@@ -46,6 +48,7 @@ pub struct Flattener {
     roots: Vec<PathBuf>,
     rx: Receiver<Walk>,
     cancel: Arc<AtomicBool>,
+    seen: Arc<AtomicUsize>,
 }
 
 impl Flattener {
@@ -54,15 +57,22 @@ impl Flattener {
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = cancel.clone();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let count = seen.clone();
         let walked = roots.clone();
         thread::spawn(move || {
-            if let Some(found) = walk(&walked, &flag) {
+            if let Some(found) = walk(&walked, &flag, &count) {
                 // The receiver only disappears when the walk is no longer wanted.
                 let _ = tx.send(found);
                 wake();
             }
         });
-        Self { roots, rx, cancel }
+        Self { roots, rx, cancel, seen }
+    }
+
+    /// How many entries the walk found so far.
+    pub fn found(&self) -> usize {
+        self.seen.load(Ordering::Relaxed)
     }
 
     /// The roots walked and what they hold, once the walk is done.
@@ -106,7 +116,7 @@ mod tests {
     #[test]
     fn walk_lists_every_file_and_folder_under_the_root() {
         let root = tree("flat-walk-all");
-        let found = walk(std::slice::from_ref(&root), &AtomicBool::new(false)).unwrap().found;
+        let found = walk(std::slice::from_ref(&root), &AtomicBool::new(false), &AtomicUsize::new(0)).unwrap().found;
         assert_eq!(names(&found, &root), ["build", "deps", "deps/inner", "deps/inner/deep.rs", "deps/lib.d", "top.txt"]);
         let deep = found.iter().find(|e| e.name == "deep.rs").unwrap();
         assert_eq!(deep.size, Some(3));
@@ -117,14 +127,14 @@ mod tests {
     #[test]
     fn walk_of_several_roots_lists_only_what_they_hold() {
         let root = tree("flat-walk-roots");
-        let found = walk(&[root.join("deps")], &AtomicBool::new(false)).unwrap().found;
+        let found = walk(&[root.join("deps")], &AtomicBool::new(false), &AtomicUsize::new(0)).unwrap().found;
         assert_eq!(names(&found, &root), ["deps/inner", "deps/inner/deep.rs", "deps/lib.d"]);
     }
 
     #[test]
     fn walk_tells_the_folders_it_read() {
         let root = tree("flat-walk-folders");
-        let walked = walk(&[root.join("deps"), root.join("nope")], &AtomicBool::new(false)).unwrap();
+        let walked = walk(&[root.join("deps"), root.join("nope")], &AtomicBool::new(false), &AtomicUsize::new(0)).unwrap();
         assert_eq!(walked.folders, [root.join("deps"), root.join("deps/inner")], "the root too; not one that cannot be read");
     }
 
@@ -133,21 +143,30 @@ mod tests {
     fn walk_does_not_tell_a_link_to_a_folder_as_read() {
         let root = tree("flat-walk-folders-link");
         std::os::unix::fs::symlink(root.join("build"), root.join("deps/link")).unwrap();
-        let walked = walk(&[root.join("deps")], &AtomicBool::new(false)).unwrap();
+        let walked = walk(&[root.join("deps")], &AtomicBool::new(false), &AtomicUsize::new(0)).unwrap();
         assert_eq!(walked.folders, [root.join("deps"), root.join("deps/inner")]);
         assert!(walked.found.iter().any(|e| e.name == "link"), "listed all the same");
     }
 
     #[test]
+    fn walk_counts_what_it_found_as_it_goes() {
+        let root = tree("flat-walk-progress");
+        let seen = AtomicUsize::new(0);
+        let walked = walk(std::slice::from_ref(&root), &AtomicBool::new(false), &seen).unwrap();
+        assert_eq!(seen.load(Ordering::Relaxed), walked.found.len());
+        assert_eq!(seen.load(Ordering::Relaxed), 6);
+    }
+
+    #[test]
     fn walk_stops_when_cancelled() {
         let root = tree("flat-walk-cancel");
-        assert!(walk(&[root], &AtomicBool::new(true)).is_none());
+        assert!(walk(&[root], &AtomicBool::new(true), &AtomicUsize::new(0)).is_none());
     }
 
     #[test]
     fn an_unreadable_root_lists_nothing() {
         let root = tree("flat-walk-missing");
-        let walked = walk(&[root.join("nope")], &AtomicBool::new(false)).unwrap();
+        let walked = walk(&[root.join("nope")], &AtomicBool::new(false), &AtomicUsize::new(0)).unwrap();
         assert!(walked.found.is_empty());
         assert!(walked.folders.is_empty());
     }
@@ -160,6 +179,7 @@ mod tests {
             let _ = tx.send(());
         });
         rx.recv().unwrap();
+        assert_eq!(flattener.found(), 3, "what it found so far");
         let (roots, walked) = flattener.poll().expect("finished");
         assert_eq!(roots, [root.join("deps")]);
         assert_eq!(walked.found.len(), 3);

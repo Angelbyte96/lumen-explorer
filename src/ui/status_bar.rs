@@ -23,6 +23,8 @@ pub struct Status<'a> {
     pub notice: Option<&'a str>,
     /// Alt+R count in progress, already formatted.
     pub counting: Option<String>,
+    /// Ctrl+E walk in progress, already formatted.
+    pub walking: Option<String>,
     /// Folders among the rows shown.
     pub folder_count: usize,
     /// Selected row, as an index into the rows shown.
@@ -109,7 +111,7 @@ pub fn show(ctx: &egui::Context, area: egui::Rect, status: &Status<'_>) -> Optio
 /// Progress, notices and errors: floating above the right island while any is
 /// there. A long error is cut to fit and shows whole on hover.
 fn note(ctx: &egui::Context, area: egui::Rect, above: f32, status: &Status<'_>) {
-    let busy = status.loading || status.job.is_some() || status.counting.is_some();
+    let busy = status.loading || status.job.is_some() || status.counting.is_some() || status.walking.is_some();
     if !busy && status.notice.is_none() && status.error.is_none() {
         return;
     }
@@ -124,7 +126,7 @@ fn note(ctx: &egui::Context, area: egui::Rect, above: f32, status: &Status<'_>) 
                         ui.label("Loading…");
                     });
                 }
-                for running in [&status.job, &status.counting].into_iter().flatten() {
+                for running in [&status.job, &status.counting, &status.walking].into_iter().flatten() {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label(running);
@@ -215,6 +217,12 @@ pub fn count_text(items: usize, filtering: bool) -> String {
     }
 }
 
+/// "Listing subfolders… 120 items" while a Ctrl+E walk runs.
+pub fn walking_text(found: usize) -> String {
+    use crate::ui::preview::plural;
+    format!("Listing subfolders… {}", plural(found as u64, "item"))
+}
+
 /// "Calculating “sub”… 3 folders · 120 files" while Alt+R runs.
 pub fn counting_text(name: &str, totals: &Totals) -> String {
     use crate::ui::preview::plural;
@@ -251,6 +259,7 @@ mod tests {
             job: None,
             notice: None,
             counting: None,
+            walking: None,
             folder_count: 0,
             selected: None,
             picked: 0,
@@ -295,6 +304,7 @@ mod tests {
             job: None,
             notice: None,
             counting: None,
+            walking: None,
             folder_count: 2,
             selected: None,
             picked: 0,
@@ -381,6 +391,7 @@ mod tests {
             job: None,
             notice: None,
             counting: None,
+            walking: None,
             folder_count: 2,
             selected: None,
             picked: 0,
@@ -437,6 +448,8 @@ mod tests {
     fn counting_reads_the_folder_and_running_totals() {
         let t = Totals { folders: 3, files: 1, bytes: 0, unreadable: 0 };
         assert_eq!(counting_text("sub", &t), "Calculating “sub”… 3 folders · 1 file");
+        assert_eq!(walking_text(1), "Listing subfolders… 1 item");
+        assert_eq!(walking_text(1234), "Listing subfolders… 1234 items");
     }
 
     #[test]
