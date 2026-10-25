@@ -25,6 +25,8 @@ pub struct Watcher {
     watched: Option<PathBuf>,
     /// The folders watched besides `watched`, as asked in [`Watcher::watch`].
     folders: Vec<PathBuf>,
+    /// What the last order asked the watch thread to watch, for `watched`.
+    ordered: Option<Plan>,
     /// Counts the orders, so the watch thread can tell the newest.
     generation: u64,
     /// The same, for notify's thread: unwatching is not immediate, and news
@@ -220,6 +222,7 @@ impl Watcher {
             orders,
             watched: None,
             folders: Vec::new(),
+            ordered: None,
             generation: 0,
             scope,
             changed,
@@ -260,9 +263,20 @@ impl Watcher {
             lock(&self.scope).refused = true;
             return;
         }
-        self.order(Some(path), folders);
+        // Watched afresh, a folder's handle loses what happens meanwhile: the
+        // same plan (on Windows a whole tree is one handle) is not ordered again.
+        let same = self.watched.as_deref() == Some(path) && self.ordered.as_ref() == Some(&Plan::new(path, folders, !cfg!(windows)));
+        if !same {
+            self.order(Some(path), folders);
+        }
         self.watched = Some(path.to_path_buf());
         self.folders = folders.to_vec();
+    }
+
+    /// The next [`Watcher::watch`] orders its folders even when they are the
+    /// ones watched already: a folder made anew under the same name lost its watch.
+    pub fn renew(&mut self) {
+        self.ordered = None;
     }
 
     /// Watches `path` alone, unless it is the folder watched already: then
@@ -277,6 +291,7 @@ impl Watcher {
     fn order(&mut self, path: Option<&Path>, folders: &[PathBuf]) {
         self.generation += 1;
         let plan = path.map(|path| Plan::new(path, folders, !cfg!(windows))).unwrap_or_default();
+        self.ordered = path.map(|_| plan.clone());
         *lock(&self.scope) = Scope::new(self.generation, path, &plan);
         if let Some(orders) = &self.orders {
             let _ = orders.send(Order { generation: self.generation, path: path.map(Path::to_path_buf), plan });
@@ -903,5 +918,54 @@ mod tests {
         assert!(is_change(&EventKind::Access(AccessKind::Close(AccessMode::Write))));
         assert!(!is_change(&EventKind::Access(AccessKind::Open(AccessMode::Any))));
         assert!(!is_change(&EventKind::Access(AccessKind::Close(AccessMode::Read))));
+    }
+
+    #[test]
+    fn watching_the_same_folders_again_sends_no_new_order() {
+        let dir = fresh_fixture("watch-same-plan");
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let (mut w, _woke) = watcher();
+        w.watch(&dir, &[a.clone(), b.clone()]);
+        let ordered = w.generation;
+        w.watch(&dir, &[a.clone(), b.clone()]);
+        assert_eq!(w.generation, ordered, "the same plan: nothing to tell the watch thread");
+        w.watch(&dir, std::slice::from_ref(&a));
+        assert_eq!(w.generation, ordered + 1, "another plan");
+        // On Windows a whole tree is one handle, whichever folders it holds.
+        let whole = [dir.clone(), a.clone()];
+        w.watch(&dir, &whole);
+        let ordered = w.generation;
+        w.watch(&dir, &[dir.clone(), a, b]);
+        assert_eq!(w.generation, if cfg!(windows) { ordered } else { ordered + 1 });
+        w.settle();
+    }
+
+    #[test]
+    fn a_watch_of_another_folder_sends_its_order_though_the_plan_is_equal() {
+        let (one, two) = (fresh_fixture("watch-same-plan-one"), fresh_fixture("watch-same-plan-two"));
+        let (mut w, _woke) = watcher();
+        w.watch(&one, &[]);
+        let ordered = w.generation;
+        w.watch(&two, &[]);
+        assert_eq!(w.generation, ordered + 1);
+        w.settle();
+    }
+
+    #[test]
+    fn a_renewed_watch_sends_its_order_again_for_the_same_plan() {
+        let dir = fresh_fixture("watch-renew");
+        let a = dir.join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        let (mut w, _woke) = watcher();
+        w.watch(&dir, std::slice::from_ref(&a));
+        let ordered = w.generation;
+        w.renew();
+        w.watch(&dir, std::slice::from_ref(&a));
+        assert_eq!(w.generation, ordered + 1, "folders made anew lose their watch: they are watched again");
+        w.watch(&dir, std::slice::from_ref(&a));
+        assert_eq!(w.generation, ordered + 1, "once");
+        w.settle();
     }
 }

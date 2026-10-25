@@ -144,6 +144,7 @@ pub fn reread(roots: &[PathBuf], folders: &[(PathBuf, HashSet<PathBuf>)], cancel
 pub struct Refresher {
     roots: Vec<PathBuf>,
     current: PathBuf,
+    asked: Vec<PathBuf>,
     rx: Receiver<Reread>,
     cancel: Arc<AtomicBool>,
 }
@@ -155,6 +156,7 @@ impl Refresher {
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = cancel.clone();
         let walked = roots.clone();
+        let asked = folders.iter().map(|(folder, _)| folder.clone()).collect();
         thread::spawn(move || {
             if let Some(found) = reread(&walked, &folders, &flag) {
                 // The receiver only disappears when the result is no longer wanted.
@@ -162,7 +164,12 @@ impl Refresher {
                 wake();
             }
         });
-        Self { roots, current, rx, cancel }
+        Self { roots, current, asked, rx, cancel }
+    }
+
+    /// The folders it reads again.
+    pub fn folders(&self) -> &[PathBuf] {
+        &self.asked
     }
 
     /// The roots and the open folder it was started for, and what it found, once it is done.
@@ -403,6 +410,7 @@ mod tests {
         let refresher = Refresher::start(vec![root.clone()], root.clone(), vec![(deps.clone(), held(&[deps.join("inner")]))], move || {
             let _ = tx.send(());
         });
+        assert_eq!(refresher.folders(), std::slice::from_ref(&deps), "the folders it was asked to read");
         rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the reread never finished");
         let (roots, current, read) = refresher.poll().expect("finished");
         assert_eq!((roots, current), (vec![root.clone()], root.clone()));
