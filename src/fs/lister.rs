@@ -64,29 +64,44 @@ pub fn read_entries(path: &Path) -> Result<Vec<Entry>, ListError> {
     if !meta.is_dir() {
         return Err(ListError::NotADirectory(path.to_path_buf()));
     }
-    let iter = std::fs::read_dir(path).map_err(|e| ListError::from_io(path, &e))?;
+    let mut entries: Vec<Entry> = read_folder(path).map_err(|e| ListError::from_io(path, &e))?.into_iter().map(|f| f.entry).collect();
+    sort_entries(&mut entries);
+    Ok(entries)
+}
 
-    let mut entries = Vec::new();
-    for item in iter {
+/// One entry [`read_folder`] found.
+pub struct Found {
+    pub entry: Entry,
+    /// The entry is a link (a junction too, on Windows).
+    pub link: bool,
+}
+
+/// What `path` holds, unsorted, without [`read_entries`]' checks.
+pub fn read_folder(path: &Path) -> io::Result<Vec<Found>> {
+    let mut found = Vec::new();
+    for item in std::fs::read_dir(path)? {
         // A single unreadable entry should not fail the whole folder.
         let Ok(item) = item else { continue };
         let name = item.file_name().to_string_lossy().into_owned();
         let path = item.path();
-        // Follow symlinks so a link to a folder behaves like a folder;
-        // fall back to the link itself when it is broken.
-        let meta = std::fs::metadata(&path).or_else(|_| item.metadata()).ok();
+        // The entry's own data comes with the folder read; asking the disk
+        // again would open every file on Windows. Only a link is followed, so a
+        // link to a folder behaves like a folder, or the link itself when broken.
+        let own = item.metadata().ok();
+        let link = own.as_ref().is_some_and(|m| m.file_type().is_symlink());
+        let meta = if link { std::fs::metadata(&path).ok().or(own) } else { own };
         let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
-        entries.push(Entry {
+        let entry = Entry {
             hidden: is_hidden_name(&name),
             size: meta.as_ref().filter(|_| !is_dir).map(|m| m.len()),
             modified: meta.as_ref().and_then(|m| m.modified().ok()),
             name,
             path,
             is_dir,
-        });
+        };
+        found.push(Found { entry, link });
     }
-    sort_entries(&mut entries);
-    Ok(entries)
+    Ok(found)
 }
 
 /// Folders first, then case-insensitive by name.
@@ -275,6 +290,56 @@ mod tests {
         assert!(dir.is_dir);
         assert_eq!(dir.size, None);
         assert!(entries.iter().find(|e| e.name == ".hidden.txt").unwrap().hidden);
+    }
+
+    /// A link named `link` in `dir` to `target`; false when the system does not let
+    /// this user make links (Windows without Developer Mode).
+    fn link(dir: &Path, target: &Path, folder: bool) -> bool {
+        let at = dir.join("link");
+        let _ = std::fs::remove_file(&at).or_else(|_| std::fs::remove_dir(&at));
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, &at);
+        #[cfg(windows)]
+        let made = if folder { std::os::windows::fs::symlink_dir(target, &at) } else { std::os::windows::fs::symlink_file(target, &at) };
+        #[cfg(unix)]
+        let _ = folder;
+        made.is_ok()
+    }
+
+    #[test]
+    fn a_link_to_a_folder_lists_as_a_folder_and_is_told_as_a_link() {
+        let dir = sample_dir("link-to-folder");
+        if !link(&dir, &dir.join("beta_dir"), true) {
+            return;
+        }
+        let entries = read_entries(&dir).unwrap();
+        let link = entries.iter().find(|e| e.name == "link").unwrap();
+        assert!(link.is_dir, "a folder, as what it points to");
+        assert_eq!(link.size, None);
+        let read = read_folder(&dir).unwrap();
+        assert_eq!(read.iter().filter(|f| f.link).map(|f| f.entry.name.as_str()).collect::<Vec<_>>(), ["link"]);
+    }
+
+    #[test]
+    fn a_link_to_a_file_carries_the_file_size() {
+        let dir = sample_dir("link-to-file");
+        if !link(&dir, &dir.join("zeta.txt"), false) {
+            return;
+        }
+        let link = read_entries(&dir).unwrap().into_iter().find(|e| e.name == "link").unwrap();
+        assert!(!link.is_dir);
+        assert_eq!(link.size, Some(5), "the size of zeta.txt");
+    }
+
+    #[test]
+    fn a_broken_link_lists_as_itself() {
+        let dir = sample_dir("link-broken");
+        if !link(&dir, &dir.join("gone"), false) {
+            return;
+        }
+        let link = read_entries(&dir).unwrap().into_iter().find(|e| e.name == "link").unwrap();
+        assert!(!link.is_dir);
+        assert!(link.modified.is_some(), "the link's own date");
     }
 
     #[test]
