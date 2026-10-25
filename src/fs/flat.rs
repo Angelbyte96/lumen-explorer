@@ -2,7 +2,7 @@
 //! everything inside some folders, all the way down, read on a background
 //! thread because a big tree can take seconds to walk.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
@@ -32,16 +32,13 @@ pub fn walk(roots: &[PathBuf], cancel: &AtomicBool) -> Option<Walk> {
         if cancel.load(Ordering::Relaxed) {
             return None;
         }
-        let Ok(entries) = super::lister::read_entries(&dir) else { continue };
-        pending.extend(entries.iter().filter(|e| e.is_dir && !is_link(&e.path)).map(|e| e.path.clone()).rev());
-        found.extend(entries);
+        let Ok(mut read) = super::lister::read_folder(&dir) else { continue };
+        read.sort_by_cached_key(|f| (!f.entry.is_dir, f.entry.name.to_lowercase()));
+        pending.extend(read.iter().filter(|f| f.entry.is_dir && !f.link).map(|f| f.entry.path.clone()).rev());
+        found.extend(read.into_iter().map(|f| f.entry));
         folders.push(dir);
     }
     (!cancel.load(Ordering::Relaxed)).then_some(Walk { found, folders })
-}
-
-fn is_link(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 /// A walk running on its own thread. Dropping it cancels the walk.
@@ -83,6 +80,7 @@ impl Drop for Flattener {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use crate::fs::ops::tests::fresh_fixture;
     use std::fs;
 
