@@ -80,6 +80,7 @@ Maintainer: Angelbyte96 <108975993+Angelbyte96@users.noreply.github.com>
 Installed-Size: $size
 Depends: $linked, $loaded
 Recommends: xdg-utils, poppler-utils, libglib2.0-bin
+Suggests: ffmpeg
 Section: utils
 Priority: optional
 Homepage: https://github.com/Angelbyte96/lumen-explorer
