@@ -1389,6 +1389,9 @@ pub struct LumenApp {
     /// The cells' lines as last drawn, in views laid out in lines (Icons);
     /// the arrows move through them.
     grid: Option<ui::grid::GridShape>,
+    /// When (egui time, seconds) a click on a grey folder opened its folder,
+    /// so the second click of a double click there opens nothing.
+    folder_opened_at: Option<f64>,
     /// The view last drawn and when (egui time, seconds) the list started
     /// showing it: a new view fades in for `VIEW_FADE`.
     shown_layout: (ui::view_size::Layout, f64),
@@ -1493,6 +1496,7 @@ impl LumenApp {
             default_look: Look::default(),
             folder_views: FolderViews::default(),
             grid: None,
+            folder_opened_at: None,
             shown_layout: (ui::view_size::Layout::Details, f64::NEG_INFINITY),
             columns: ui::file_list::DEFAULT_WIDTHS,
             shown_columns: ui::file_list::ALL_SHOWN,
@@ -1887,11 +1891,18 @@ impl LumenApp {
             Some(ListEvent::Extend(i)) => self.tab.view.extend_to(i),
             Some(ListEvent::Band { start, end, add }) => self.tab.view.select_band(start, end, add),
             Some(ListEvent::Cells { cells, cursor, add }) => self.tab.view.select_cells(&cells, cursor, add),
+            // egui counts any click soon after another as a double click: the
+            // second click of one on a grey folder lands on a row of the folder
+            // it opened, which must not open.
+            Some(ListEvent::Activate(_)) if self.ends_open_folder_click(ctx) => {}
             Some(ListEvent::Activate(i)) => {
                 self.tab.view.select_row(i);
                 self.activate_selected(ctx);
             }
-            Some(ListEvent::OpenFolder(i)) => self.open_folder_of(ctx, i),
+            Some(ListEvent::OpenFolder(i)) => {
+                self.folder_opened_at = Some(ctx.input(|i| i.time));
+                self.open_folder_of(ctx, i);
+            }
             Some(ListEvent::Sort(column)) => self.tab.view.sort_by(column),
             Some(ListEvent::Resized(widths)) => self.columns = widths,
             Some(ListEvent::Fit(column)) => self.run_command(ctx, Command::FitColumn(column)),
@@ -2020,6 +2031,14 @@ impl LumenApp {
     }
 
     /// Flattened, opens the folder row `row` is in, with that row selected.
+    /// Whether a double click now is the grey folder's click followed by a
+    /// second one, by egui's own double click delay.
+    fn ends_open_folder_click(&mut self, ctx: &egui::Context) -> bool {
+        let Some(at) = self.folder_opened_at.take() else { return false };
+        let delay = ctx.options(|o| o.input_options.max_double_click_delay);
+        ctx.input(|i| i.time) - at < delay
+    }
+
     fn open_folder_of(&mut self, ctx: &egui::Context, row: usize) {
         let Some(&index) = self.tab.view.rows.get(row) else { return };
         let entry = self.tab.view.entry(index);
@@ -4169,6 +4188,34 @@ mod tests {
         assert_eq!(app.tab.view.selected_entry().map(|e| e.name.as_str()), Some("d.txt"), "the row it came from is selected");
         app.handle_action(&ctx, Action::Back);
         assert_eq!(app.tab.lister.last_requested(), Some(dir), "Back returns");
+    }
+
+    /// A frame at egui time `time`, so what the app reads from `ctx.input` moves on.
+    fn frame_at(ctx: &egui::Context, time: f64) {
+        ctx.run_ui(egui::RawInput { time: Some(time), ..egui::RawInput::default() }, |_| {}).drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn the_second_click_of_a_double_click_on_a_grey_folder_opens_nothing_there() {
+        let (ctx, mut app, dir) = app_in("app-flat-open-folder-double");
+        std::fs::create_dir_all(dir.join("sub/deeper/inner")).unwrap();
+        std::fs::write(dir.join("sub/deeper/d.txt"), "D").unwrap();
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        let row = app.tab.view.rows.iter().position(|&i| app.tab.view.entry(i).name == "d.txt").unwrap();
+        frame_at(&ctx, 10.0);
+        app.handle_list(&ctx, Some(ListEvent::OpenFolder(row)));
+        land(&mut app);
+        let inner = app.tab.view.rows.iter().position(|&i| app.tab.view.entry(i).name == "inner").unwrap();
+        // The second click lands on another row of the folder just opened.
+        frame_at(&ctx, 10.2);
+        app.handle_list(&ctx, Some(ListEvent::Activate(inner)));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub/deeper")), "nothing else opened");
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.name.as_str()), Some("d.txt"), "the cursor stays on the row it came from");
+        // A double click of its own, later, opens the row as ever.
+        frame_at(&ctx, 11.0);
+        app.handle_list(&ctx, Some(ListEvent::Activate(inner)));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub/deeper/inner")), "a later double click opens it");
     }
 
     #[test]
