@@ -160,12 +160,14 @@ struct Scope {
     trees: Vec<PathBuf>,
     /// Whether that order gave up on its folders, until taken.
     refused: bool,
+    /// Whether that order's folder itself could not be watched (gone, no permission).
+    lost: bool,
 }
 
 impl Scope {
     fn new(generation: u64, path: Option<&Path>, plan: &Plan) -> Self {
         let (folders, trees) = (plan.alone.iter().cloned().collect(), plan.trees.clone());
-        Self { generation, path: path.map(Path::to_path_buf), folders, trees, refused: false }
+        Self { generation, path: path.map(Path::to_path_buf), folders, trees, refused: false, lost: false }
     }
 
     /// Whether a change at `path` is in a folder watched (or one of them).
@@ -266,7 +268,10 @@ impl Watcher {
     /// More than [`WATCH_LIMIT`] folders, or the system's watches running
     /// out, and nothing is watched: [`Watcher::take_refused`] says so.
     pub fn watch(&mut self, path: &Path, folders: &[PathBuf]) {
-        if self.watched.as_deref() == Some(path) && folders.is_empty() && self.folders.is_empty() {
+        // The folder could not be watched last time: it may be by now.
+        if self.watched.as_deref() == Some(path) && lock(&self.scope).lost {
+            self.ordered = None;
+        } else if self.watched.as_deref() == Some(path) && folders.is_empty() && self.folders.is_empty() {
             return;
         }
         // A marker (This PC, the Recycle Bin) is no folder, and as a relative path it could name one.
@@ -461,6 +466,10 @@ fn run(orders: Receiver<Order>, mut inner: impl notify::Watcher, scope: &Mutex<S
             // The folder is gone (or this is `forget`): nothing of it stays watched.
             for old in registered.drain() {
                 let _ = inner.unwatch(&old);
+            }
+            let mut scope = lock(scope);
+            if order.path.is_some() && scope.generation == order.generation {
+                scope.lost = true;
             }
         }
         *lock(&probe.applied) = order.generation;
@@ -945,6 +954,50 @@ mod tests {
         w.watch(&dir.join("gone"), &[]);
         w.settle();
         assert!(!w.take_changed());
+    }
+
+    #[test]
+    fn a_folder_that_could_not_be_watched_is_tried_again_by_the_next_watch() {
+        let dir = fresh_fixture("watch-root-retry");
+        let open = dir.join("open");
+        let (mut w, _woke) = watcher();
+        w.watch(&open, &[]);
+        w.settle();
+        std::fs::create_dir(&open).unwrap();
+        // F5 lists the folder again, then watches it as `apply` does.
+        w.watch(&open, &[]);
+        w.settle();
+        std::fs::write(open.join("x"), "").unwrap();
+        assert!(eventually(|| w.take_changed()), "watched once it could be");
+    }
+
+    #[test]
+    fn a_flattened_folder_that_could_not_be_watched_is_tried_again_too() {
+        let dir = fresh_fixture("watch-root-retry-flat");
+        let open = dir.join("open");
+        let folders = [open.join("a")];
+        let (mut w, _woke) = watcher();
+        w.watch(&open, &folders);
+        w.settle();
+        std::fs::create_dir_all(open.join("a")).unwrap();
+        w.watch(&open, &folders);
+        w.settle();
+        std::fs::write(open.join("a/x"), "").unwrap();
+        assert!(eventually(|| w.take_changed()), "the same plan is ordered again");
+    }
+
+    /// Polls `done` for up to two seconds: news arrive when the system delivers them.
+    fn eventually(mut done: impl FnMut() -> bool) -> bool {
+        let end = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if done() {
+                return true;
+            }
+            if std::time::Instant::now() > end {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
