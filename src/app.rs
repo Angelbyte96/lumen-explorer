@@ -11,7 +11,7 @@ use crate::config::{Config, Settings};
 use crate::folder_views::{FolderViews, Look};
 use crate::fs::count::{Count, Totals};
 use crate::fs::index::Crawler;
-use crate::fs::watch::Watcher;
+use crate::fs::watch::{News, Watcher};
 use crate::fs::{self, Entry, Lister, Listing, Readers};
 use crate::input::{self, Action, Confirm};
 use crate::menu::Command;
@@ -696,6 +696,52 @@ impl View {
         self.selected = keep.and_then(|path| self.row_of_path(&path)).or_else(|| Some(row?.min(last?)));
     }
 
+    /// Shows what a re-read found: the folders read again hold what they
+    /// held now, what a gone folder held leaves, what the folders that
+    /// appeared hold comes in. `select` is an entry to land on (e.g. one
+    /// just renamed); without it, or when it is not listed, the cursor stays on
+    /// its entry, or on its row when that is gone.
+    pub fn apply_reread(&mut self, reread: fs::flat::Reread, select: Option<&Path>) {
+        let keep = self.selected_entry().map(|e| e.path.clone());
+        let row = self.selected;
+        let fs::flat::Reread { folders, gone, walked, .. } = reread;
+        // The folder shown keeps its entries apart; the rest is what the walk found.
+        let roots = self.flat.clone();
+        let inside = |folder: &Path| roots.iter().any(|root| folder.starts_with(root));
+        let listed: HashSet<PathBuf> = folders.iter().map(|(folder, _)| folder).filter(|folder| inside(folder)).cloned().collect();
+        // A gone folder stays in the one holding it, until that one is read.
+        self.flat_found.retain(|e| {
+            let in_read = e.path.parent().is_some_and(|folder| listed.contains(folder));
+            !in_read && !gone.iter().any(|folder| e.path != *folder && e.path.starts_with(folder))
+        });
+        let mut found = walked.found;
+        for (folder, entries) in folders {
+            match (folder == self.current, inside(&folder)) {
+                (true, true) => {
+                    found.extend(entries.iter().cloned());
+                    self.entries = entries;
+                }
+                (true, false) => self.entries = entries,
+                (false, _) => found.extend(entries),
+            }
+        }
+        self.flat_found.extend(found);
+        self.rebuild_rows(None);
+        let hidden = select.is_some_and(|path| {
+            self.row_of_path(path).is_none() && path.parent() == Some(self.current.as_path()) && self.entries.iter().any(|e| e.path == path)
+        });
+        if hidden && !self.filter.is_empty() {
+            self.filter.clear();
+            self.rebuild_rows(None);
+        }
+        let last = self.rows.len().checked_sub(1);
+        let landed = select.and_then(|path| self.row_of_path(path));
+        self.selected = landed.or_else(|| keep.and_then(|path| self.row_of_path(&path))).or_else(|| Some(row?.min(last?)));
+        if landed.is_some() {
+            self.scroll = Some(Scroll::Smooth);
+        }
+    }
+
     /// Flattened, the folder an entry from a subfolder is in, relative to
     /// the one shown ("src > util"); `None` for the folder's own entries.
     pub fn relative_parent(&self, entry: &Entry) -> Option<String> {
@@ -950,25 +996,46 @@ fn expire(text: &mut Option<String>, shown: &mut Option<(String, Instant)>, now:
     Some(left)
 }
 
-/// Schedules the reload that follows changes on disk.
+/// Schedules the reload that follows changes on disk, with what changed.
 #[derive(Default)]
 pub struct RefreshTimer {
     due: Option<Instant>,
+    news: Option<News>,
 }
 
 impl RefreshTimer {
-    /// A change happened; reload at most `REFRESH_DELAY` after the first one.
-    pub fn note_change(&mut self, now: Instant) {
+    /// `news` happened; reload at most `REFRESH_DELAY` after the first one.
+    /// The news wait together: everything wins, and so do too many folders.
+    pub fn note_news(&mut self, now: Instant, news: News) {
         self.due.get_or_insert(now + REFRESH_DELAY);
+        let news = match (self.news.take(), news) {
+            (Some(News::Folders { folders: mut kept, touched: mut kept_touched }), News::Folders { folders, touched }) => {
+                kept.extend(folders);
+                kept_touched.extend(touched);
+                News::Folders { folders: kept, touched: kept_touched }
+            }
+            (None, news) => news,
+            _ => News::All,
+        };
+        self.news = Some(match news {
+            News::Folders { folders, touched } if folders.len().max(touched.len()) > fs::watch::NEWS_LIMIT => News::All,
+            news => news,
+        });
     }
 
-    /// Whether it is time to reload; clears the schedule when it is.
-    pub fn take_due(&mut self, now: Instant) -> bool {
-        let due = self.due.is_some_and(|at| now >= at);
-        if due {
-            self.due = None;
+    /// `news` is Lumen's own doing, which shows without the delay.
+    pub fn note_now(&mut self, now: Instant, news: News) {
+        self.note_news(now, news);
+        self.due = Some(self.due.map_or(now, |at| at.min(now)));
+    }
+
+    /// What changed, if it is time to reload; clears the schedule when it is.
+    pub fn take_due(&mut self, now: Instant) -> Option<News> {
+        if !self.due.is_some_and(|at| now >= at) {
+            return None;
         }
-        due
+        self.due = None;
+        self.news.take()
     }
 
     /// How long until the scheduled reload, to wake the UI then.
@@ -1236,6 +1303,20 @@ pub struct Tab {
     flattener: Option<fs::flat::Flattener>,
     /// The flattened view needs a walk (Ctrl+E, a reload): started next frame.
     flat_due: bool,
+    /// The folders the last walk (or re-read) listed, in the flattened view.
+    flat_folders: Vec<PathBuf>,
+    /// Reads again the folders of a flattened view that changed; `None` once it landed.
+    refresher: Option<fs::flat::Refresher>,
+    /// The flattened view's folders are not watched (too many, or the system
+    /// refused): it does not follow changes by itself.
+    flat_refused: bool,
+    /// Entry to select once the re-read lands (Lumen's own rename, new file...).
+    reread_select: Option<PathBuf>,
+    /// How many operations of Lumen's own asked for a re-read of the flattened view.
+    own_ops: u64,
+    /// `own_ops` when the re-read running began: one that began before the
+    /// last operation may not show what it did, so it settles nothing.
+    reread_gen: u64,
     /// Id of the listing currently on screen (or the last one that failed).
     shown_id: u64,
     /// Entry to select once the pending listing arrives, by name.
@@ -1274,6 +1355,12 @@ impl Tab {
             readers: Readers::new(),
             flattener: None,
             flat_due: false,
+            flat_folders: Vec::new(),
+            refresher: None,
+            flat_refused: false,
+            reread_select: None,
+            own_ops: 0,
+            reread_gen: 0,
             shown_id: 0,
             select_after_load: None,
             select_path_after_load: None,
@@ -2383,6 +2470,22 @@ impl LumenApp {
         self.tab.select_path_after_load = select;
     }
 
+    /// Lists the open folder again after an operation of Lumen's own changed
+    /// the folders `touched` are in (and the folder itself); `select` is the
+    /// entry to land on. A flattened view only reads those folders again, and
+    /// the one `select` is in, at once; the watcher's news join them later.
+    fn reload_changed(&mut self, ctx: &egui::Context, select: Option<PathBuf>, left: &[PathBuf], made: &[PathBuf]) {
+        if !self.tab.view.is_flat() || self.tab.flat_refused {
+            return self.reload(ctx, select);
+        }
+        let folders = left.iter().chain(made).chain(&select).filter_map(|path| path.parent()).chain([self.tab.view.current.as_path()]);
+        let news = News::Folders { folders: folders.map(Path::to_path_buf).collect(), touched: made.iter().cloned().collect() };
+        self.tab.reread_select = select;
+        self.tab.own_ops += 1;
+        self.refresh.note_now(Instant::now(), news);
+        ctx.request_repaint();
+    }
+
     fn ask_trash(&mut self) {
         if let Some((paths, select, subject)) = self.removable_selection() {
             self.dialog = Some(Dialog::Trash { paths, select, subject });
@@ -2425,15 +2528,16 @@ impl LumenApp {
         select: Option<PathBuf>,
         remove: fn(&Path) -> Result<(), String>,
     ) {
+        let touched = paths.clone();
         for path in paths {
             if let Err(err) = remove(&path) {
                 self.tab.error_after_load = Some(err);
-                self.reload(ctx, Some(path));
+                self.reload_changed(ctx, Some(path), &touched, &[]);
                 return;
             }
             self.path_popup.mark_stale();
         }
-        self.reload(ctx, select);
+        self.reload_changed(ctx, select, &touched, &[]);
     }
 
     fn start_rename(&mut self) {
@@ -2450,7 +2554,7 @@ impl LumenApp {
             Ok(path) => {
                 self.path_popup.mark_stale();
                 self.tab.rename_after_load = Some(path.clone());
-                self.reload(ctx, Some(path));
+                self.reload_changed(ctx, Some(path.clone()), &[], &[path]);
             }
             Err(err) => self.tab.view.error = Some(err),
         }
@@ -2464,7 +2568,7 @@ impl LumenApp {
             Ok(path) => {
                 self.path_popup.mark_stale();
                 self.tab.rename_after_load = Some(path.clone());
-                self.reload(ctx, Some(path));
+                self.reload_changed(ctx, Some(path.clone()), &[], &[path]);
             }
             Err(err) => self.tab.view.error = Some(err),
         }
@@ -2476,7 +2580,7 @@ impl LumenApp {
             Ok(Renamed::To(renamed)) => {
                 self.path_popup.mark_stale();
                 self.tab.view.error = None;
-                self.reload(ctx, Some(renamed));
+                self.reload_changed(ctx, Some(renamed.clone()), &[edit.path], &[renamed]);
             }
             Ok(Renamed::Unchanged) => {}
             Ok(Renamed::TargetExists) => self.dialog = Some(Dialog::Replace(edit)),
@@ -2485,8 +2589,9 @@ impl LumenApp {
                 let keep = self.tab.view.selected_entry().map(|e| e.path.clone());
                 self.tab.error_after_load = Some(err);
                 edit.focus = true;
+                let touched = [edit.path.clone()];
                 self.rename = Some(edit);
-                self.reload(ctx, keep);
+                self.reload_changed(ctx, keep, &touched, &[]);
             }
         }
     }
@@ -2659,11 +2764,13 @@ impl LumenApp {
             }
             return;
         }
+        // What moved left its folder, and what landed is in the folder pasted into.
+        let landed: Vec<PathBuf> = batch.landed.iter().cloned().collect();
         let select = match batch.landed {
             Some(target) if target.parent() == Some(self.tab.view.current.as_path()) => Some(target),
             _ => self.tab.view.selected_entry().map(|e| e.path.clone()),
         };
-        self.reload(ctx, select);
+        self.reload_changed(ctx, select, &batch.sources, &landed);
     }
 
     fn start_job(
@@ -2990,6 +3097,11 @@ impl LumenApp {
         }
         self.tab.history.settle(self.tab.pending_nav, &from, to.as_deref());
         if to.is_some() {
+            // This listing replaces what a re-read running would show.
+            self.tab.refresher = None;
+            if to.as_deref() != Some(from.as_path()) {
+                self.tab.reread_select = None;
+            }
             // Opening the Recycle Bin again, even from itself, reads the bins again.
             self.recycle_stale |= self.on_recycle_bin();
             if self.tab.view.is_flat() {
@@ -3002,6 +3114,7 @@ impl LumenApp {
             self.tab.flat_due = self.tab.view.is_flat();
             if !self.tab.flat_due {
                 self.tab.flattener = None;
+                self.tab.flat_folders.clear();
             }
             if self.tab.pending_nav != NavKind::Refresh && !self.on_marker() {
                 self.recents.visit(&self.tab.view.current);
@@ -3011,6 +3124,12 @@ impl LumenApp {
             // The open folder is gone; watch it afresh if it comes back.
             self.watcher.forget();
         }
+        self.settle_load();
+    }
+
+    /// Settles what waited for a listing or a re-read: an error to tell, the
+    /// edit of an entry that is gone, a new entry to rename.
+    fn settle_load(&mut self) {
         if let Some(err) = self.tab.error_after_load.take() {
             self.tab.view.error = Some(err);
         }
@@ -3043,6 +3162,8 @@ impl LumenApp {
             return;
         }
         let ctx = ctx.clone();
+        // The walk reads everything: a re-read running is of no use.
+        self.tab.refresher = None;
         // Replacing an earlier walk drops it, which cancels it.
         self.tab.flattener = Some(fs::flat::Flattener::start(self.tab.view.flat_roots().to_vec(), move || ctx.request_repaint()));
     }
@@ -3054,14 +3175,109 @@ impl LumenApp {
 
     /// Stops the running flatten walk; the folder is listed alone again.
     /// `false` when there was none.
-    fn cancel_flat(&mut self) -> bool {
+    fn cancel_flat(&mut self, ctx: &egui::Context) -> bool {
         if self.tab.flattener.take().is_none() {
             return false;
         }
         self.tab.view.clear_flat();
         self.tab.flat_due = false;
+        self.tab.flat_folders.clear();
         self.watcher.watch(&self.tab.view.current, &[]);
+        self.reload_pending_select(ctx);
         true
+    }
+
+    /// The view is flattened no more: an operation of Lumen's own made
+    /// meanwhile waits to land on its entry (and to be renamed, or its error
+    /// told). The listing of the folder alone does that, and reads whatever
+    /// the news told as well.
+    fn reload_pending_select(&mut self, ctx: &egui::Context) {
+        if let Some(select) = self.tab.reread_select.take() {
+            self.refresh = RefreshTimer::default();
+            self.reload(ctx, Some(select));
+        }
+    }
+
+    /// Starts reading again, in the background, the folders of a flattened
+    /// view that `changed`. Only the ones the view lists count (what is in a
+    /// new folder is walked with the folder holding it).
+    fn start_reread(&mut self, ctx: &egui::Context, changed: &HashSet<PathBuf>, touched: &HashSet<PathBuf>) {
+        let view = &self.tab.view;
+        let listed: HashSet<&Path> = self.tab.flat_folders.iter().map(PathBuf::as_path).collect();
+        let mut asked: HashMap<&Path, HashSet<PathBuf>> = changed
+            .iter()
+            .filter(|folder| **folder == view.current || listed.contains(folder.as_path()))
+            .map(|folder| (folder.as_path(), HashSet::new()))
+            .collect();
+        // What each held: the folders of the view directly inside it.
+        for folder in &self.tab.flat_folders {
+            if let Some(held) = folder.parent().and_then(|up| asked.get_mut(up)) {
+                held.insert(folder.clone());
+            }
+        }
+        if asked.is_empty() {
+            return;
+        }
+        let mut folders: Vec<(PathBuf, HashSet<PathBuf>)> = asked.into_iter().map(|(folder, held)| (folder.to_path_buf(), held)).collect();
+        folders.sort_by(|a, b| a.0.cmp(&b.0));
+        let (roots, current, ctx) = (view.flat_roots().to_vec(), view.current.clone(), ctx.clone());
+        self.tab.reread_gen = self.tab.own_ops;
+        self.tab.refresher = Some(fs::flat::Refresher::start(roots, current, folders, touched.clone(), move || ctx.request_repaint()));
+    }
+
+    /// Drops the re-read running. What it was reading is not shown yet, so
+    /// its folders wait for the next one (a reload, if the view is no longer flattened).
+    fn requeue_reread(&mut self) {
+        if let Some(refresher) = self.tab.refresher.take() {
+            let (folders, touched) = (refresher.folders().iter().cloned().collect(), refresher.touched().clone());
+            self.refresh.note_news(Instant::now(), News::Folders { folders, touched });
+        }
+    }
+
+    /// Shows what the re-read of a flattened view's folders found, once it is done.
+    fn poll_reread(&mut self) {
+        let Some((roots, current, reread)) = self.tab.refresher.as_ref().and_then(fs::flat::Refresher::poll) else { return };
+        self.tab.refresher = None;
+        // One that began before an operation of Lumen's own shows nothing of it.
+        let own = self.tab.reread_gen >= self.tab.own_ops;
+        if roots != self.tab.view.flat_roots() || current != self.tab.view.current {
+            return;
+        }
+        // The open folder cannot be read: a reload tells why.
+        if reread.gone.contains(&current) {
+            self.refresh.note_news(Instant::now(), News::All);
+            return;
+        }
+        let folders_changed = !reread.gone.is_empty() || !reread.walked.folders.is_empty();
+        // A folder made anew under its name lost its watch (inotify drops it with the old one).
+        if !reread.replaced.is_empty() {
+            self.watcher.renew();
+        }
+        reread.update_folders(&mut self.tab.flat_folders);
+        self.tab.view.apply_reread(reread, self.tab.reread_select.as_deref().filter(|_| own));
+        // Kept until a re-read lists it (the folder it is in may be read later).
+        if own && self.tab.reread_select.as_deref().is_some_and(|path| self.tab.view.lists(path)) {
+            self.tab.reread_select = None;
+        }
+        if folders_changed {
+            self.tab.flat_refused = false;
+            self.watcher.watch(&current, &self.tab.flat_folders);
+            self.check_refused();
+        }
+        if own {
+            self.settle_load();
+        }
+    }
+
+    /// An entry to select that waited for the view to be listed (an operation
+    /// of Lumen's own, and Ctrl+E before its re-read landed): selects it once
+    /// it is a row, and settles what waited with it.
+    fn land_pending_select(&mut self) {
+        let Some(row) = self.tab.reread_select.as_deref().and_then(|path| self.tab.view.row_of_path(path)) else { return };
+        self.tab.reread_select = None;
+        self.tab.view.select_row(row);
+        self.tab.view.scroll = Some(Scroll::Smooth);
+        self.settle_load();
     }
 
     /// Shows the flatten walk once it is done.
@@ -3072,8 +3288,13 @@ impl LumenApp {
                 return;
             }
             self.tab.view.apply_flat(&roots, walked.found);
-            // A change inside a folder listed reloads the view too.
-            self.watcher.watch(&self.tab.view.current, &walked.folders);
+            self.land_pending_select();
+            self.tab.flat_folders = walked.folders;
+            self.tab.flat_refused = false;
+            // A change inside a folder listed reads it again too. A walk reads
+            // everything anew: folders made anew under a name are watched again.
+            self.watcher.renew();
+            self.watcher.watch(&self.tab.view.current, &self.tab.flat_folders);
             self.check_refused();
         }
     }
@@ -3083,6 +3304,7 @@ impl LumenApp {
     fn check_refused(&mut self) {
         if self.watcher.take_refused() {
             self.notice = Some("Too many folders to watch: press F5 to refresh".into());
+            self.tab.flat_refused = true;
             self.refresh = RefreshTimer::default();
             self.watcher.take_changed();
         }
@@ -3090,7 +3312,7 @@ impl LumenApp {
 
     /// Ctrl+E: lists what the subfolders hold too, or the folder alone again.
     /// With folders picked, it lists or takes out what those hold alone.
-    fn toggle_flat(&mut self) {
+    fn toggle_flat(&mut self, ctx: &egui::Context) {
         if self.on_marker() {
             return;
         }
@@ -3104,8 +3326,15 @@ impl LumenApp {
             self.tab.view.set_flat(next);
             self.tab.flat_due = true;
         }
+        self.requeue_reread();
+        self.tab.flat_folders.clear();
+        self.tab.flat_refused = false;
         // The folder alone, until the walk tells the folders it lists.
         self.watcher.watch(&self.tab.view.current, &[]);
+        // Other folders listed: the walk and the re-read that follow land on the entry.
+        if !self.tab.view.is_flat() {
+            self.reload_pending_select(ctx);
+        }
     }
 
     /// Shows the unfolded folders the readers finished.
@@ -3118,25 +3347,47 @@ impl LumenApp {
     /// Lists the open folder again, keeping the selection and the sort order
     /// (a flattened view walks again once it lands). Never supersedes a
     /// navigation, nor restarts a flatten walk (a busy tree would never
-    /// finish): returns whether it listed.
+    /// finish): returns whether it listed. A re-read running is dropped: the
+    /// walk that follows reads everything.
     fn reload_if_idle(&mut self, ctx: &egui::Context) -> bool {
         if self.tab.lister.is_pending(self.tab.shown_id) || self.tab.flattener.is_some() {
             return false;
         }
+        self.tab.refresher = None;
         self.navigate_as(ctx, NavKind::Refresh, self.tab.view.current.clone(), None);
         true
     }
 
-    /// Reloads the open folder a moment after it changed on disk.
+    /// Brings the open folder up to date after `news`: a flattened view reads
+    /// again only the folders that changed, in the background; anything else
+    /// lists the folder again. `false` when it has to wait for a listing, a
+    /// walk or a re-read in flight.
+    fn refresh_for(&mut self, ctx: &egui::Context, news: &News) -> bool {
+        match news {
+            News::Folders { folders: changed, touched } if self.tab.view.is_flat() && !self.tab.flat_refused => {
+                let tab = &self.tab;
+                if tab.lister.is_pending(tab.shown_id) || tab.flattener.is_some() || tab.flat_due || tab.refresher.is_some() {
+                    return false;
+                }
+                self.start_reread(ctx, changed, touched);
+                true
+            }
+            _ => self.reload_if_idle(ctx),
+        }
+    }
+
+    /// Brings the open folder up to date a moment after it changed on disk.
     fn refresh_if_changed(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         self.check_refused();
-        if self.watcher.take_changed() {
-            self.refresh.note_change(now);
+        if let Some(news) = self.watcher.take_news() {
+            self.refresh.note_news(now, news);
         }
-        if self.refresh.take_due(now) && !self.reload_if_idle(ctx) {
-            // Try again once the listing or the walk has landed.
-            self.refresh.note_change(now);
+        if let Some(news) = self.refresh.take_due(now)
+            && !self.refresh_for(ctx, &news)
+        {
+            // Try again once the listing, the walk or the re-read has landed.
+            self.refresh.note_news(now, news);
         }
         if let Some(wait) = self.refresh.wait(now) {
             ctx.request_repaint_after(wait);
@@ -3206,7 +3457,7 @@ impl LumenApp {
             Action::Cancel if self.on_recycle_bin() && self.tab.recycle.count() > 0 => self.tab.recycle.clear(),
             Action::FocusPathBar => self.path_popup.open(),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
-            Action::ToggleFlat => self.toggle_flat(),
+            Action::ToggleFlat => self.toggle_flat(ctx),
             // The drives or the bins are read again there, as the menu's Refresh does.
             Action::Reload if self.on_marker() => self.run_command(ctx, Command::Refresh),
             Action::Reload => {
@@ -3296,7 +3547,7 @@ impl LumenApp {
                     self.notice = Some("Calculation cancelled".into());
                     self.hold_absorbed = true;
                 }
-                if !self.hold_absorbed && self.cancel_flat() {
+                if !self.hold_absorbed && self.cancel_flat(ctx) {
                     self.notice = Some("Listing cancelled".into());
                     self.hold_absorbed = true;
                 }
@@ -3348,6 +3599,7 @@ impl eframe::App for LumenApp {
         self.poll_kids();
         self.read_kids(&ctx);
         self.poll_flat();
+        self.poll_reread();
         self.walk_flat(&ctx);
         if self.tab.flattener.is_some() {
             // The status island counts what the walk found so far.
@@ -4335,31 +4587,650 @@ mod tests {
         }
     }
 
-    /// End to end, as on screen: the watcher's news schedule the reload, the
-    /// reload walks again, and the new file deep down becomes a row.
-    #[test]
-    fn a_file_created_deep_inside_a_flattened_folder_shows_up_by_itself() {
-        let (ctx, mut app, dir) = app_in("app-flat-watch-e2e");
+    /// The names of the rows on screen.
+    fn listed(app: &LumenApp) -> Vec<String> {
+        app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i).name.clone()).collect()
+    }
+
+    /// Runs the frames that land the re-read of the flattened view's folders.
+    fn land_reread(app: &mut LumenApp) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.tab.refresher.is_some() {
+            assert!(Instant::now() < deadline, "the re-read never landed");
+            app.poll_reread();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// News of changes in `folders` and nothing made, removed or renamed in them by name.
+    fn in_folders(folders: impl Iterator<Item = PathBuf>) -> News {
+        News::Folders { folders: folders.collect(), touched: HashSet::new() }
+    }
+
+    /// `folders` changed on disk, and the frame that follows once the delay is over.
+    fn changed(ctx: &egui::Context, app: &mut LumenApp, folders: &[PathBuf]) {
+        app.refresh.note_news(Instant::now() - REFRESH_DELAY, in_folders(folders.iter().cloned()));
+        app.refresh_if_changed(ctx);
+    }
+
+    /// A flattened `app_in` folder with `sub/deeper/d.txt` too, and nothing pending.
+    fn flat_app(name: &str) -> (egui::Context, LumenApp, PathBuf) {
+        let (ctx, mut app, dir) = app_in(name);
         std::fs::create_dir(dir.join("sub/deeper")).unwrap();
+        std::fs::write(dir.join("sub/deeper/d.txt"), "D").unwrap();
         app.handle_action(&ctx, Action::ToggleFlat);
         land_flat(&ctx, &mut app);
         app.watcher.settle();
-        let names = |app: &LumenApp| app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i).name.clone()).collect::<Vec<_>>();
-        assert!(!names(&app).contains(&"new.txt".to_string()));
+        app.watcher.take_news();
+        (ctx, app, dir)
+    }
+
+    /// Nothing walked the whole tree: no listing and no flatten walk is in flight or due.
+    fn assert_no_full_walk(app: &LumenApp) {
+        assert!(!app.tab.lister.is_pending(app.tab.shown_id), "no reload of the folder");
+        assert!(app.tab.flattener.is_none() && !app.tab.flat_due, "no walk of the tree");
+    }
+
+    /// End to end, as on screen: the watcher's news schedule the re-read of
+    /// the folder, and the new file deep down becomes a row, with no walk.
+    #[test]
+    fn a_file_created_deep_inside_a_flattened_folder_shows_up_by_itself() {
+        let (ctx, mut app, dir) = flat_app("app-flat-watch-e2e");
+        assert!(!listed(&app).contains(&"new.txt".to_string()));
         std::fs::write(dir.join("sub/deeper/new.txt"), "N").unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !names(&app).contains(&"new.txt".to_string()) {
+        while !listed(&app).contains(&"new.txt".to_string()) {
             assert!(Instant::now() < deadline, "the flattened view never showed the new file");
             app.refresh_if_changed(&ctx);
-            if app.tab.lister.is_pending(app.tab.shown_id) {
-                land(&mut app);
-                land_flat(&ctx, &mut app);
-            }
+            app.poll_reread();
+            assert_no_full_walk(&app);
             std::thread::sleep(Duration::from_millis(20));
         }
         let row = app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i)).find(|e| e.name == "new.txt").unwrap().clone();
         assert_eq!(app.tab.view.relative_parent(&row).as_deref(), Some("sub > deeper"), "with its folder dimmed after it");
         assert!(app.tab.view.is_flat(), "still flattened after the reload");
+    }
+
+    #[test]
+    fn a_file_created_in_a_flattened_folder_shows_up_in_the_background_without_a_walk() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-new");
+        std::fs::write(dir.join("sub/deeper/new.txt"), "N").unwrap();
+        changed(&ctx, &mut app, &[dir.join("sub/deeper")]);
+        assert!(app.tab.refresher.is_some(), "read again on a thread of its own");
+        assert_no_full_walk(&app);
+        land_reread(&mut app);
+        assert!(listed(&app).contains(&"new.txt".to_string()));
+        assert_no_full_walk(&app);
+    }
+
+    #[test]
+    fn a_file_removed_from_a_flattened_folder_leaves_the_listing_without_a_walk() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-removed");
+        assert!(listed(&app).contains(&"d.txt".to_string()));
+        std::fs::remove_file(dir.join("sub/deeper/d.txt")).unwrap();
+        changed(&ctx, &mut app, &[dir.join("sub/deeper")]);
+        land_reread(&mut app);
+        assert!(!listed(&app).contains(&"d.txt".to_string()));
+        assert!(listed(&app).contains(&"deeper".to_string()));
+        assert_no_full_walk(&app);
+    }
+
+    #[test]
+    fn a_folder_that_appeared_is_walked_and_what_it_holds_is_listed() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-fresh");
+        std::fs::create_dir_all(dir.join("sub/fresh/more")).unwrap();
+        std::fs::write(dir.join("sub/fresh/more/y.txt"), "y").unwrap();
+        // Its own news come too, but it is not a folder of the view yet.
+        changed(&ctx, &mut app, &[dir.join("sub"), dir.join("sub/fresh"), dir.join("sub/fresh/more")]);
+        land_reread(&mut app);
+        let names = listed(&app);
+        assert!(names.contains(&"fresh".to_string()) && names.contains(&"more".to_string()) && names.contains(&"y.txt".to_string()), "{names:?}");
+        assert_no_full_walk(&app);
+        // And it is a folder of the view now: a change in it is read again.
+        std::fs::write(dir.join("sub/fresh/more/z.txt"), "z").unwrap();
+        changed(&ctx, &mut app, &[dir.join("sub/fresh/more")]);
+        land_reread(&mut app);
+        assert!(listed(&app).contains(&"z.txt".to_string()));
+    }
+
+    #[test]
+    fn what_a_folder_that_disappeared_held_leaves_the_listing() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-gone");
+        std::fs::remove_dir_all(dir.join("sub/deeper")).unwrap();
+        changed(&ctx, &mut app, &[dir.join("sub")]);
+        land_reread(&mut app);
+        let names = listed(&app);
+        assert!(!names.contains(&"deeper".to_string()) && !names.contains(&"d.txt".to_string()), "{names:?}");
+        assert_no_full_walk(&app);
+        // Made anew, it is a folder that appeared: walked again.
+        std::fs::create_dir(dir.join("sub/deeper")).unwrap();
+        changed(&ctx, &mut app, &[dir.join("sub")]);
+        land_reread(&mut app);
+        assert!(listed(&app).contains(&"deeper".to_string()), "made anew");
+    }
+
+    #[test]
+    fn a_change_in_a_folder_the_view_does_not_list_reads_nothing() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-unknown");
+        changed(&ctx, &mut app, &[dir.parent().unwrap().to_path_buf(), dir.join("nowhere")]);
+        assert!(app.tab.refresher.is_none());
+        assert_no_full_walk(&app);
+    }
+
+    #[test]
+    fn a_reread_keeps_the_selection_the_filter_and_the_picks_of_the_view() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-keeps");
+        for c in ".txt".chars() {
+            app.tab.view.push_filter(c);
+        }
+        let row = app.tab.view.rows.iter().position(|&i| app.tab.view.entry(i).name == "b.txt").unwrap();
+        app.tab.view.select_row(row);
+        std::fs::write(dir.join("sub/deeper/0.txt"), "0").unwrap();
+        changed(&ctx, &mut app, &[dir.join("sub/deeper")]);
+        land_reread(&mut app);
+        assert_eq!(app.tab.view.filter(), ".txt");
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.name.as_str()), Some("b.txt"));
+        assert!(listed(&app).contains(&"0.txt".to_string()));
+    }
+
+    #[test]
+    fn lumens_own_rename_in_a_flattened_view_lands_on_the_renamed_entry_without_a_walk() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-rename");
+        let old = dir.join("sub/deeper/d.txt");
+        let row = app.tab.view.rows.iter().position(|&i| app.tab.view.entry(i).path == old).unwrap();
+        app.tab.view.select_row(row);
+        app.finish_rename(&ctx, RenameEdit::new(old.clone(), "renamed.txt", false), false);
+        assert_no_full_walk(&app);
+        // No wait for the delay: Lumen did it.
+        app.refresh_if_changed(&ctx);
+        assert!(app.tab.refresher.is_some(), "read again at once");
+        land_reread(&mut app);
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.path.clone()), Some(dir.join("sub/deeper/renamed.txt")));
+        assert!(!app.tab.view.lists(&old));
+        assert_no_full_walk(&app);
+        // The news the watcher brings after are read again all the same, and land on it too.
+        std::thread::sleep(Duration::from_millis(300));
+        app.refresh_if_changed(&ctx);
+        land_reread(&mut app);
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.name.as_str()), Some("renamed.txt"));
+        assert_no_full_walk(&app);
+    }
+
+    #[test]
+    fn the_entry_to_select_waits_for_the_reread_that_lists_it() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-select-waits");
+        let later = dir.join("sub/deeper/later.txt");
+        app.tab.reread_select = Some(later.clone());
+        std::fs::write(dir.join("sub/deeper/other.txt"), "O").unwrap();
+        changed(&ctx, &mut app, &[dir.join("sub")]);
+        land_reread(&mut app);
+        assert_eq!(app.tab.reread_select.as_ref(), Some(&later), "not listed yet: kept");
+        std::fs::write(&later, "L").unwrap();
+        changed(&ctx, &mut app, &[dir.join("sub/deeper")]);
+        land_reread(&mut app);
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.path.clone()), Some(later));
+        assert_eq!(app.tab.reread_select, None, "and done with");
+    }
+
+    #[test]
+    fn a_new_file_made_by_lumen_in_a_flattened_view_is_selected_and_renamed_without_a_walk() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-new-file");
+        app.new_file(&ctx, None);
+        assert_no_full_walk(&app);
+        app.refresh_if_changed(&ctx);
+        land_reread(&mut app);
+        let edit = app.rename.as_ref().expect("the new file is open for a name");
+        assert_eq!(edit.path.parent(), Some(dir.as_path()));
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.path.clone()), Some(edit.path.clone()));
+        assert!(app.tab.rename_after_load.is_none());
+        assert_no_full_walk(&app);
+    }
+
+    #[test]
+    fn a_new_folder_made_by_lumen_in_a_flattened_view_is_selected_and_renamed_without_a_walk() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-new-folder");
+        app.new_folder(&ctx);
+        assert_no_full_walk(&app);
+        app.refresh_if_changed(&ctx);
+        land_reread(&mut app);
+        let edit = app.rename.as_ref().expect("the new folder is open for a name");
+        assert_eq!(edit.path.parent(), Some(dir.as_path()));
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.path.clone()), Some(edit.path.clone()));
+        assert_no_full_walk(&app);
+    }
+
+    #[test]
+    fn entries_removed_by_lumen_from_a_flattened_view_leave_it_without_a_walk() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-remove");
+        let gone = dir.join("sub/deeper/d.txt");
+        app.remove_all(&ctx, vec![gone.clone(), dir.join("a.txt")], Some(dir.join("b.txt")), fs::ops::delete_forever);
+        assert_no_full_walk(&app);
+        app.refresh_if_changed(&ctx);
+        land_reread(&mut app);
+        assert!(!app.tab.view.lists(&gone) && !app.tab.view.lists(&dir.join("a.txt")));
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.name.as_str()), Some("b.txt"), "lands where it was told");
+        assert_no_full_walk(&app);
+    }
+
+    #[test]
+    fn a_failed_removal_in_a_flattened_view_tells_its_error_once_the_reread_lands() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-error");
+        let missing = dir.join("sub/deeper/missing.txt");
+        app.remove_all(&ctx, vec![missing], None, fs::ops::delete_forever);
+        assert!(app.tab.view.error.is_none(), "told once the view is read again");
+        app.refresh_if_changed(&ctx);
+        land_reread(&mut app);
+        assert!(app.tab.view.error.is_some());
+        assert!(app.tab.error_after_load.is_none());
+        assert_no_full_walk(&app);
+    }
+
+    #[test]
+    fn a_flattened_view_whose_folders_are_not_watched_reloads_after_lumens_own_changes() {
+        let (ctx, mut app, _dir) = flat_app("app-flat-reread-refused");
+        app.tab.flat_refused = true;
+        app.new_folder(&ctx);
+        assert!(app.tab.lister.is_pending(app.tab.shown_id), "as before: the folder is listed again");
+        assert!(app.tab.refresher.is_none());
+        land(&mut app);
+        assert!(app.tab.flat_due, "and walked again");
+    }
+
+    #[test]
+    fn a_folder_not_flattened_reloads_after_lumens_own_changes_as_before() {
+        let (ctx, mut app, _dir) = app_in("app-reread-not-flat");
+        app.new_folder(&ctx);
+        assert!(app.tab.lister.is_pending(app.tab.shown_id));
+        assert!(app.tab.refresher.is_none());
+        land(&mut app);
+        assert!(app.rename.is_some(), "the new folder is open for a name");
+        assert!(!app.tab.flat_due);
+    }
+
+    #[test]
+    fn a_folder_not_flattened_reloads_after_a_change_on_disk_as_before() {
+        let (ctx, mut app, dir) = app_in("app-reread-not-flat-news");
+        changed(&ctx, &mut app, std::slice::from_ref(&dir));
+        assert!(app.tab.lister.is_pending(app.tab.shown_id));
+        assert!(app.tab.refresher.is_none());
+    }
+
+    #[test]
+    fn news_of_everything_walk_the_whole_flattened_tree_again() {
+        let (ctx, mut app, _dir) = flat_app("app-flat-reread-all");
+        app.refresh.note_news(Instant::now() - REFRESH_DELAY, News::All);
+        app.refresh_if_changed(&ctx);
+        assert!(app.tab.lister.is_pending(app.tab.shown_id), "the folder is listed again");
+        assert!(app.tab.refresher.is_none());
+        land(&mut app);
+        land_flat(&ctx, &mut app);
+        assert!(listed(&app).contains(&"d.txt".to_string()), "walked again");
+    }
+
+    #[test]
+    fn news_of_too_many_folders_walk_the_whole_flattened_tree_again() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-many");
+        let folders: Vec<PathBuf> = (0..=fs::watch::NEWS_LIMIT).map(|i| dir.join(format!("sub/d{i}"))).collect();
+        changed(&ctx, &mut app, &folders);
+        assert!(app.tab.lister.is_pending(app.tab.shown_id));
+        assert!(app.tab.refresher.is_none());
+    }
+
+    #[test]
+    fn f5_walks_the_whole_flattened_tree_again() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-f5");
+        std::fs::write(dir.join("sub/deeper/new.txt"), "N").unwrap();
+        app.handle_action(&ctx, Action::Reload);
+        assert!(app.tab.lister.is_pending(app.tab.shown_id));
+        land(&mut app);
+        land_flat(&ctx, &mut app);
+        assert!(listed(&app).contains(&"new.txt".to_string()));
+    }
+
+    #[test]
+    fn the_menus_refresh_walks_the_whole_flattened_tree_again() {
+        let (ctx, mut app, _dir) = flat_app("app-flat-reread-refresh");
+        app.run_command(&ctx, Command::Refresh);
+        assert!(app.tab.lister.is_pending(app.tab.shown_id));
+        land(&mut app);
+        assert!(app.tab.flat_due);
+    }
+
+    #[test]
+    fn f5_drops_a_reread_running() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-f5-running");
+        changed(&ctx, &mut app, &[dir.join("sub")]);
+        assert!(app.tab.refresher.is_some());
+        app.handle_action(&ctx, Action::Reload);
+        assert!(app.tab.refresher.is_none());
+        assert!(app.tab.lister.is_pending(app.tab.shown_id), "the whole tree is walked");
+    }
+
+    #[test]
+    fn ctrl_e_drops_a_reread_running() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-ctrl-e");
+        changed(&ctx, &mut app, &[dir.join("sub")]);
+        assert!(app.tab.refresher.is_some());
+        app.handle_action(&ctx, Action::ToggleFlat);
+        assert!(app.tab.refresher.is_none());
+        assert!(!app.tab.view.is_flat());
+    }
+
+    #[test]
+    fn opening_another_folder_drops_a_reread_running() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-navigate");
+        changed(&ctx, &mut app, &[dir.join("sub")]);
+        assert!(app.tab.refresher.is_some());
+        app.navigate(&ctx, dir.join("sub"), None);
+        land(&mut app);
+        assert!(app.tab.refresher.is_none());
+        assert!(!app.tab.view.is_flat());
+    }
+
+    #[test]
+    fn a_change_waits_while_a_reread_runs() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-busy");
+        changed(&ctx, &mut app, &[dir.join("sub")]);
+        let first = app.tab.refresher.is_some();
+        std::fs::write(dir.join("sub/deeper/later.txt"), "L").unwrap();
+        changed(&ctx, &mut app, &[dir.join("sub/deeper")]);
+        assert!(first && !app.tab.lister.is_pending(app.tab.shown_id), "no walk");
+        // Whatever the first re-read read, the second one lands too.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !listed(&app).contains(&"later.txt".to_string()) {
+            assert!(Instant::now() < deadline, "the change that waited was never read");
+            app.poll_reread();
+            std::thread::sleep(REFRESH_DELAY / 4);
+            app.refresh_if_changed(&ctx);
+        }
+        assert_no_full_walk(&app);
+    }
+
+    /// Lets the watcher deliver what it saw, then forgets it: the news of an
+    /// earlier change were taken already, as when a re-read started.
+    fn drain_news(app: &mut LumenApp) {
+        std::thread::sleep(Duration::from_millis(300));
+        app.watcher.take_news();
+    }
+
+    /// Runs the frames until `name` is a row, whatever it takes: a reload, a walk or a re-read.
+    fn wait_listed(ctx: &egui::Context, app: &mut LumenApp, name: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !listed(app).contains(&name.to_string()) {
+            assert!(Instant::now() < deadline, "{name} never showed up: {:?}", listed(app));
+            app.refresh_if_changed(ctx);
+            if app.tab.lister.is_pending(app.tab.shown_id) {
+                land(app);
+            }
+            app.walk_flat(ctx);
+            app.poll_flat();
+            app.poll_reread();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Runs the frames that follow, whatever they take (a reload, a walk, a re-read), until `done`.
+    fn run_until(ctx: &egui::Context, app: &mut LumenApp, what: &str, done: impl Fn(&LumenApp) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done(app) {
+            assert!(Instant::now() < deadline, "{what}: {:?}", listed(app));
+            app.refresh_if_changed(ctx);
+            if app.tab.lister.is_pending(app.tab.shown_id) {
+                land(app);
+            }
+            app.walk_flat(ctx);
+            app.poll_flat();
+            app.poll_reread();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// `folders` changed on disk, with `touched` made, removed or renamed in them.
+    fn changed_touching(ctx: &egui::Context, app: &mut LumenApp, folders: &[PathBuf], touched: &[PathBuf]) {
+        let news = News::Folders { folders: folders.iter().cloned().collect(), touched: touched.iter().cloned().collect() };
+        app.refresh.note_news(Instant::now() - REFRESH_DELAY, news);
+        app.refresh_if_changed(ctx);
+    }
+
+    /// An `app_in` folder with `sub/deeper/d.txt` and `sub/other/o.txt`, flattened and landed.
+    fn flat_app_with_two_folders(name: &str) -> (egui::Context, LumenApp, PathBuf) {
+        let (ctx, mut app, dir) = app_in(name);
+        std::fs::create_dir_all(dir.join("sub/deeper")).unwrap();
+        std::fs::create_dir_all(dir.join("sub/other")).unwrap();
+        std::fs::write(dir.join("sub/deeper/d.txt"), "D").unwrap();
+        std::fs::write(dir.join("sub/other/o.txt"), "O").unwrap();
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        app.watcher.settle();
+        app.watcher.take_news();
+        (ctx, app, dir)
+    }
+
+    #[test]
+    fn a_folder_replaced_by_another_of_the_same_name_shows_what_the_new_one_holds() {
+        let (ctx, mut app, dir) = flat_app_with_two_folders("app-flat-replaced");
+        let made_anew = app.watcher.generation();
+        std::fs::rename(dir.join("sub/deeper"), dir.join("sub/deeper.old")).unwrap();
+        std::fs::rename(dir.join("sub/other"), dir.join("sub/deeper")).unwrap();
+        run_until(&ctx, &mut app, "the folder made anew never showed what it holds", |app| app.tab.view.lists(&dir.join("sub/deeper/o.txt")) && app.tab.refresher.is_none());
+        assert!(!app.tab.view.lists(&dir.join("sub/deeper/d.txt")), "what the old one held left");
+        assert!(app.tab.view.lists(&dir.join("sub/deeper.old/d.txt")), "and is where it moved to");
+        assert!(!app.tab.view.lists(&dir.join("sub/other/o.txt")));
+        assert_no_full_walk(&app);
+        assert!(app.watcher.generation() > made_anew, "the folders are watched afresh");
+    }
+
+    #[test]
+    fn a_folder_removed_and_made_anew_shows_what_the_new_one_holds() {
+        let (ctx, mut app, dir) = flat_app_with_two_folders("app-flat-replaced-rm");
+        std::fs::remove_dir_all(dir.join("sub/deeper")).unwrap();
+        std::fs::create_dir(dir.join("sub/deeper")).unwrap();
+        std::fs::write(dir.join("sub/deeper/n.txt"), "N").unwrap();
+        run_until(&ctx, &mut app, "the folder made anew never showed what it holds", |app| app.tab.view.lists(&dir.join("sub/deeper/n.txt")) && app.tab.refresher.is_none());
+        assert!(!app.tab.view.lists(&dir.join("sub/deeper/d.txt")));
+        assert_no_full_walk(&app);
+    }
+
+    #[test]
+    fn the_news_of_a_replaced_folder_are_enough_to_show_what_the_new_one_holds() {
+        let (ctx, mut app, dir) = flat_app_with_two_folders("app-flat-replaced-fed");
+        std::fs::remove_dir_all(dir.join("sub/deeper")).unwrap();
+        std::fs::create_dir(dir.join("sub/deeper")).unwrap();
+        std::fs::write(dir.join("sub/deeper/n.txt"), "N").unwrap();
+        app.watcher.take_news();
+        let (sub, deeper) = (dir.join("sub"), dir.join("sub/deeper"));
+        changed_touching(&ctx, &mut app, &[sub], &[deeper]);
+        assert!(app.tab.refresher.is_some());
+        land_reread(&mut app);
+        assert!(app.tab.view.lists(&dir.join("sub/deeper/n.txt")) && !app.tab.view.lists(&dir.join("sub/deeper/d.txt")));
+        assert_no_full_walk(&app);
+    }
+
+    #[test]
+    fn a_file_added_inside_a_walked_folder_reads_it_again_but_does_not_walk_it() {
+        let (ctx, mut app, dir) = flat_app_with_two_folders("app-flat-not-rewalked");
+        let before = app.watcher.generation();
+        std::fs::write(dir.join("sub/deeper/new.txt"), "N").unwrap();
+        app.watcher.take_news();
+        let (deeper, new) = (dir.join("sub/deeper"), dir.join("sub/deeper/new.txt"));
+        changed_touching(&ctx, &mut app, &[deeper], &[new]);
+        assert!(app.tab.refresher.is_some());
+        land_reread(&mut app);
+        assert!(app.tab.view.lists(&dir.join("sub/deeper/new.txt")));
+        assert_eq!(app.watcher.generation(), before, "no folder was walked again: the watches are not touched");
+        assert_no_full_walk(&app);
+    }
+
+    #[test]
+    fn a_rename_by_lumen_over_a_folder_replaces_what_it_held_in_the_view() {
+        let (ctx, mut app, dir) = flat_app_with_two_folders("app-flat-replaced-own");
+        // The old `deeper` is moved aside, then `other` is renamed to take its name.
+        std::fs::rename(dir.join("sub/deeper"), dir.join("sub/deeper.old")).unwrap();
+        app.finish_rename(&ctx, RenameEdit::new(dir.join("sub/other"), "deeper", true), false);
+        app.refresh_if_changed(&ctx);
+        land_reread(&mut app);
+        assert!(app.tab.view.lists(&dir.join("sub/deeper/o.txt")));
+        assert!(!app.tab.view.lists(&dir.join("sub/deeper/d.txt")));
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.path.clone()), Some(dir.join("sub/deeper")));
+        assert_no_full_walk(&app);
+    }
+
+    #[test]
+    fn ctrl_e_off_keeps_the_entry_renamed_meanwhile_selected() {
+        let (ctx, mut app, dir) = flat_app("app-flat-toggle-rename");
+        let a = app.tab.view.row_of_path(&dir.join("a.txt")).unwrap();
+        app.tab.view.select_row(a);
+        app.finish_rename(&ctx, RenameEdit::new(dir.join("a.txt"), "renamed.txt", false), false);
+        app.handle_action(&ctx, Action::ToggleFlat);
+        assert!(!app.tab.view.is_flat());
+        run_until(&ctx, &mut app, "the view never settled", |app| {
+            !app.tab.lister.is_pending(app.tab.shown_id) && app.tab.refresher.is_none() && app.tab.view.lists(&dir.join("renamed.txt"))
+        });
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.name.as_str()), Some("renamed.txt"));
+    }
+
+    #[test]
+    fn ctrl_e_off_keeps_the_folder_made_meanwhile_selected_and_open_for_its_name() {
+        let (ctx, mut app, dir) = flat_app("app-flat-toggle-new-folder");
+        app.new_folder(&ctx);
+        app.handle_action(&ctx, Action::ToggleFlat);
+        run_until(&ctx, &mut app, "the new folder never opened for its name", |app| app.rename.is_some());
+        let edit = app.rename.as_ref().unwrap();
+        assert_eq!(edit.path.parent(), Some(dir.as_path()));
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.path.clone()), Some(edit.path.clone()));
+        assert!(!app.tab.view.is_flat());
+    }
+
+    #[test]
+    fn ctrl_e_on_other_folders_keeps_the_folder_made_meanwhile_selected_and_open_for_its_name() {
+        let (ctx, mut app, dir) = app_in("app-flat-toggle-roots");
+        std::fs::create_dir(dir.join("other")).unwrap();
+        app.tab.view.apply_refresh(listing_of(&dir));
+        let a = app.tab.view.row_of_path(&dir.join("a.txt")).unwrap();
+        app.tab.view.select_row(a);
+        let sub = app.tab.view.row_of_path(&dir.join("sub")).unwrap();
+        app.tab.view.toggle_pick(sub);
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        app.watcher.settle();
+        app.watcher.take_news();
+        app.new_folder(&ctx);
+        // Another folder picked: Ctrl+E lists what it holds too.
+        let a = app.tab.view.row_of_path(&dir.join("a.txt")).unwrap();
+        app.tab.view.select_row(a);
+        let other = app.tab.view.row_of_path(&dir.join("other")).unwrap();
+        app.tab.view.toggle_pick(other);
+        app.handle_action(&ctx, Action::ToggleFlat);
+        assert_eq!(app.tab.view.flat_roots(), [dir.join("sub"), dir.join("other")]);
+        // The picks did their part (several entries picked cannot be renamed).
+        app.tab.view.drop_picks();
+        run_until(&ctx, &mut app, "the new folder never opened for its name", |app| app.rename.is_some());
+        let edit = app.rename.as_ref().unwrap();
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.path.clone()), Some(edit.path.clone()));
+        assert!(app.tab.view.is_flat(), "still flattened");
+    }
+
+    #[test]
+    fn a_change_in_the_open_folder_is_not_lost_when_ctrl_e_turns_the_view_off_during_its_reread() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-lost-off");
+        std::fs::write(dir.join("top-new.txt"), "T").unwrap();
+        drain_news(&mut app);
+        changed(&ctx, &mut app, std::slice::from_ref(&dir));
+        assert!(app.tab.refresher.is_some(), "read again");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        assert!(!app.tab.view.is_flat());
+        assert!(app.tab.refresher.is_none());
+        wait_listed(&ctx, &mut app, "top-new.txt");
+    }
+
+    #[test]
+    fn a_change_in_the_open_folder_is_not_lost_when_ctrl_e_lists_more_folders_during_its_reread() {
+        let (ctx, mut app, dir) = app_in("app-flat-reread-lost-picked");
+        std::fs::create_dir(dir.join("other")).unwrap();
+        app.tab.view.apply_refresh(listing_of(&dir));
+        let a = app.tab.view.row_of_path(&dir.join("a.txt")).unwrap();
+        app.tab.view.select_row(a);
+        let sub = app.tab.view.row_of_path(&dir.join("sub")).unwrap();
+        app.tab.view.toggle_pick(sub);
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        app.watcher.settle();
+        // Another folder picked: Ctrl+E adds what it holds.
+        app.tab.view.drop_picks();
+        let a = app.tab.view.row_of_path(&dir.join("a.txt")).unwrap();
+        app.tab.view.select_row(a);
+        let other = app.tab.view.row_of_path(&dir.join("other")).unwrap();
+        app.tab.view.toggle_pick(other);
+        std::fs::write(dir.join("top-new.txt"), "T").unwrap();
+        drain_news(&mut app);
+        changed(&ctx, &mut app, std::slice::from_ref(&dir));
+        assert!(app.tab.refresher.is_some(), "read again");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        assert_eq!(app.tab.view.flat_roots(), [dir.join("sub"), dir.join("other")]);
+        wait_listed(&ctx, &mut app, "top-new.txt");
+        assert!(app.tab.view.is_flat(), "still flattened");
+    }
+
+    #[test]
+    fn a_new_folder_is_open_for_its_name_though_an_earlier_reread_lands_first() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-rename-late");
+        std::fs::write(dir.join("sub/deeper/ext.txt"), "E").unwrap();
+        drain_news(&mut app);
+        changed(&ctx, &mut app, &[dir.join("sub/deeper")]);
+        assert!(app.tab.refresher.is_some(), "another program's change is being read");
+        app.new_folder(&ctx);
+        app.refresh_if_changed(&ctx);
+        // The first one lands: it is not the one that shows the new folder.
+        land_reread(&mut app);
+        assert!(listed(&app).contains(&"ext.txt".to_string()));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.rename.is_none() {
+            assert!(Instant::now() < deadline, "the new folder never opened for its name");
+            app.refresh_if_changed(&ctx);
+            app.poll_reread();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let edit = app.rename.as_ref().unwrap();
+        assert_eq!(edit.path.parent(), Some(dir.as_path()));
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.path.clone()), Some(edit.path.clone()));
+        assert_no_full_walk(&app);
+    }
+
+    #[test]
+    fn the_error_of_a_failed_removal_waits_for_the_reread_started_after_it() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-error-late");
+        std::fs::write(dir.join("sub/deeper/ext.txt"), "E").unwrap();
+        drain_news(&mut app);
+        changed(&ctx, &mut app, &[dir.join("sub/deeper")]);
+        app.remove_all(&ctx, vec![dir.join("sub/deeper/missing.txt")], None, fs::ops::delete_forever);
+        app.refresh_if_changed(&ctx);
+        land_reread(&mut app);
+        assert!(app.tab.view.error.is_none(), "the first re-read began before the removal");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.tab.view.error.is_none() {
+            assert!(Instant::now() < deadline, "the error was never told");
+            app.refresh_if_changed(&ctx);
+            app.poll_reread();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn escape_during_the_walk_keeps_the_new_folder_made_meanwhile_selected_and_open_for_its_name() {
+        let (ctx, mut app, dir) = app_in("app-flat-escape-new-folder");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        app.walk_flat(&ctx);
+        assert!(app.tab.flattener.is_some(), "walking");
+        app.new_folder(&ctx);
+        app.handle_action(&ctx, Action::Cancel);
+        assert!(!app.tab.view.is_flat(), "the folder alone");
+        app.refresh_if_changed(&ctx);
+        if app.tab.lister.is_pending(app.tab.shown_id) {
+            land(&mut app);
+        }
+        let edit = app.rename.as_ref().expect("the new folder is open for its name");
+        assert_eq!(edit.path.parent(), Some(dir.as_path()));
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.path.clone()), Some(edit.path.clone()));
     }
 
     #[test]
@@ -4393,7 +5264,7 @@ mod tests {
         app.walk_flat(&ctx);
         assert!(app.tab.flattener.is_some(), "walking");
         // A change already due.
-        app.refresh.note_change(Instant::now() - REFRESH_DELAY);
+        app.refresh.note_news(Instant::now() - REFRESH_DELAY, News::All);
         app.refresh_if_changed(&ctx);
         assert!(!app.tab.lister.is_pending(app.tab.shown_id), "no reload restarts the walk");
         land_flat(&ctx, &mut app);
@@ -7140,6 +8011,105 @@ mod tests {
         v.rows.iter().map(|&i| v.entry(i).name.as_str()).collect()
     }
 
+    /// What a re-read of `folders` (each: its path below `/x` and what it holds now) found.
+    fn reread_of(folders: &[(&str, Vec<Entry>)], gone: &[&str], found: Vec<Entry>, walked: &[&str]) -> fs::flat::Reread {
+        let at = |rel: &str| if rel.is_empty() { PathBuf::from("/x") } else { PathBuf::from("/x").join(rel) };
+        fs::flat::Reread {
+            folders: folders.iter().map(|(rel, entries)| (at(rel), entries.clone())).collect(),
+            gone: gone.iter().map(|rel| at(rel)).collect(),
+            walked: fs::flat::Walk { found, folders: walked.iter().map(|rel| at(rel)).collect() },
+            replaced: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_reread_shows_a_new_file_and_drops_a_removed_one_in_a_subfolder() {
+        let mut v = flat_view();
+        v.apply_reread(reread_of(&[("src", vec![nested("src/util", true), nested("src/new.rs", false), nested("src/.cache", false)])], &[], vec![], &[]), None);
+        // `main.rs` is gone from src; `util` and what it holds stay.
+        assert_eq!(row_paths(&v), ["src", "src/util", "a.txt", "src/util/a.txt", "b.txt", "src/new.rs"]);
+        assert!(v.is_flat());
+    }
+
+    #[test]
+    fn a_reread_of_the_open_folder_replaces_its_own_entries() {
+        let mut v = flat_view();
+        v.apply_reread(reread_of(&[("", vec![nested("src", true), nested("c.txt", false), nested("a.txt", false)])], &[], vec![], &[]), None);
+        // `b.txt` is gone, `c.txt` is new; what src holds is untouched.
+        assert_eq!(row_paths(&v), ["src", "src/util", "a.txt", "src/util/a.txt", "c.txt", "src/main.rs"]);
+    }
+
+    #[test]
+    fn what_a_gone_subfolder_held_leaves_the_listing() {
+        let mut v = flat_view();
+        v.apply_reread(reread_of(&[("src", vec![nested("src/main.rs", false), nested("src/.cache", false)])], &["src/util"], vec![], &[]), None);
+        assert_eq!(row_paths(&v), ["src", "a.txt", "b.txt", "src/main.rs"]);
+    }
+
+    #[test]
+    fn what_an_unreadable_folder_held_leaves_but_its_own_row_stays() {
+        let mut v = flat_view();
+        v.apply_reread(reread_of(&[], &["src/util"], vec![], &[]), None);
+        assert_eq!(row_paths(&v), ["src", "src/util", "a.txt", "b.txt", "src/main.rs"], "util is still in src, its a.txt is not");
+    }
+
+    #[test]
+    fn a_reread_brings_in_what_a_new_subfolder_holds() {
+        let mut v = flat_view();
+        let src = vec![nested("src/fresh", true), nested("src/main.rs", false), nested("src/util", true), nested("src/.cache", false)];
+        v.apply_reread(reread_of(&[("src", src)], &[], vec![nested("src/fresh/z.txt", false)], &["src/fresh"]), None);
+        assert_eq!(row_paths(&v), ["src/fresh", "src", "src/util", "a.txt", "src/util/a.txt", "b.txt", "src/main.rs", "src/fresh/z.txt"]);
+    }
+
+    #[test]
+    fn a_reread_keeps_the_cursor_on_its_entry_when_rows_move() {
+        let mut v = flat_view();
+        let b = v.row_of_path(Path::new("/x/b.txt")).unwrap();
+        v.select_row(b);
+        v.apply_reread(reread_of(&[("", vec![nested("0.txt", false), nested("src", true), nested("b.txt", false)])], &[], vec![], &[]), None);
+        assert_eq!(v.selected_entry().unwrap().path, Path::new("/x/b.txt"));
+    }
+
+    #[test]
+    fn a_reread_leaves_the_cursor_on_its_row_when_its_entry_is_gone() {
+        let mut v = flat_view();
+        let main = v.row_of_path(Path::new("/x/src/main.rs")).unwrap();
+        v.select_row(main);
+        v.apply_reread(reread_of(&[("src", vec![nested("src/util", true)])], &[], vec![], &[]), None);
+        assert_eq!(v.selected, Some(v.rows.len() - 1), "the last row, as the row it was on is past the end");
+    }
+
+    #[test]
+    fn a_reread_lands_on_the_entry_to_select() {
+        let mut v = flat_view();
+        let src = vec![nested("src/util", true), nested("src/renamed.rs", false), nested("src/.cache", false)];
+        v.apply_reread(reread_of(&[("src", src)], &[], vec![], &[]), Some(Path::new("/x/src/renamed.rs")));
+        assert_eq!(v.selected_entry().unwrap().path, Path::new("/x/src/renamed.rs"));
+    }
+
+    #[test]
+    fn a_reread_keeps_the_filter_and_the_picks() {
+        let mut v = flat_view();
+        v.select_all();
+        for c in ".txt".chars() {
+            v.push_filter(c);
+        }
+        let picked = v.picked_count();
+        v.apply_reread(reread_of(&[("src", vec![nested("src/util", true), nested("src/new.txt", false)])], &[], vec![], &[]), None);
+        assert_eq!(v.filter(), ".txt");
+        assert_eq!(row_paths(&v), ["a.txt", "src/util/a.txt", "b.txt", "src/new.txt"]);
+        assert_eq!(v.picked_count(), picked, "the same entries picked");
+    }
+
+    #[test]
+    fn a_reread_clears_the_filter_to_show_the_entry_to_select_in_the_open_folder() {
+        let mut v = flat_view();
+        v.push_filter('a');
+        v.apply_reread(reread_of(&[("", vec![nested("src", true), nested("zed.txt", false)])], &[], vec![], &[]), Some(Path::new("/x/zed.txt")));
+        assert_eq!(v.filter(), "");
+        assert_eq!(v.selected_entry().unwrap().path, Path::new("/x/zed.txt"));
+    }
+
     #[test]
     fn folder_count_follows_the_rows_shown() {
         let mut v = loaded_view();
@@ -7922,15 +8892,63 @@ mod tests {
     fn refresh_timer_fires_once_after_the_first_change() {
         let mut t = RefreshTimer::default();
         let t0 = Instant::now();
-        assert!(!t.take_due(t0));
+        assert_eq!(t.take_due(t0), None);
         assert_eq!(t.wait(t0), None);
-        t.note_change(t0);
-        t.note_change(t0 + Duration::from_millis(150)); // does not postpone
+        t.note_news(t0, News::All);
+        t.note_news(t0 + Duration::from_millis(150), News::All); // does not postpone
         assert_eq!(t.wait(t0 + Duration::from_millis(50)), Some(REFRESH_DELAY - Duration::from_millis(50)));
-        assert!(!t.take_due(t0 + Duration::from_millis(199)));
-        assert!(t.take_due(t0 + REFRESH_DELAY));
-        assert!(!t.take_due(t0 + REFRESH_DELAY * 2), "fires once");
+        assert_eq!(t.take_due(t0 + Duration::from_millis(199)), None);
+        assert_eq!(t.take_due(t0 + REFRESH_DELAY), Some(News::All));
+        assert_eq!(t.take_due(t0 + REFRESH_DELAY * 2), None, "fires once");
         assert_eq!(t.wait(t0 + REFRESH_DELAY * 2), None);
+    }
+
+    fn folders_news(names: &[&str]) -> News {
+        in_folders(names.iter().map(PathBuf::from))
+    }
+
+    #[test]
+    fn refresh_timer_gathers_the_folders_that_changed() {
+        let mut t = RefreshTimer::default();
+        let t0 = Instant::now();
+        t.note_news(t0, folders_news(&["/x/a"]));
+        t.note_news(t0 + Duration::from_millis(50), folders_news(&["/x/b", "/x/a"]));
+        assert_eq!(t.take_due(t0 + REFRESH_DELAY), Some(folders_news(&["/x/a", "/x/b"])));
+        assert_eq!(t.take_due(t0 + REFRESH_DELAY), None, "and starts afresh");
+    }
+
+    #[test]
+    fn refresh_timer_news_of_everything_win_over_folders() {
+        let mut t = RefreshTimer::default();
+        let t0 = Instant::now();
+        t.note_news(t0, folders_news(&["/x/a"]));
+        t.note_news(t0, News::All);
+        t.note_news(t0, folders_news(&["/x/b"]));
+        assert_eq!(t.take_due(t0 + REFRESH_DELAY), Some(News::All));
+    }
+
+    #[test]
+    fn refresh_timer_news_of_too_many_folders_become_news_of_everything() {
+        let many = |range: std::ops::Range<usize>| in_folders(range.map(|i| PathBuf::from(format!("/x/d{i}"))));
+        let (mut t, t0) = (RefreshTimer::default(), Instant::now());
+        t.note_news(t0, many(0..fs::watch::NEWS_LIMIT));
+        assert_eq!(t.take_due(t0 + REFRESH_DELAY), Some(many(0..fs::watch::NEWS_LIMIT)), "the limit itself is still folders");
+        t.note_news(t0, many(0..fs::watch::NEWS_LIMIT));
+        t.note_news(t0, many(fs::watch::NEWS_LIMIT..fs::watch::NEWS_LIMIT + 1));
+        assert_eq!(t.take_due(t0 + REFRESH_DELAY), Some(News::All), "gathered past it");
+        t.note_news(t0, many(0..fs::watch::NEWS_LIMIT + 1));
+        assert_eq!(t.take_due(t0 + REFRESH_DELAY), Some(News::All), "or noted past it");
+    }
+
+    #[test]
+    fn refresh_timer_shows_lumens_own_news_without_the_delay() {
+        let mut t = RefreshTimer::default();
+        let t0 = Instant::now();
+        t.note_news(t0, folders_news(&["/x/a"]));
+        t.note_now(t0 + Duration::from_millis(10), folders_news(&["/x/b"]));
+        assert_eq!(t.take_due(t0 + Duration::from_millis(10)), Some(folders_news(&["/x/a", "/x/b"])), "together, at once");
+        t.note_now(t0, folders_news(&["/x/c"]));
+        assert_eq!(t.wait(t0), Some(Duration::ZERO));
     }
 
     /// `due` with these drive letters (`None`: not looked up); counts the lookups.

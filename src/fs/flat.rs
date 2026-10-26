@@ -2,7 +2,8 @@
 //! everything inside some folders, all the way down, read on a background
 //! thread because a big tree can take seconds to walk.
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
@@ -87,10 +88,129 @@ impl Drop for Flattener {
     }
 }
 
+/// What a [`reread`] found.
+pub struct Reread {
+    /// Each folder read again, with what it holds now (sorted like a listing).
+    pub folders: Vec<(PathBuf, Vec<Entry>)>,
+    /// Folders that are gone or cannot be read: what they held leaves the
+    /// listing (they themselves stay, until the folder holding them is read).
+    pub gone: Vec<PathBuf>,
+    /// What the folders that appeared hold, all the way down.
+    pub walked: Walk,
+    /// Folders listed before that were made anew under the same name: they
+    /// are in `gone` and were walked again.
+    pub replaced: Vec<PathBuf>,
+}
+
+impl Reread {
+    /// Brings the folders a walk read up to date: what is under a gone one
+    /// leaves, the folders that appeared come in.
+    pub fn update_folders(&self, folders: &mut Vec<PathBuf>) {
+        folders.retain(|folder| !self.gone.iter().any(|gone| folder.starts_with(gone)));
+        folders.extend(self.walked.folders.iter().cloned());
+    }
+}
+
+/// Reads `folders` again, each with the subfolders it held before, and walks
+/// the subfolders that appeared inside `roots`. A folder that cannot be read
+/// counts as gone. A subfolder held before that `touched` names (an entry
+/// made, removed or renamed) and is still a folder may be another of the same
+/// name: it counts as gone and as appeared, and is walked again. Returns
+/// `None` when `cancel` is set.
+pub fn reread(roots: &[PathBuf], folders: &[(PathBuf, HashSet<PathBuf>)], touched: &HashSet<PathBuf>, cancel: &AtomicBool) -> Option<Reread> {
+    let (mut read, mut gone, mut fresh, mut replaced) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (folder, before) in folders {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let Ok(found) = super::lister::read_folder(folder) else {
+            gone.push(folder.clone());
+            continue;
+        };
+        {
+            // A link is listed but never entered, as in a walk.
+            let now: HashSet<&Path> = found.iter().filter(|f| f.entry.is_dir && !f.link).map(|f| f.entry.path.as_path()).collect();
+            gone.extend(before.iter().filter(|old| !now.contains(old.as_path())).cloned());
+            let inside = |folder: &Path| roots.iter().any(|root| folder.starts_with(root));
+            fresh.extend(now.iter().filter(|new| !before.contains(**new) && inside(new)).map(|new| new.to_path_buf()));
+            // Not told apart by its path alone, but by the news of it.
+            let anew = before.iter().filter(|old| now.contains(old.as_path()) && touched.contains(*old) && inside(old));
+            for old in anew {
+                replaced.push(old.clone());
+                gone.push(old.clone());
+                fresh.push(old.clone());
+            }
+        }
+        let mut entries: Vec<Entry> = found.into_iter().map(|f| f.entry).collect();
+        super::lister::sort_entries(&mut entries);
+        read.push((folder.clone(), entries));
+    }
+    fresh.sort();
+    fresh.dedup();
+    gone.sort();
+    gone.dedup();
+    replaced.sort();
+    // The walk of a folder that appeared reads it, and the ones inside.
+    read.retain(|(folder, _)| !fresh.iter().any(|new| folder.starts_with(new)));
+    let tops: Vec<PathBuf> = fresh.iter().filter(|new| !fresh.iter().any(|up| up != *new && new.starts_with(up))).cloned().collect();
+    let walked = walk(&tops, cancel, &AtomicUsize::new(0))?;
+    Some(Reread { folders: read, gone, walked, replaced })
+}
+
+/// A re-read running on its own thread. Dropping it cancels it.
+pub struct Refresher {
+    roots: Vec<PathBuf>,
+    current: PathBuf,
+    asked: Vec<PathBuf>,
+    touched: HashSet<PathBuf>,
+    rx: Receiver<Reread>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Refresher {
+    /// Starts [`reread`] on a new thread; `wake` runs there once it is done.
+    pub fn start(roots: Vec<PathBuf>, current: PathBuf, folders: Vec<(PathBuf, HashSet<PathBuf>)>, touched: HashSet<PathBuf>, wake: impl Fn() + Send + 'static) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        let walked = roots.clone();
+        let news = touched.clone();
+        let asked = folders.iter().map(|(folder, _)| folder.clone()).collect();
+        thread::spawn(move || {
+            if let Some(found) = reread(&walked, &folders, &news, &flag) {
+                // The receiver only disappears when the result is no longer wanted.
+                let _ = tx.send(found);
+                wake();
+            }
+        });
+        Self { roots, current, asked, touched, rx, cancel }
+    }
+
+    /// The folders it reads again.
+    pub fn folders(&self) -> &[PathBuf] {
+        &self.asked
+    }
+
+    /// The paths that changed (made, removed or renamed) it was told of.
+    pub fn touched(&self) -> &HashSet<PathBuf> {
+        &self.touched
+    }
+
+    /// The roots and the open folder it was started for, and what it found, once it is done.
+    pub fn poll(&self) -> Option<(Vec<PathBuf>, PathBuf, Reread)> {
+        self.rx.try_recv().ok().map(|found| (self.roots.clone(), self.current.clone(), found))
+    }
+}
+
+impl Drop for Refresher {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use crate::fs::ops::tests::fresh_fixture;
     use std::fs;
 
@@ -183,5 +303,209 @@ mod tests {
         let (roots, walked) = flattener.poll().expect("finished");
         assert_eq!(roots, [root.join("deps")]);
         assert_eq!(walked.found.len(), 3);
+    }
+
+    fn held(folders: &[PathBuf]) -> HashSet<PathBuf> {
+        folders.iter().cloned().collect()
+    }
+
+    fn never() -> AtomicBool {
+        AtomicBool::new(false)
+    }
+
+    #[test]
+    fn a_reread_finds_a_new_file() {
+        let root = tree("flat-reread-new");
+        let deps = root.join("deps");
+        fs::write(deps.join("new.rs"), "4444").unwrap();
+        let read = reread(std::slice::from_ref(&root), &[(deps.clone(), held(&[deps.join("inner")]))], &HashSet::new(), &never()).unwrap();
+        assert_eq!(read.folders.len(), 1);
+        assert_eq!(read.folders[0].0, deps);
+        assert_eq!(names(&read.folders[0].1, &root), ["deps/inner", "deps/lib.d", "deps/new.rs"]);
+        assert_eq!(read.folders[0].1[0].name, "inner", "sorted like a listing: folders first");
+        assert_eq!(read.folders[0].1.iter().find(|e| e.name == "new.rs").unwrap().size, Some(4));
+        assert!(read.gone.is_empty());
+        assert!(read.walked.found.is_empty() && read.walked.folders.is_empty(), "no folder appeared: nothing walked");
+    }
+
+    #[test]
+    fn a_reread_drops_a_removed_file() {
+        let root = tree("flat-reread-removed");
+        let deps = root.join("deps");
+        fs::remove_file(deps.join("lib.d")).unwrap();
+        let read = reread(std::slice::from_ref(&root), &[(deps.clone(), held(&[deps.join("inner")]))], &HashSet::new(), &never()).unwrap();
+        assert_eq!(names(&read.folders[0].1, &root), ["deps/inner"]);
+        assert!(read.gone.is_empty());
+    }
+
+    #[test]
+    fn a_reread_walks_a_new_subfolder_all_the_way_down() {
+        let root = tree("flat-reread-fresh");
+        let deps = root.join("deps");
+        fs::create_dir_all(deps.join("fresh/more")).unwrap();
+        fs::write(deps.join("fresh/x.txt"), "x").unwrap();
+        fs::write(deps.join("fresh/more/y.txt"), "y").unwrap();
+        let read = reread(std::slice::from_ref(&root), &[(deps.clone(), held(&[deps.join("inner")]))], &HashSet::new(), &never()).unwrap();
+        assert_eq!(names(&read.folders[0].1, &root), ["deps/fresh", "deps/inner", "deps/lib.d"]);
+        assert_eq!(names(&read.walked.found, &root), ["deps/fresh/more", "deps/fresh/more/y.txt", "deps/fresh/x.txt"]);
+        assert_eq!(read.walked.folders, [deps.join("fresh"), deps.join("fresh/more")]);
+    }
+
+    #[test]
+    fn a_reread_does_not_walk_a_new_subfolder_outside_the_roots() {
+        let root = tree("flat-reread-outside");
+        fs::create_dir_all(root.join("other/deep")).unwrap();
+        fs::write(root.join("other/deep/z.txt"), "z").unwrap();
+        let before = held(&[root.join("deps"), root.join("build")]);
+        let read = reread(&[root.join("deps")], &[(root.clone(), before)], &HashSet::new(), &never()).unwrap();
+        assert!(names(&read.folders[0].1, &root).contains(&"other".to_string()), "the folder itself is read all the same");
+        assert!(read.walked.found.is_empty() && read.walked.folders.is_empty());
+    }
+
+    #[test]
+    fn a_reread_reads_only_once_a_folder_that_is_new_and_also_asked_for() {
+        let root = tree("flat-reread-nested");
+        let deps = root.join("deps");
+        fs::create_dir(deps.join("fresh")).unwrap();
+        fs::write(deps.join("fresh/x.txt"), "x").unwrap();
+        let folders = [(deps.clone(), held(&[deps.join("inner")])), (deps.join("fresh"), HashSet::new())];
+        let read = reread(std::slice::from_ref(&root), &folders, &HashSet::new(), &never()).unwrap();
+        assert_eq!(read.folders.len(), 1, "the walk of the new folder already read it");
+        assert_eq!(names(&read.walked.found, &root), ["deps/fresh/x.txt"]);
+        assert_eq!(read.walked.folders, [deps.join("fresh")]);
+    }
+
+    #[test]
+    fn a_reread_tells_a_removed_subfolder_is_gone() {
+        let root = tree("flat-reread-gone");
+        let deps = root.join("deps");
+        fs::remove_dir_all(deps.join("inner")).unwrap();
+        let read = reread(std::slice::from_ref(&root), &[(deps.clone(), held(&[deps.join("inner")]))], &HashSet::new(), &never()).unwrap();
+        assert_eq!(read.gone, [deps.join("inner")]);
+        assert_eq!(names(&read.folders[0].1, &root), ["deps/lib.d"]);
+    }
+
+    #[test]
+    fn a_reread_tells_a_folder_it_cannot_read_is_gone() {
+        let root = tree("flat-reread-unreadable");
+        let nope = root.join("nope");
+        let read = reread(std::slice::from_ref(&root), &[(nope.clone(), held(&[nope.join("x")]))], &HashSet::new(), &never()).unwrap();
+        assert!(read.folders.is_empty());
+        assert_eq!(read.gone, [nope]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reread_lists_a_new_link_to_a_folder_but_does_not_walk_it() {
+        let root = tree("flat-reread-link");
+        let deps = root.join("deps");
+        std::os::unix::fs::symlink(root.join("build"), deps.join("link")).unwrap();
+        fs::write(root.join("build/b.txt"), "b").unwrap();
+        let read = reread(std::slice::from_ref(&root), &[(deps.clone(), held(&[deps.join("inner")]))], &HashSet::new(), &never()).unwrap();
+        assert!(read.folders[0].1.iter().any(|e| e.name == "link"), "listed");
+        assert!(read.walked.found.is_empty() && read.walked.folders.is_empty(), "not entered");
+    }
+
+    fn touched(paths: &[PathBuf]) -> HashSet<PathBuf> {
+        paths.iter().cloned().collect()
+    }
+
+    #[test]
+    fn a_reread_walks_again_a_folder_replaced_by_another_of_the_same_name() {
+        let root = tree("flat-reread-replaced");
+        let deps = root.join("deps");
+        // `inner` is moved away and another folder takes its name.
+        fs::rename(deps.join("inner"), deps.join("inner.old")).unwrap();
+        fs::create_dir(deps.join("inner")).unwrap();
+        fs::write(deps.join("inner/other.rs"), "55555").unwrap();
+        let inner = deps.join("inner");
+        let read = reread(std::slice::from_ref(&root), &[(deps.clone(), held(std::slice::from_ref(&inner)))], &touched(&[inner.clone(), deps.join("inner.old")]), &never()).unwrap();
+        assert_eq!(read.replaced, std::slice::from_ref(&inner));
+        assert_eq!(read.gone, std::slice::from_ref(&inner), "what it held leaves");
+        assert_eq!(names(&read.walked.found, &root), ["deps/inner.old/deep.rs", "deps/inner/other.rs"]);
+        assert_eq!(read.walked.folders, [deps.join("inner"), deps.join("inner.old")]);
+        let mut folders = vec![root.clone(), deps.clone(), inner.clone()];
+        read.update_folders(&mut folders);
+        assert_eq!(folders, [root, deps, inner.clone(), deps_inner_old(&inner)]);
+    }
+
+    fn deps_inner_old(inner: &Path) -> PathBuf {
+        inner.with_file_name("inner.old")
+    }
+
+    #[test]
+    fn a_reread_does_not_walk_a_folder_only_because_a_file_in_it_changed() {
+        let root = tree("flat-reread-file-in-folder");
+        let deps = root.join("deps");
+        fs::write(deps.join("inner/new.rs"), "4").unwrap();
+        // The file is named, the folder holding it is read, but not walked.
+        let inner = deps.join("inner");
+        let read = reread(std::slice::from_ref(&root), &[(inner.clone(), HashSet::new())], &touched(&[inner.join("new.rs")]), &never()).unwrap();
+        assert!(read.replaced.is_empty() && read.gone.is_empty());
+        assert!(read.walked.found.is_empty() && read.walked.folders.is_empty());
+        assert_eq!(names(&read.folders[0].1, &root), ["deps/inner/deep.rs", "deps/inner/new.rs"]);
+    }
+
+    #[test]
+    fn a_touched_folder_that_is_a_file_now_or_gone_is_not_walked() {
+        let root = tree("flat-reread-touched-gone");
+        let deps = root.join("deps");
+        fs::remove_dir_all(deps.join("inner")).unwrap();
+        fs::write(deps.join("inner"), "a file now").unwrap();
+        let inner = deps.join("inner");
+        let read = reread(std::slice::from_ref(&root), &[(deps.clone(), held(std::slice::from_ref(&inner)))], &touched(std::slice::from_ref(&inner)), &never()).unwrap();
+        assert_eq!(read.gone, [inner]);
+        assert!(read.replaced.is_empty(), "gone, not made anew");
+        assert!(read.walked.found.is_empty());
+    }
+
+    #[test]
+    fn a_replaced_folder_inside_another_is_walked_once() {
+        let root = tree("flat-reread-replaced-nested");
+        let deps = root.join("deps");
+        let inner = deps.join("inner");
+        fs::rename(&inner, deps.join("inner.old")).unwrap();
+        fs::create_dir_all(inner.join("deeper")).unwrap();
+        fs::write(inner.join("deeper/z.rs"), "z").unwrap();
+        // Both `inner` and the `deeper` it held are asked for and named.
+        let before = [(deps.clone(), held(std::slice::from_ref(&inner))), (inner.clone(), held(&[inner.join("deeper")]))];
+        let read = reread(std::slice::from_ref(&root), &before, &touched(&[inner.clone(), inner.join("deeper")]), &never()).unwrap();
+        let found = names(&read.walked.found, &root);
+        assert_eq!(found.iter().filter(|name| name.ends_with("z.rs")).count(), 1, "{found:?}");
+    }
+
+    #[test]
+    fn a_reread_stops_when_cancelled() {
+        let root = tree("flat-reread-cancel");
+        let deps = root.join("deps");
+        assert!(reread(&[root], &[(deps, HashSet::new())], &HashSet::new(), &AtomicBool::new(true)).is_none());
+    }
+
+    #[test]
+    fn a_reread_updates_the_folders_a_walk_read() {
+        let root = tree("flat-reread-update");
+        let deps = root.join("deps");
+        fs::remove_dir_all(deps.join("inner")).unwrap();
+        fs::create_dir(deps.join("fresh")).unwrap();
+        let read = reread(std::slice::from_ref(&root), &[(deps.clone(), held(&[deps.join("inner")]))], &HashSet::new(), &never()).unwrap();
+        let mut folders = vec![root.clone(), deps.clone(), deps.join("inner"), deps.join("inner/deeper"), root.join("build")];
+        read.update_folders(&mut folders);
+        assert_eq!(folders, [root.clone(), deps.clone(), root.join("build"), deps.join("fresh")]);
+    }
+
+    #[test]
+    fn a_refresher_delivers_its_reread_for_the_view_it_was_started_for() {
+        let root = tree("flat-reread-thread");
+        let deps = root.join("deps");
+        fs::write(deps.join("new.rs"), "4").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let refresher = Refresher::start(vec![root.clone()], root.clone(), vec![(deps.clone(), held(&[deps.join("inner")]))], HashSet::new(), move || {
+            let _ = tx.send(());
+        });
+        assert_eq!(refresher.folders(), std::slice::from_ref(&deps), "the folders it was asked to read");
+        rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the reread never finished");
+        let (roots, current, read) = refresher.poll().expect("finished");
+        assert_eq!((roots, current), (vec![root.clone()], root.clone()));
+        assert_eq!(names(&read.folders[0].1, &root), ["deps/inner", "deps/lib.d", "deps/new.rs"]);
     }
 }
