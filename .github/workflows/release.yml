@@ -55,8 +55,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"
       - name: Install the test and packaging tools
-        # poppler-utils: the PDF preview tests run pdftoppm.
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils dpkg-dev desktop-file-utils
+        # poppler-utils: the PDF preview tests run pdftoppm. ffmpeg: the video
+        # tests make their videos with it and read frames back.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils ffmpeg dpkg-dev desktop-file-utils
       - uses: dtolnay/rust-toolchain@stable
       - name: Test
         run: cargo test --locked
