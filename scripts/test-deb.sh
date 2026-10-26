@@ -31,6 +31,8 @@ field() { dpkg-deb --field "$deb" "$1"; }
 [ "$(field Section)" = utils ] || fail "Section: $(field Section)"
 # Optional tools Lumen runs: xdg-open (files), pdftoppm (PDF preview), gio (Open With).
 [ "$(field Recommends)" = "xdg-utils, poppler-utils, libglib2.0-bin" ] || fail "Recommends: $(field Recommends)"
+# ffmpeg (video frames) is large, so it is only suggested: apt does not install it by default.
+[ "$(field Suggests)" = "ffmpeg" ] || fail "Suggests: $(field Suggests)"
 [ "$(field Homepage)" = "https://github.com/Angelbyte96/lumen-explorer" ] || fail "Homepage: $(field Homepage)"
 field Description | head -n 1 | grep -qxF "A fast, lightweight, keyboard-first file explorer" || fail "Description: $(field Description)"
 depends=$(field Depends)
