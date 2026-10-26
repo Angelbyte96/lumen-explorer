@@ -478,7 +478,7 @@ fn run(orders: Receiver<Order>, mut inner: impl notify::Watcher, scope: &Mutex<S
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::fs::ops::tests::fresh_fixture;
 
@@ -544,13 +544,13 @@ mod tests {
         w.watch(&dir, &[dir.join("sub"), dir.join("sub/deeper")]);
         w.settle();
         std::fs::write(dir.join("sub/deeper/x.txt"), "").unwrap();
-        std::thread::sleep(SETTLE);
+        arrived(&w);
         let Some(News::Folders { folders: changed, .. }) = w.take_news() else { panic!("the folder is named") };
         assert!(changed.contains(&dir.join("sub/deeper")), "{changed:?}");
         assert!(changed.iter().all(|f| f.starts_with(&dir)), "{changed:?}");
         assert_eq!(w.take_news(), None, "told once");
         std::fs::write(dir.join("top.txt"), "").unwrap();
-        std::thread::sleep(SETTLE);
+        arrived(&w);
         assert!(w.take_changed(), "take_changed takes the news too");
         assert_eq!(w.take_news(), None);
     }
@@ -670,8 +670,7 @@ mod tests {
         std::thread::sleep(SETTLE);
         assert!(!w.take_changed());
         std::fs::write(dir.join("b/y"), "").unwrap();
-        std::thread::sleep(SETTLE);
-        assert!(w.take_changed());
+        assert!(eventually(|| w.take_changed()));
     }
 
     /// Not on Windows: there a write inside a subfolder changes the
@@ -698,8 +697,7 @@ mod tests {
         w.watch(&dir, &[dir.join("sub"), dir.join("sub/deeper")]);
         w.settle();
         std::fs::write(dir.join("sub/deeper/x.txt"), "").unwrap();
-        std::thread::sleep(SETTLE);
-        assert!(w.take_changed(), "a change two levels down");
+        assert!(eventually(|| w.take_changed()), "a change two levels down");
     }
 
     /// Not on Windows: see `subfolders_are_not_watched`.
@@ -716,11 +714,9 @@ mod tests {
         std::thread::sleep(SETTLE);
         assert!(!w.take_changed(), "a subfolder not flattened");
         std::fs::write(dir.join("a/inner/x"), "").unwrap();
-        std::thread::sleep(SETTLE);
-        assert!(w.take_changed(), "inside a flattened one");
+        assert!(eventually(|| w.take_changed()), "inside a flattened one");
         std::fs::write(dir.join("top.txt"), "").unwrap();
-        std::thread::sleep(SETTLE);
-        assert!(w.take_changed(), "the folder itself");
+        assert!(eventually(|| w.take_changed()), "the folder itself");
     }
 
     /// Not on Windows: see `subfolders_are_not_watched`.
@@ -738,8 +734,7 @@ mod tests {
         std::thread::sleep(SETTLE);
         assert!(!w.take_changed(), "the subfolder is no longer watched");
         std::fs::write(dir.join("y"), "").unwrap();
-        std::thread::sleep(SETTLE);
-        assert!(w.take_changed(), "the folder still is");
+        assert!(eventually(|| w.take_changed()), "the folder still is");
     }
 
     /// Flattening does not enter links (`fs::flat::walk`), so what one
@@ -855,8 +850,7 @@ mod tests {
         w.settle();
         assert!(!WATCHED_TWICE.load(Ordering::SeqCst));
         std::fs::write(dir.join("top.txt"), "").unwrap();
-        std::thread::sleep(SETTLE);
-        assert!(w.take_changed(), "still watched");
+        assert!(eventually(|| w.take_changed()), "still watched");
     }
 
     #[test]
@@ -887,8 +881,7 @@ mod tests {
         w.settle();
         assert!(!w.take_refused(), "a build tool's folder may come and go");
         std::fs::write(dir.join("a/x"), "").unwrap();
-        std::thread::sleep(SETTLE);
-        assert!(w.take_changed(), "the others are watched");
+        assert!(eventually(|| w.take_changed()), "the others are watched");
     }
 
     #[test]
@@ -910,8 +903,7 @@ mod tests {
         });
         w.settle();
         std::fs::write(dir.join("a/x"), "").unwrap();
-        std::thread::sleep(SETTLE);
-        assert!(w.take_changed(), "watched once the thread got to it");
+        assert!(eventually(|| w.take_changed()), "watched once the thread got to it");
     }
 
     #[test]
@@ -943,8 +935,7 @@ mod tests {
         w.watch(&open, &[]);
         w.settle();
         std::fs::write(open.join("x"), "").unwrap();
-        std::thread::sleep(SETTLE);
-        assert!(w.take_changed());
+        assert!(eventually(|| w.take_changed()));
     }
 
     #[test]
@@ -986,8 +977,15 @@ mod tests {
         assert!(eventually(|| w.take_changed()), "the same plan is ordered again");
     }
 
+    /// Waits for news to arrive, then for the rest of them: what follows
+    /// also checks that nothing more is told.
+    fn arrived(w: &Watcher) {
+        assert!(eventually(|| w.changed.load(Ordering::SeqCst)), "no news arrived");
+        std::thread::sleep(SETTLE);
+    }
+
     /// Polls `done` for up to two seconds: news arrive when the system delivers them.
-    fn eventually(mut done: impl FnMut() -> bool) -> bool {
+    pub(crate) fn eventually(mut done: impl FnMut() -> bool) -> bool {
         let end = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             if done() {
@@ -1089,7 +1087,7 @@ mod tests {
         w.settle();
         std::fs::remove_dir_all(dir.join("sub/dist")).unwrap();
         std::fs::create_dir(dir.join("sub/dist")).unwrap();
-        std::thread::sleep(SETTLE);
+        arrived(&w);
         let Some(News::Folders { folders, touched }) = w.take_news() else { panic!("the folder is named") };
         assert!(folders.contains(&dir.join("sub")), "{folders:?}");
         assert!(touched.contains(&dir.join("sub/dist")), "{touched:?}");
