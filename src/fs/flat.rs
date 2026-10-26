@@ -63,6 +63,8 @@ impl Flattener {
         let walked = roots.clone();
         thread::spawn(move || {
             if let Some(found) = walk(&walked, &flag, &count) {
+                #[cfg(test)]
+                held::wait(&walked);
                 // The receiver only disappears when the walk is no longer wanted.
                 let _ = tx.send(found);
                 wake();
@@ -85,6 +87,41 @@ impl Flattener {
 impl Drop for Flattener {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Walks of roots inside a held folder found everything but are not done
+/// until the hold is dropped, so a test can act while one runs.
+#[cfg(test)]
+pub(crate) mod held {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Condvar, Mutex, MutexGuard};
+
+    static HELD: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    static MOVED: Condvar = Condvar::new();
+
+    fn lock() -> MutexGuard<'static, Vec<PathBuf>> {
+        HELD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Holds walks of roots inside `dir` while the result lives.
+    pub(crate) fn hold(dir: &Path) -> Hold {
+        lock().push(dir.to_path_buf());
+        Hold(dir.to_path_buf())
+    }
+
+    pub(crate) struct Hold(PathBuf);
+
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            lock().retain(|held| held != &self.0);
+            MOVED.notify_all();
+        }
+    }
+
+    pub(super) fn wait(roots: &[PathBuf]) {
+        let inside = |held: &Vec<PathBuf>| roots.iter().any(|root| held.iter().any(|dir| root.starts_with(dir)));
+        drop(MOVED.wait_while(lock(), |held| inside(held)).unwrap_or_else(|e| e.into_inner()));
     }
 }
 
