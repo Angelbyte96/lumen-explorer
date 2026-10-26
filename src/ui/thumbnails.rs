@@ -73,10 +73,10 @@ impl Default for Thumbnails {
 }
 
 impl Thumbnails {
-    /// An image file's picture and its size in pixels once read; asks for it
-    /// otherwise. `None` for anything else.
+    /// An image file's picture or a video's frame and its size in pixels once
+    /// read; asks for it otherwise. `None` for anything else.
     pub fn picture(&self, entry: &Entry) -> Option<(egui::TextureId, egui::Vec2)> {
-        if entry.is_dir || !crate::fs::preview::is_image(&entry.path) {
+        if entry.is_dir || !crate::fs::thumbs::has_picture(&entry.path) {
             return None;
         }
         self.picture_at(&entry.path, entry.modified)
@@ -95,7 +95,7 @@ impl Thumbnails {
             Peek::Empty => Held::Nothing,
             Peek::OnlyFolders => Held::Folders,
             Peek::File(path, modified) => {
-                if crate::fs::preview::is_image(path)
+                if crate::fs::thumbs::has_picture(path)
                     && let Some((texture, size)) = self.picture_at(path, *modified)
                 {
                     return Held::Picture(texture, size);
@@ -282,6 +282,36 @@ mod tests {
         let (again, size) = wait(&mut thumbs, &ctx, &changed).expect("read again");
         assert_eq!(size, egui::vec2(10.0, 30.0));
         assert_ne!(first, again);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_video_gets_its_frame_as_its_picture() {
+        let dir = fresh_fixture("thumbnails-video");
+        let path = dir.join("clip.mp4");
+        crate::fs::video::tests::write_video(&path, 40, 20, 2.0);
+        let ctx = egui::Context::default();
+        let mut thumbs = Thumbnails::default();
+        let entry = file(&path, None);
+        assert!(thumbs.picture(&entry).is_none(), "not read yet");
+        assert_eq!(*thumbs.wanted.borrow(), vec![Job::Picture(path.clone(), None)], "asked while drawing");
+        let (_, size) = wait(&mut thumbs, &ctx, &entry).expect("read");
+        assert_eq!(size, egui::vec2(40.0, 20.0));
+    }
+
+    #[test]
+    fn a_folder_whose_first_file_is_a_video_asks_for_its_frame() {
+        let dir = fresh_fixture("thumbnails-peek-video");
+        let album = dir.join("album");
+        std::fs::create_dir_all(&album).unwrap();
+        std::fs::write(album.join("a.mp4"), "").unwrap();
+        std::fs::write(album.join("b.txt"), "hello").unwrap();
+        let ctx = egui::Context::default();
+        let mut thumbs = Thumbnails::default();
+        let entry = folder(&album, None);
+        assert!(until(&mut thumbs, &ctx, &entry, |held| matches!(held, Held::File(_) | Held::Picture(..))), "peek read");
+        let inner = std::fs::metadata(album.join("a.mp4")).unwrap().modified().ok();
+        assert_eq!(*thumbs.wanted.borrow(), vec![Job::Picture(album.join("a.mp4"), inner)], "the video's frame is asked for");
     }
 
     #[test]
