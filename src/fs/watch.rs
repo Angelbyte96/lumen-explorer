@@ -80,6 +80,11 @@ impl Plan {
 /// (a big copy, a build) and it says everything may have.
 pub const NEWS_LIMIT: usize = 64;
 
+/// The most entries made, removed or renamed [`Watcher::take_news`] names.
+/// Windows names every file made or removed, and a folder is only looked up
+/// among them, so a build or a big paste in a few folders stays below it.
+pub const TOUCHED_LIMIT: usize = 10_000;
+
 /// What changed since the last [`Watcher::take_news`].
 #[derive(Debug, PartialEq)]
 pub enum News {
@@ -138,7 +143,7 @@ fn note(pending: &mut Pending, event: &notify::Result<notify::Event>, scope: &Sc
         }
         _ => pending.all = true,
     }
-    if pending.all || pending.folders.len() > NEWS_LIMIT || pending.touched.len() > NEWS_LIMIT {
+    if pending.all || pending.folders.len() > NEWS_LIMIT || pending.touched.len() > TOUCHED_LIMIT {
         pending.all = true;
         pending.folders.clear();
         pending.touched.clear();
@@ -999,11 +1004,27 @@ mod tests {
         let plan = Plan { alone: vec![PathBuf::from("/home/u/b/sub")], trees: vec![] };
         let scope = &Scope::new(1, Some(Path::new("/home/u/b")), &plan);
         let mut pending = Pending::default();
-        for i in 0..=NEWS_LIMIT {
+        for i in 0..=TOUCHED_LIMIT {
             note(&mut pending, &event(EventKind::Create(CreateKind::Folder), &[&format!("/home/u/b/sub/d{i}")]), scope);
         }
         assert!(pending.touched.is_empty() && pending.folders.is_empty());
         assert_eq!(taken(&mut pending), Some(News::All));
+    }
+
+    #[test]
+    fn many_files_made_in_one_folder_name_that_folder() {
+        use notify::event::{CreateKind, RemoveKind};
+        let plan = Plan { alone: vec![PathBuf::from("/home/u/b/sub")], trees: vec![] };
+        let scope = &Scope::new(1, Some(Path::new("/home/u/b")), &plan);
+        let mut pending = Pending::default();
+        // Windows names a file made or removed as Create(Any) / Remove(Any).
+        for i in 0..=NEWS_LIMIT {
+            note(&mut pending, &event(EventKind::Create(CreateKind::Any), &[&format!("/home/u/b/sub/f{i}.o")]), scope);
+            note(&mut pending, &event(EventKind::Remove(RemoveKind::Any), &[&format!("/home/u/b/sub/g{i}.o")]), scope);
+        }
+        let Some(News::Folders { folders, touched }) = taken(&mut pending) else { panic!("one folder changed") };
+        assert_eq!(folders, HashSet::from([PathBuf::from("/home/u/b/sub")]));
+        assert_eq!(touched.len(), 2 * (NEWS_LIMIT + 1));
     }
 
     #[test]
