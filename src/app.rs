@@ -5303,6 +5303,51 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_from_the_watch_thread_shows_the_notice_on_the_next_check() {
+        let (ctx, mut app, dir) = app_in("app-flat-refused-later");
+        std::fs::create_dir(dir.join("sub/full")).unwrap();
+        app.watcher = Watcher::start::<fs::watch::tests::Full>(|| {});
+        let hold = app.watcher.hold();
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        assert_eq!(app.notice, None, "the watch thread has not refused yet");
+        drop(hold);
+        app.watcher.settle();
+        app.refresh_if_changed(&ctx);
+        assert_eq!(app.notice.as_deref(), Some("Too many folders to watch: press F5 to refresh"));
+        assert!(app.tab.flat_refused);
+    }
+
+    #[test]
+    fn a_walk_of_roots_no_longer_listed_lands_nowhere() {
+        let (ctx, mut app, dir) = app_in("app-flat-stale-walk");
+        std::fs::create_dir(dir.join("sub/deeper")).unwrap();
+        app.handle_action(&ctx, Action::ToggleFlat);
+        app.walk_flat(&ctx);
+        let ordered = app.watcher.generation();
+        // Other roots listed meanwhile, without a walk of their own.
+        app.tab.view.set_flat(vec![dir.join("sub")]);
+        land_flat(&ctx, &mut app);
+        assert!(app.tab.flat_folders.is_empty(), "its folders are not taken");
+        assert_eq!(app.watcher.generation(), ordered, "nor watched");
+        assert!(!app.tab.view.lists(&dir.join("sub/deeper")), "nor listed");
+    }
+
+    #[test]
+    fn a_reload_of_a_flattened_folder_keeps_its_subfolders_watched_until_the_walk() {
+        let (ctx, mut app, dir) = app_in("app-flat-reload-watch");
+        std::fs::create_dir(dir.join("sub/deeper")).unwrap();
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        app.handle_action(&ctx, Action::Reload);
+        land(&mut app);
+        assert!(app.tab.flattener.is_none() && app.tab.flat_due, "listed, its walk not started yet");
+        app.watcher.settle();
+        std::fs::write(dir.join("sub/deeper/new.txt"), "").unwrap();
+        assert!(eventually(|| app.watcher.take_changed()), "a subfolder is still watched");
+    }
+
+    #[test]
     fn a_flattened_folder_at_the_limit_is_watched() {
         let (ctx, mut app, dir) = app_in("app-flat-at-limit");
         // `sub` and these: the limit, not one more.
