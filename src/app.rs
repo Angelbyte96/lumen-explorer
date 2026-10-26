@@ -5353,8 +5353,10 @@ mod tests {
         app.watcher.settle();
         std::fs::write(dir.join("sub/deeper/new.txt"), "").unwrap();
         // News left from before name other folders: only this write names `sub/deeper`.
-        let deeper = dir.join("sub/deeper");
-        let told = || matches!(app.watcher.take_news(), Some(fs::watch::News::Folders { folders, .. }) if folders.contains(&deeper));
+        // Told apart by where they lead: the system may spell the path another way.
+        let deeper = dir.join("sub/deeper").canonicalize().unwrap();
+        let is_deeper = |folder: &PathBuf| folder.canonicalize().is_ok_and(|f| f == deeper);
+        let told = || matches!(app.watcher.take_news(), Some(fs::watch::News::Folders { folders, .. }) if folders.iter().any(is_deeper));
         assert!(eventually(told), "a subfolder is still watched");
     }
 
@@ -5957,12 +5959,15 @@ mod tests {
         let (ctx, mut app, dir) = app_in("app-f5-walk-found");
         std::fs::write(dir.join("sub/s.txt"), "S").unwrap();
         app.handle_action(&ctx, Action::ToggleFlat);
+        let hold = fs::flat::held::hold(&dir);
         app.walk_flat(&ctx);
         let walking = app.tab.flattener.as_ref().unwrap();
         assert!(eventually(|| walking.found() > 0), "the walk found entries");
+        assert!(walking.poll().is_none(), "and is still running");
         std::fs::write(dir.join("sub/new.txt"), "N").unwrap();
         app.handle_action(&ctx, Action::Reload);
         assert!(app.tab.flattener.is_none(), "what the walk found is dropped with it");
+        drop(hold);
         land(&mut app);
         land_flat(&ctx, &mut app);
         let mut names = row_names(&app.tab.view);

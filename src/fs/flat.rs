@@ -63,6 +63,8 @@ impl Flattener {
         let walked = roots.clone();
         thread::spawn(move || {
             if let Some(found) = walk(&walked, &flag, &count) {
+                #[cfg(test)]
+                held::wait(&walked);
                 // The receiver only disappears when the walk is no longer wanted.
                 let _ = tx.send(found);
                 wake();
@@ -85,6 +87,53 @@ impl Flattener {
 impl Drop for Flattener {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Walks of roots inside a held folder found everything but are not done
+/// until the hold is dropped, so a test can act while one runs.
+#[cfg(test)]
+pub(crate) mod held {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Condvar, Mutex, MutexGuard};
+
+    static HELD: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    static MOVED: Condvar = Condvar::new();
+
+    fn lock() -> MutexGuard<'static, Vec<PathBuf>> {
+        HELD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Where `path` leads, so two spellings of one folder match.
+    fn real(path: &Path) -> PathBuf {
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    /// Holds walks of roots inside `dir` while the result lives.
+    pub(crate) fn hold(dir: &Path) -> Hold {
+        let dir = real(dir);
+        lock().push(dir.clone());
+        Hold(dir)
+    }
+
+    pub(crate) struct Hold(PathBuf);
+
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            // Only this hold: another of the same folder keeps holding.
+            let mut held = lock();
+            if let Some(i) = held.iter().position(|dir| dir == &self.0) {
+                held.swap_remove(i);
+            }
+            drop(held);
+            MOVED.notify_all();
+        }
+    }
+
+    pub(super) fn wait(roots: &[PathBuf]) {
+        let roots: Vec<PathBuf> = roots.iter().map(|root| real(root)).collect();
+        let inside = |held: &Vec<PathBuf>| roots.iter().any(|root| held.iter().any(|dir| root.starts_with(dir)));
+        drop(MOVED.wait_while(lock(), |held| inside(held)).unwrap_or_else(|e| e.into_inner()));
     }
 }
 
@@ -303,6 +352,42 @@ mod tests {
         let (roots, walked) = flattener.poll().expect("finished");
         assert_eq!(roots, [root.join("deps")]);
         assert_eq!(walked.found.len(), 3);
+    }
+
+    /// Whether a walk of `root` is delivered within `wait`.
+    fn delivered(root: &Path, wait: std::time::Duration) -> (Flattener, mpsc::Receiver<()>, bool) {
+        let (tx, rx) = mpsc::channel();
+        let flattener = Flattener::start(vec![root.to_path_buf()], move || {
+            let _ = tx.send(());
+        });
+        let done = rx.recv_timeout(wait).is_ok();
+        (flattener, rx, done)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hold_of_a_folder_named_another_way_holds_its_walks_too() {
+        let root = tree("flat-held-link");
+        let link = root.with_file_name("flat-held-link-alias");
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let hold = super::held::hold(&link);
+        let (_walk, rx, done) = delivered(&root.join("deps"), std::time::Duration::from_millis(200));
+        assert!(!done, "held: the link leads to the same folder");
+        drop(hold);
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok(), "let go");
+    }
+
+    #[test]
+    fn dropping_one_of_two_holds_of_a_folder_keeps_the_other() {
+        let root = tree("flat-held-twice");
+        let first = super::held::hold(&root);
+        let second = super::held::hold(&root);
+        drop(first);
+        let (_walk, rx, done) = delivered(&root.join("deps"), std::time::Duration::from_millis(200));
+        assert!(!done, "the second hold still holds");
+        drop(second);
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok(), "let go");
     }
 
     fn held(folders: &[PathBuf]) -> HashSet<PathBuf> {
