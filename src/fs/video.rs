@@ -36,16 +36,36 @@ pub fn is_video(path: &Path) -> bool {
 /// `side`; `original` is the video's own size.
 #[cfg(not(windows))]
 pub fn frame(path: &Path, side: u32) -> Result<Picture, Failure> {
-    frame_with("ffmpeg", path, side)
+    frame_with("ffmpeg", "ffprobe", path, side)
+}
+
+/// Where to take the frame from, in seconds: a tenth of the way in, as
+/// ffmpegthumbnailer does, past a black or fading start; the start when the
+/// duration is unknown.
+#[cfg(not(windows))]
+fn seek_for(duration: Option<f64>) -> Option<f64> {
+    duration.map(|seconds| seconds / 10.0)
+}
+
+/// The video's length in seconds, read by ffprobe (installed with ffmpeg).
+#[cfg(not(windows))]
+fn duration_with(program: &str, path: &Path) -> Option<f64> {
+    let mut command = std::process::Command::new(program);
+    command.args(["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"]);
+    command.arg(Path::new(".").join(path));
+    let out = super::preview::run_for(command, TIMEOUT).ok()?;
+    // "N/A" when the container does not say.
+    String::from_utf8_lossy(&out).trim().parse::<f64>().ok().filter(|seconds| seconds.is_finite() && *seconds > 0.0)
 }
 
 #[cfg(not(windows))]
-fn frame_with(program: &str, path: &Path, side: u32) -> Result<Picture, Failure> {
+fn frame_with(program: &str, probe: &str, path: &Path, side: u32) -> Result<Picture, Failure> {
     use super::preview::RunError;
-    // Second 1 skips a black first frame; a shorter video gives nothing
-    // there (and exits fine), so it is read again from the start.
+    // A seek that lands past the last frame gives nothing (and exits fine),
+    // so the video is read again from the start.
+    let seek = seek_for(duration_with(probe, path)).map(|seconds| format!("{seconds:.3}"));
     let mut png = Vec::new();
-    for seek in [Some("1"), None] {
+    for seek in [seek.as_deref(), None] {
         let mut command = std::process::Command::new(program);
         command.args(["-v", "error", "-nostdin"]);
         if let Some(seek) = seek {
@@ -60,7 +80,8 @@ fn frame_with(program: &str, path: &Path, side: u32) -> Result<Picture, Failure>
             Err(RunError::TimedOut) => return Err(Failure::TimedOut),
             Err(RunError::Failed) => return Err(Failure::Failed),
         };
-        if !png.is_empty() {
+        // Without a seek there is nothing else to try.
+        if !png.is_empty() || seek.is_none() {
             break;
         }
     }
@@ -113,6 +134,38 @@ pub(crate) mod tests {
         assert!(made.success(), "ffmpeg made {}", path.display());
     }
 
+    /// A 20 s video, 40 x 20, black for its first 1.5 s and red after.
+    #[cfg(not(windows))]
+    fn write_late_start(path: &Path) {
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-nostdin", "-y"])
+            .args(["-f", "lavfi", "-i", "color=c=black:size=40x20:rate=10:duration=1.5"])
+            .args(["-f", "lavfi", "-i", "color=c=red:size=40x20:rate=10:duration=18.5"])
+            .args(["-filter_complex", "[0][1]concat=n=2:v=1", "-pix_fmt", "yuv420p"])
+            .arg(path)
+            .status()
+            .expect("the video tests need ffmpeg");
+        assert!(made.success(), "ffmpeg made {}", path.display());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_frame_comes_from_a_tenth_of_the_way_in_past_a_black_start() {
+        let dir = fresh_fixture("video-late-start");
+        write_late_start(&dir.join("intro.mp4"));
+        let picture = frame(&dir.join("intro.mp4"), 256).expect("a frame");
+        let pixel = &picture.rgba[(10 * 40 + 20) * 4..][..4];
+        assert!(pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60, "red at 2 s, not the black start: {pixel:?}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_seek_point_is_a_tenth_of_the_duration_or_the_start_when_unknown() {
+        assert_eq!(seek_for(Some(600.0)), Some(60.0));
+        assert_eq!(seek_for(Some(0.3)), Some(0.03));
+        assert_eq!(seek_for(None), None);
+    }
+
     #[test]
     fn videos_are_told_by_their_extension_in_any_case() {
         for name in ["a.mp4", "b.MKV", "c.webm", "d.Mov", "e.avi", "f.m4v", "g.ogv"] {
@@ -138,7 +191,7 @@ pub(crate) mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn a_video_shorter_than_the_seek_point_still_gives_its_first_frame() {
+    fn a_very_short_video_still_gives_a_frame() {
         let dir = fresh_fixture("video-short");
         write_video(&dir.join("short.webm"), 40, 20, 0.3);
         assert_eq!(frame(&dir.join("short.webm"), 256).expect("a frame").size, [40, 20]);
@@ -152,7 +205,7 @@ pub(crate) mod tests {
         assert_eq!(frame(&dir.join("bad.mp4"), 256).err(), Some(Failure::Failed));
         assert_eq!(frame(&dir.join("missing.mp4"), 256).err(), Some(Failure::Failed));
         write_video(&dir.join("good.mp4"), 40, 20, 1.0);
-        assert_eq!(frame_with("lumen-no-such-ffmpeg", &dir.join("good.mp4"), 256).err(), Some(Failure::Missing));
+        assert_eq!(frame_with("lumen-no-such-ffmpeg", "lumen-no-such-ffprobe", &dir.join("good.mp4"), 256).err(), Some(Failure::Missing));
     }
 
     #[cfg(windows)]
