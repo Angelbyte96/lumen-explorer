@@ -10,12 +10,22 @@ use std::thread;
 
 use super::entry::Entry;
 
+/// What a [`walk`] found.
+pub struct Walk {
+    /// Everything inside the roots, all the way down.
+    pub found: Vec<Entry>,
+    /// The folders read: the roots and the folders inside them, the ones a
+    /// change in shows in the listing.
+    pub folders: Vec<PathBuf>,
+}
+
 /// Everything inside `roots`, all the way down (not the roots themselves).
 /// Folders that cannot be read are skipped, and a link to a folder is listed
 /// but not entered, so a link back up cannot loop. Returns `None` when
 /// `cancel` is set.
-pub fn walk(roots: &[PathBuf], cancel: &AtomicBool) -> Option<Vec<Entry>> {
+pub fn walk(roots: &[PathBuf], cancel: &AtomicBool) -> Option<Walk> {
     let mut found = Vec::new();
+    let mut folders = Vec::new();
     // A stack, not recursion: a very deep tree cannot overflow it.
     let mut pending: Vec<PathBuf> = roots.iter().rev().cloned().collect();
     while let Some(dir) = pending.pop() {
@@ -25,8 +35,9 @@ pub fn walk(roots: &[PathBuf], cancel: &AtomicBool) -> Option<Vec<Entry>> {
         let Ok(entries) = super::lister::read_entries(&dir) else { continue };
         pending.extend(entries.iter().filter(|e| e.is_dir && !is_link(&e.path)).map(|e| e.path.clone()).rev());
         found.extend(entries);
+        folders.push(dir);
     }
-    (!cancel.load(Ordering::Relaxed)).then_some(found)
+    (!cancel.load(Ordering::Relaxed)).then_some(Walk { found, folders })
 }
 
 fn is_link(path: &Path) -> bool {
@@ -36,7 +47,7 @@ fn is_link(path: &Path) -> bool {
 /// A walk running on its own thread. Dropping it cancels the walk.
 pub struct Flattener {
     roots: Vec<PathBuf>,
-    rx: Receiver<Vec<Entry>>,
+    rx: Receiver<Walk>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -58,7 +69,7 @@ impl Flattener {
     }
 
     /// The roots walked and what they hold, once the walk is done.
-    pub fn poll(&self) -> Option<(Vec<PathBuf>, Vec<Entry>)> {
+    pub fn poll(&self) -> Option<(Vec<PathBuf>, Walk)> {
         self.rx.try_recv().ok().map(|found| (self.roots.clone(), found))
     }
 }
@@ -97,7 +108,7 @@ mod tests {
     #[test]
     fn walk_lists_every_file_and_folder_under_the_root() {
         let root = tree("flat-walk-all");
-        let found = walk(std::slice::from_ref(&root), &AtomicBool::new(false)).unwrap();
+        let found = walk(std::slice::from_ref(&root), &AtomicBool::new(false)).unwrap().found;
         assert_eq!(names(&found, &root), ["build", "deps", "deps/inner", "deps/inner/deep.rs", "deps/lib.d", "top.txt"]);
         let deep = found.iter().find(|e| e.name == "deep.rs").unwrap();
         assert_eq!(deep.size, Some(3));
@@ -108,8 +119,25 @@ mod tests {
     #[test]
     fn walk_of_several_roots_lists_only_what_they_hold() {
         let root = tree("flat-walk-roots");
-        let found = walk(&[root.join("deps")], &AtomicBool::new(false)).unwrap();
+        let found = walk(&[root.join("deps")], &AtomicBool::new(false)).unwrap().found;
         assert_eq!(names(&found, &root), ["deps/inner", "deps/inner/deep.rs", "deps/lib.d"]);
+    }
+
+    #[test]
+    fn walk_tells_the_folders_it_read() {
+        let root = tree("flat-walk-folders");
+        let walked = walk(&[root.join("deps"), root.join("nope")], &AtomicBool::new(false)).unwrap();
+        assert_eq!(walked.folders, [root.join("deps"), root.join("deps/inner")], "the root too; not one that cannot be read");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_does_not_tell_a_link_to_a_folder_as_read() {
+        let root = tree("flat-walk-folders-link");
+        std::os::unix::fs::symlink(root.join("build"), root.join("deps/link")).unwrap();
+        let walked = walk(&[root.join("deps")], &AtomicBool::new(false)).unwrap();
+        assert_eq!(walked.folders, [root.join("deps"), root.join("deps/inner")]);
+        assert!(walked.found.iter().any(|e| e.name == "link"), "listed all the same");
     }
 
     #[test]
@@ -121,8 +149,9 @@ mod tests {
     #[test]
     fn an_unreadable_root_lists_nothing() {
         let root = tree("flat-walk-missing");
-        let found = walk(&[root.join("nope")], &AtomicBool::new(false)).unwrap();
-        assert!(found.is_empty());
+        let walked = walk(&[root.join("nope")], &AtomicBool::new(false)).unwrap();
+        assert!(walked.found.is_empty());
+        assert!(walked.folders.is_empty());
     }
 
     #[test]
@@ -133,8 +162,8 @@ mod tests {
             let _ = tx.send(());
         });
         rx.recv().unwrap();
-        let (roots, found) = flattener.poll().expect("finished");
+        let (roots, walked) = flattener.poll().expect("finished");
         assert_eq!(roots, [root.join("deps")]);
-        assert_eq!(found.len(), 3);
+        assert_eq!(walked.found.len(), 3);
     }
 }
