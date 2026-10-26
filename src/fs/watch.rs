@@ -222,7 +222,7 @@ impl Watcher {
     }
 
     /// [`Watcher::new`] on the backend `W`.
-    fn start<W: notify::Watcher + Send + 'static>(wake: impl Fn() + Send + Sync + 'static) -> Self {
+    pub(crate) fn start<W: notify::Watcher + Send + 'static>(wake: impl Fn() + Send + Sync + 'static) -> Self {
         let wake = Arc::new(wake);
         let changed = Arc::new(AtomicBool::new(false));
         let scope: Arc<Mutex<Scope>> = Arc::default();
@@ -392,14 +392,14 @@ impl Watcher {
 
     /// Keeps the watch thread from carrying out orders while the result lives.
     #[cfg(test)]
-    fn hold(&self) -> Hold {
+    pub(crate) fn hold(&self) -> Hold {
         *lock(&self.probe.held) = true;
         Hold(self.probe.clone())
     }
 }
 
 #[cfg(test)]
-struct Hold(Arc<Probe>);
+pub(crate) struct Hold(Arc<Probe>);
 
 #[cfg(test)]
 impl Drop for Hold {
@@ -785,7 +785,7 @@ pub(crate) mod tests {
     }
 
     /// Notify's own watcher, but the system's watches run out at a folder named `full`.
-    struct Full(RecommendedWatcher);
+    pub(crate) struct Full(RecommendedWatcher);
 
     impl notify::Watcher for Full {
         fn new<F: notify::EventHandler>(handler: F, config: Config) -> notify::Result<Self> {
@@ -870,6 +870,103 @@ pub(crate) mod tests {
         std::fs::write(dir.join("top.txt"), "").unwrap();
         std::thread::sleep(SETTLE);
         assert!(!w.take_changed(), "nothing stays watched");
+    }
+
+    /// Notify's own watcher, but watching a folder named `full` waits for
+    /// [`RELEASED`], then says the system's watches ran out.
+    struct Stalls(RecommendedWatcher);
+
+    static STALLED: AtomicBool = AtomicBool::new(false);
+    static RELEASED: AtomicBool = AtomicBool::new(false);
+
+    impl notify::Watcher for Stalls {
+        fn new<F: notify::EventHandler>(handler: F, config: Config) -> notify::Result<Self> {
+            RecommendedWatcher::new(handler, config).map(Stalls)
+        }
+
+        fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
+            if path.file_name().is_some_and(|name| name == "full") {
+                STALLED.store(true, Ordering::SeqCst);
+                while !RELEASED.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                return Err(notify::Error::new(notify::ErrorKind::MaxFilesWatch));
+            }
+            self.0.watch(path, mode)
+        }
+
+        fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+            self.0.unwatch(path)
+        }
+
+        fn kind() -> notify::WatcherKind {
+            RecommendedWatcher::kind()
+        }
+    }
+
+    #[test]
+    fn a_refusal_of_an_order_already_replaced_is_not_reported() {
+        let dir = fresh_fixture("watch-refused-superseded");
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("full")).unwrap();
+        let mut w = Watcher::start::<Stalls>(|| {});
+        w.watch(&dir, &[dir.join("a"), dir.join("full")]);
+        assert!(eventually(|| STALLED.load(Ordering::SeqCst)), "the watch thread got to `full`");
+        // Listed alone again while the system was refusing the older order.
+        w.watch(&dir, &[dir.join("a")]);
+        RELEASED.store(true, Ordering::SeqCst);
+        w.settle();
+        assert!(!w.take_refused(), "the refusal was of an order already replaced");
+        std::fs::write(dir.join("a/x"), "").unwrap();
+        assert!(eventually(|| w.take_changed()), "the newer order's folders are watched");
+    }
+
+    /// Notify's own watcher, but watching a folder named `stuck` waits for
+    /// [`UNSTUCK`], then fails as a folder gone would.
+    struct Stuck(RecommendedWatcher);
+
+    static STUCK: AtomicBool = AtomicBool::new(false);
+    static UNSTUCK: AtomicBool = AtomicBool::new(false);
+
+    impl notify::Watcher for Stuck {
+        fn new<F: notify::EventHandler>(handler: F, config: Config) -> notify::Result<Self> {
+            RecommendedWatcher::new(handler, config).map(Stuck)
+        }
+
+        fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
+            if path.file_name().is_some_and(|name| name == "stuck") {
+                STUCK.store(true, Ordering::SeqCst);
+                while !UNSTUCK.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                return Err(notify::Error::path_not_found());
+            }
+            self.0.watch(path, mode)
+        }
+
+        fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+            self.0.unwatch(path)
+        }
+
+        fn kind() -> notify::WatcherKind {
+            RecommendedWatcher::kind()
+        }
+    }
+
+    #[test]
+    fn a_folder_lost_by_an_order_already_replaced_does_not_mark_the_newer_one() {
+        let dir = fresh_fixture("watch-lost-superseded");
+        std::fs::create_dir_all(dir.join("stuck")).unwrap();
+        std::fs::create_dir_all(dir.join("ok")).unwrap();
+        let mut w = Watcher::start::<Stuck>(|| {});
+        w.watch(&dir.join("stuck"), &[]);
+        assert!(eventually(|| STUCK.load(Ordering::SeqCst)), "the watch thread got to `stuck`");
+        w.watch(&dir.join("ok"), &[]);
+        UNSTUCK.store(true, Ordering::SeqCst);
+        w.settle();
+        let ordered = w.generation();
+        w.watch(&dir.join("ok"), &[]);
+        assert_eq!(w.generation(), ordered, "the newer folder is watched: nothing to try again");
     }
 
     #[test]
