@@ -3347,7 +3347,7 @@ impl LumenApp {
     /// Lists the open folder again, keeping the selection and the sort order
     /// (a flattened view walks again once it lands). Never supersedes a
     /// navigation, nor restarts a flatten walk (a busy tree would never
-    /// finish): returns whether it listed. A re-read running is dropped: the
+    /// finish; F5 drops the walk first): returns whether it listed. A re-read running is dropped: the
     /// walk that follows reads everything.
     fn reload_if_idle(&mut self, ctx: &egui::Context) -> bool {
         if self.tab.lister.is_pending(self.tab.shown_id) || self.tab.flattener.is_some() {
@@ -3461,6 +3461,11 @@ impl LumenApp {
             // The drives or the bins are read again there, as the menu's Refresh does.
             Action::Reload if self.on_marker() => self.run_command(ctx, Command::Refresh),
             Action::Reload => {
+                // F5 asks for what is on disk now: a walk running may have read
+                // folders that changed since, so it is dropped and starts again.
+                if !self.tab.lister.is_pending(self.tab.shown_id) {
+                    self.tab.flattener = None;
+                }
                 self.reload_if_idle(ctx);
             }
             Action::ZoomIn => self.tab.view_size = self.tab.view_size.bigger(),
@@ -3988,6 +3993,7 @@ mod tests {
     use super::*;
     use crate::fs::lister::ListError;
     use crate::fs::preview::Content;
+    use crate::fs::watch::tests::eventually;
     use crate::ui::drives_view::DriveColumn;
     use std::path::Path;
     use std::time::Instant;
@@ -4574,8 +4580,7 @@ mod tests {
         land_flat(&ctx, &mut app);
         app.watcher.settle();
         std::fs::write(dir.join("sub/deeper/new.txt"), "").unwrap();
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(app.watcher.take_changed(), "a change in a subfolder of the flattened view");
+        assert!(eventually(|| app.watcher.take_changed()), "a change in a subfolder of the flattened view");
         app.handle_action(&ctx, Action::ToggleFlat);
         app.watcher.settle();
         // Not on Windows: there the subfolder's own date changes too, which the folder reports.
@@ -5302,6 +5307,56 @@ mod tests {
         assert!(!app.tab.lister.is_pending(app.tab.shown_id), "no reload walks them all again");
     }
 
+    // Not on Windows: there the flattened tree is one watch all the way down, so no
+    // folder named `full` is ever watched on its own for the stub to refuse.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_refusal_from_the_watch_thread_shows_the_notice_on_the_next_check() {
+        let (ctx, mut app, dir) = app_in("app-flat-refused-later");
+        std::fs::create_dir(dir.join("sub/full")).unwrap();
+        app.watcher = Watcher::start::<fs::watch::tests::Full>(|| {});
+        let hold = app.watcher.hold();
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        assert_eq!(app.notice, None, "the watch thread has not refused yet");
+        drop(hold);
+        app.watcher.settle();
+        app.refresh_if_changed(&ctx);
+        assert_eq!(app.notice.as_deref(), Some("Too many folders to watch: press F5 to refresh"));
+        assert!(app.tab.flat_refused);
+    }
+
+    #[test]
+    fn a_walk_of_roots_no_longer_listed_lands_nowhere() {
+        let (ctx, mut app, dir) = app_in("app-flat-stale-walk");
+        std::fs::create_dir(dir.join("sub/deeper")).unwrap();
+        app.handle_action(&ctx, Action::ToggleFlat);
+        app.walk_flat(&ctx);
+        let ordered = app.watcher.generation();
+        // Other roots listed meanwhile, without a walk of their own.
+        app.tab.view.set_flat(vec![dir.join("sub")]);
+        land_flat(&ctx, &mut app);
+        assert!(app.tab.flat_folders.is_empty(), "its folders are not taken");
+        assert_eq!(app.watcher.generation(), ordered, "nor watched");
+        assert!(!app.tab.view.lists(&dir.join("sub/deeper")), "nor listed");
+    }
+
+    #[test]
+    fn a_reload_of_a_flattened_folder_keeps_its_subfolders_watched_until_the_walk() {
+        let (ctx, mut app, dir) = app_in("app-flat-reload-watch");
+        std::fs::create_dir(dir.join("sub/deeper")).unwrap();
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        app.handle_action(&ctx, Action::Reload);
+        land(&mut app);
+        assert!(app.tab.flattener.is_none() && app.tab.flat_due, "listed, its walk not started yet");
+        app.watcher.settle();
+        std::thread::sleep(Duration::from_millis(300));
+        app.watcher.take_news();
+        std::fs::write(dir.join("sub/deeper/new.txt"), "").unwrap();
+        assert!(eventually(|| app.watcher.take_changed()), "a subfolder is still watched");
+    }
+
     #[test]
     fn a_flattened_folder_at_the_limit_is_watched() {
         let (ctx, mut app, dir) = app_in("app-flat-at-limit");
@@ -5313,9 +5368,15 @@ mod tests {
         land_flat(&ctx, &mut app);
         assert_eq!(app.notice, None);
         app.watcher.settle();
+        // Some 5,000 system watches: a machine with fewer to spare refuses them, as Lumen should.
+        // Lumen's own limit refuses at once, in `watch`, so the notice above already caught an
+        // off-by-one; only the system refusing later lands here.
+        if app.watcher.take_refused() {
+            eprintln!("skipped: the system has fewer than {} watches to spare", fs::watch::WATCH_LIMIT);
+            return;
+        }
         std::fs::write(dir.join("sub/d1/x.txt"), "").unwrap();
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(app.watcher.take_changed(), "a change deep inside reloads the view");
+        assert!(eventually(|| app.watcher.take_changed()), "a change deep inside reloads the view");
     }
 
     #[test]
@@ -5870,6 +5931,36 @@ mod tests {
         assert!(app.tab.flat_due, "and walked again");
         land_flat(&ctx, &mut app);
         assert!(row_names(&app.tab.view).contains(&"new.txt"), "what the walk found shows up");
+    }
+
+    #[test]
+    fn f5_during_a_flatten_walk_starts_it_again() {
+        let (ctx, mut app, dir) = app_in("app-f5-walking");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        app.walk_flat(&ctx);
+        assert!(app.tab.flattener.is_some(), "walking");
+        std::fs::write(dir.join("sub/new.txt"), "N").unwrap();
+        app.handle_action(&ctx, Action::Reload);
+        assert!(app.tab.flattener.is_none(), "the walk running is dropped");
+        assert_eq!(app.tab.pending_nav, NavKind::Refresh);
+        assert!(app.tab.lister.is_pending(app.tab.shown_id), "the folder is listed again");
+        land(&mut app);
+        assert!(app.tab.view.is_flat(), "still flattened");
+        assert!(app.tab.flat_due, "and walked again");
+        land_flat(&ctx, &mut app);
+        assert!(row_names(&app.tab.view).contains(&"new.txt"), "what the new walk found shows up");
+    }
+
+    #[test]
+    fn f5_while_a_listing_is_in_flight_keeps_the_walk_running() {
+        let (ctx, mut app, dir) = app_in("app-f5-walking-listing");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        app.walk_flat(&ctx);
+        app.navigate_as(&ctx, NavKind::Refresh, dir.clone(), None);
+        let asked = app.tab.lister.latest_id();
+        app.handle_action(&ctx, Action::Reload);
+        assert!(app.tab.flattener.is_some(), "the walk is kept: nothing would start it again");
+        assert_eq!(app.tab.lister.latest_id(), asked, "the listing in flight is not superseded");
     }
 
     #[test]
