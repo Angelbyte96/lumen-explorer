@@ -32,6 +32,8 @@ pub enum Action {
     ToggleHidden,
     /// Ctrl+E: also list what the subfolders hold, all the way down.
     ToggleFlat,
+    /// F5: read the open folder again.
+    Reload,
     /// Previous / next folder in the history (Alt+Left / Alt+Right).
     Back,
     Forward,
@@ -182,6 +184,10 @@ fn read_keys(ctx: &Context, typing: bool, list: bool) -> Vec<Action> {
         }
         if i.consume_key(Modifiers::COMMAND, Key::E) {
             actions.push(Action::ToggleFlat);
+        }
+        // Matching ignores an extra Shift or Alt, so ask for none.
+        if i.modifiers.is_none() && i.consume_key(Modifiers::NONE, Key::F5) {
+            actions.push(Action::Reload);
         }
         if i.consume_key(Modifiers::COMMAND, Key::D) {
             actions.push(Action::ToggleBookmark);
@@ -495,6 +501,15 @@ mod tests {
             Event::Text("e".into()),
         ];
         assert_eq!(actions_for(events), [Action::ToggleFlat]);
+    }
+
+    #[test]
+    fn f5_reloads_only_without_modifiers() {
+        let with = |m: Modifiers| actions_for(vec![Event::ModifiersChanged(m), key(Key::F5, m)]);
+        assert_eq!(with(Modifiers::NONE), [Action::Reload]);
+        for m in [Modifiers::COMMAND, Modifiers::SHIFT, Modifiers::ALT] {
+            assert_eq!(with(m), [], "{m:?}+F5 is not F5");
+        }
     }
 
     #[test]

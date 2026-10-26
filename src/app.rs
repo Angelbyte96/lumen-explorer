@@ -2786,7 +2786,8 @@ impl LumenApp {
         self.tabs[self.active] = Some(old);
         self.active = index;
         self.tab.view.scroll = Some(Scroll::Instant);
-        self.watcher.watch(&self.tab.view.current, self.tab.view.flat_roots());
+        // A flattened tab's folders are watched once its reload walks them.
+        self.watcher.watch(&self.tab.view.current, &[]);
         // A listing still in flight shows fresh contents anyway.
         if !self.tab.lister.is_pending(self.tab.shown_id) {
             self.navigate_as(ctx, NavKind::Refresh, self.tab.view.current.clone(), None);
@@ -2991,7 +2992,12 @@ impl LumenApp {
         if to.is_some() {
             // Opening the Recycle Bin again, even from itself, reads the bins again.
             self.recycle_stale |= self.on_recycle_bin();
-            self.watcher.watch(&self.tab.view.current, self.tab.view.flat_roots());
+            if self.tab.view.is_flat() {
+                // A reload: its folders stay watched until the walk tells them anew.
+                self.watcher.watch_folder(&self.tab.view.current);
+            } else {
+                self.watcher.watch(&self.tab.view.current, &[]);
+            }
             // A reload of a flattened folder walks it again; another folder is not flattened.
             self.tab.flat_due = self.tab.view.is_flat();
             if !self.tab.flat_due {
@@ -3043,9 +3049,25 @@ impl LumenApp {
 
     /// Shows the flatten walk once it is done.
     fn poll_flat(&mut self) {
-        if let Some((roots, found)) = self.tab.flattener.as_ref().and_then(fs::flat::Flattener::poll) {
+        if let Some((roots, walked)) = self.tab.flattener.as_ref().and_then(fs::flat::Flattener::poll) {
             self.tab.flattener = None;
-            self.tab.view.apply_flat(&roots, found);
+            if roots != self.tab.view.flat_roots() {
+                return;
+            }
+            self.tab.view.apply_flat(&roots, walked.found);
+            // A change inside a folder listed reloads the view too.
+            self.watcher.watch(&self.tab.view.current, &walked.folders);
+            self.check_refused();
+        }
+    }
+
+    /// Too many folders to watch, or the system refused one: the view stays
+    /// as it is until F5, so a reload does not walk them all again and again.
+    fn check_refused(&mut self) {
+        if self.watcher.take_refused() {
+            self.notice = Some("Too many folders to watch: press F5 to refresh".into());
+            self.refresh = RefreshTimer::default();
+            self.watcher.take_changed();
         }
     }
 
@@ -3065,8 +3087,8 @@ impl LumenApp {
             self.tab.view.set_flat(next);
             self.tab.flat_due = true;
         }
-        // A change inside a folder listed all the way down reloads the view too.
-        self.watcher.watch(&self.tab.view.current, self.tab.view.flat_roots());
+        // The folder alone, until the walk tells the folders it lists.
+        self.watcher.watch(&self.tab.view.current, &[]);
     }
 
     /// Shows the unfolded folders the readers finished.
@@ -3076,19 +3098,28 @@ impl LumenApp {
         }
     }
 
+    /// Lists the open folder again, keeping the selection and the sort order
+    /// (a flattened view walks again once it lands). Never supersedes a
+    /// navigation, nor restarts a flatten walk (a busy tree would never
+    /// finish): returns whether it listed.
+    fn reload_if_idle(&mut self, ctx: &egui::Context) -> bool {
+        if self.tab.lister.is_pending(self.tab.shown_id) || self.tab.flattener.is_some() {
+            return false;
+        }
+        self.navigate_as(ctx, NavKind::Refresh, self.tab.view.current.clone(), None);
+        true
+    }
+
     /// Reloads the open folder a moment after it changed on disk.
     fn refresh_if_changed(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
+        self.check_refused();
         if self.watcher.take_changed() {
             self.refresh.note_change(now);
         }
-        if self.refresh.take_due(now) {
-            if self.tab.lister.is_pending(self.tab.shown_id) {
-                // Never supersede a navigation; try again once it has landed.
-                self.refresh.note_change(now);
-            } else {
-                self.navigate_as(ctx, NavKind::Refresh, self.tab.view.current.clone(), None);
-            }
+        if self.refresh.take_due(now) && !self.reload_if_idle(ctx) {
+            // Try again once the listing or the walk has landed.
+            self.refresh.note_change(now);
         }
         if let Some(wait) = self.refresh.wait(now) {
             ctx.request_repaint_after(wait);
@@ -3159,6 +3190,11 @@ impl LumenApp {
             Action::FocusPathBar => self.path_popup.open(),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
             Action::ToggleFlat => self.toggle_flat(),
+            // The drives or the bins are read again there, as the menu's Refresh does.
+            Action::Reload if self.on_marker() => self.run_command(ctx, Command::Refresh),
+            Action::Reload => {
+                self.reload_if_idle(ctx);
+            }
             Action::ZoomIn => self.tab.view_size = self.tab.view_size.bigger(),
             Action::ZoomOut => self.tab.view_size = self.tab.view_size.smaller(),
             Action::ZoomReset => self.tab.view_size = ui::view_size::ViewSize::default(),
@@ -4257,10 +4293,13 @@ mod tests {
         let (ctx, mut app, dir) = app_in("app-flat-watch");
         std::fs::create_dir(dir.join("sub/deeper")).unwrap();
         app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        app.watcher.settle();
         std::fs::write(dir.join("sub/deeper/new.txt"), "").unwrap();
         std::thread::sleep(Duration::from_millis(300));
         assert!(app.watcher.take_changed(), "a change in a subfolder of the flattened view");
         app.handle_action(&ctx, Action::ToggleFlat);
+        app.watcher.settle();
         // Not on Windows: there the subfolder's own date changes too, which the folder reports.
         #[cfg(not(windows))]
         {
@@ -4278,6 +4317,7 @@ mod tests {
         std::fs::create_dir(dir.join("sub/deeper")).unwrap();
         app.handle_action(&ctx, Action::ToggleFlat);
         land_flat(&ctx, &mut app);
+        app.watcher.settle();
         let names = |app: &LumenApp| app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i).name.clone()).collect::<Vec<_>>();
         assert!(!names(&app).contains(&"new.txt".to_string()));
         std::fs::write(dir.join("sub/deeper/new.txt"), "N").unwrap();
@@ -4294,6 +4334,58 @@ mod tests {
         let row = app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i)).find(|e| e.name == "new.txt").unwrap().clone();
         assert_eq!(app.tab.view.relative_parent(&row).as_deref(), Some("sub > deeper"), "with its folder dimmed after it");
         assert!(app.tab.view.is_flat(), "still flattened after the reload");
+    }
+
+    #[test]
+    fn a_change_while_the_flatten_walk_runs_waits_for_it_to_land() {
+        let (ctx, mut app, _dir) = app_in("app-flat-busy");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        app.walk_flat(&ctx);
+        assert!(app.tab.flattener.is_some(), "walking");
+        // A change already due.
+        app.refresh.note_change(Instant::now() - REFRESH_DELAY);
+        app.refresh_if_changed(&ctx);
+        assert!(!app.tab.lister.is_pending(app.tab.shown_id), "no reload restarts the walk");
+        land_flat(&ctx, &mut app);
+        std::thread::sleep(REFRESH_DELAY);
+        app.refresh_if_changed(&ctx);
+        assert!(app.tab.lister.is_pending(app.tab.shown_id), "the change reloads once the walk landed");
+    }
+
+    #[test]
+    fn a_flattened_folder_with_more_folders_than_the_limit_is_listed_but_not_watched() {
+        let (ctx, mut app, dir) = app_in("app-flat-too-many");
+        for i in 0..fs::watch::WATCH_LIMIT {
+            std::fs::create_dir(dir.join(format!("sub/d{i}"))).unwrap();
+        }
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        assert!(app.tab.view.lists(&dir.join("sub/d0")), "listed all the same");
+        assert_eq!(app.notice.as_deref(), Some("Too many folders to watch: press F5 to refresh"));
+        app.watcher.settle();
+        std::fs::write(dir.join("top.txt"), "").unwrap();
+        std::fs::write(dir.join("sub/d0/x.txt"), "").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        app.refresh_if_changed(&ctx);
+        std::thread::sleep(REFRESH_DELAY);
+        app.refresh_if_changed(&ctx);
+        assert!(!app.tab.lister.is_pending(app.tab.shown_id), "no reload walks them all again");
+    }
+
+    #[test]
+    fn a_flattened_folder_at_the_limit_is_watched() {
+        let (ctx, mut app, dir) = app_in("app-flat-at-limit");
+        // `sub` and these: the limit, not one more.
+        for i in 1..fs::watch::WATCH_LIMIT {
+            std::fs::create_dir(dir.join(format!("sub/d{i}"))).unwrap();
+        }
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        assert_eq!(app.notice, None);
+        app.watcher.settle();
+        std::fs::write(dir.join("sub/d1/x.txt"), "").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(app.watcher.take_changed(), "a change deep inside reloads the view");
     }
 
     #[test]
@@ -4815,6 +4907,49 @@ mod tests {
         assert_eq!(app.tab.lister.last_requested(), Some(dir.clone()));
         land(&mut app);
         assert_eq!(selection_names(&app.tab.view), ["b.txt"]);
+    }
+
+    #[test]
+    fn f5_reads_the_open_folder_again_and_keeps_the_selection() {
+        let (ctx, mut app, dir) = app_in("app-f5-reload");
+        pick(&mut app, &["b.txt"]);
+        let asked = app.tab.lister.latest_id();
+        app.handle_action(&ctx, Action::Reload);
+        assert_ne!(app.tab.lister.latest_id(), asked, "the folder is listed again");
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.clone()));
+        assert_eq!(app.tab.pending_nav, NavKind::Refresh, "like a reload after a change on disk");
+        let asked = app.tab.lister.latest_id();
+        app.handle_action(&ctx, Action::Reload);
+        assert_eq!(app.tab.lister.latest_id(), asked, "a listing in flight is not superseded");
+        std::fs::write(dir.join("c.txt"), "C").unwrap();
+        land(&mut app);
+        assert_eq!(selection_names(&app.tab.view), ["b.txt"]);
+        assert!(row_names(&app.tab.view).contains(&"c.txt"), "and it shows what changed");
+    }
+
+    #[test]
+    fn f5_on_a_flattened_view_lists_and_walks_it_again() {
+        let (ctx, mut app, dir) = app_in("app-f5-flat");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        land_flat(&ctx, &mut app);
+        std::fs::write(dir.join("sub/new.txt"), "N").unwrap();
+        app.handle_action(&ctx, Action::Reload);
+        assert_eq!(app.tab.pending_nav, NavKind::Refresh);
+        land(&mut app);
+        assert!(app.tab.view.is_flat(), "still flattened");
+        assert!(app.tab.flat_due, "and walked again");
+        land_flat(&ctx, &mut app);
+        assert!(row_names(&app.tab.view).contains(&"new.txt"), "what the walk found shows up");
+    }
+
+    #[test]
+    fn f5_on_this_pc_reads_the_drives_again() {
+        let (ctx, mut app, _) = app_on_this_pc("app-f5-this-pc");
+        app.disks.0 = Some(Instant::now());
+        let asked = app.tab.lister.latest_id();
+        app.handle_action(&ctx, Action::Reload);
+        assert_eq!(app.disks.0, None, "read again on the next frame");
+        assert_eq!(app.tab.lister.latest_id(), asked, "no folder listed");
     }
 
     #[test]
