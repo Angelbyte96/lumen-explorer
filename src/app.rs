@@ -3347,7 +3347,7 @@ impl LumenApp {
     /// Lists the open folder again, keeping the selection and the sort order
     /// (a flattened view walks again once it lands). Never supersedes a
     /// navigation, nor restarts a flatten walk (a busy tree would never
-    /// finish): returns whether it listed. A re-read running is dropped: the
+    /// finish; F5 drops the walk first): returns whether it listed. A re-read running is dropped: the
     /// walk that follows reads everything.
     fn reload_if_idle(&mut self, ctx: &egui::Context) -> bool {
         if self.tab.lister.is_pending(self.tab.shown_id) || self.tab.flattener.is_some() {
@@ -3461,6 +3461,11 @@ impl LumenApp {
             // The drives or the bins are read again there, as the menu's Refresh does.
             Action::Reload if self.on_marker() => self.run_command(ctx, Command::Refresh),
             Action::Reload => {
+                // F5 asks for what is on disk now: a walk running may have read
+                // folders that changed since, so it is dropped and starts again.
+                if !self.tab.lister.is_pending(self.tab.shown_id) {
+                    self.tab.flattener = None;
+                }
                 self.reload_if_idle(ctx);
             }
             Action::ZoomIn => self.tab.view_size = self.tab.view_size.bigger(),
@@ -5919,6 +5924,24 @@ mod tests {
         assert!(app.tab.flat_due, "and walked again");
         land_flat(&ctx, &mut app);
         assert!(row_names(&app.tab.view).contains(&"new.txt"), "what the walk found shows up");
+    }
+
+    #[test]
+    fn f5_during_a_flatten_walk_starts_it_again() {
+        let (ctx, mut app, dir) = app_in("app-f5-walking");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        app.walk_flat(&ctx);
+        assert!(app.tab.flattener.is_some(), "walking");
+        std::fs::write(dir.join("sub/new.txt"), "N").unwrap();
+        app.handle_action(&ctx, Action::Reload);
+        assert!(app.tab.flattener.is_none(), "the walk running is dropped");
+        assert_eq!(app.tab.pending_nav, NavKind::Refresh);
+        assert!(app.tab.lister.is_pending(app.tab.shown_id), "the folder is listed again");
+        land(&mut app);
+        assert!(app.tab.view.is_flat(), "still flattened");
+        assert!(app.tab.flat_due, "and walked again");
+        land_flat(&ctx, &mut app);
+        assert!(row_names(&app.tab.view).contains(&"new.txt"), "what the new walk found shows up");
     }
 
     #[test]

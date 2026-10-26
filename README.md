@@ -129,7 +129,7 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 | Ctrl+D | Bookmark the current folder, or remove its bookmark (same as the ☆ button) |
 | Ctrl+H | Show / hide hidden files |
 | Ctrl+E | Toggle subfolders: also list everything the subfolders hold, all the way down, sorted with the rest; each entry from a subfolder shows its folder dimmed after its name (`lumen.pdb > deps`); a click on that folder opens it with the entry selected, and the status bar counts every row. While the subfolders are read the status bar says "Listing subfolders… N items" (Esc stops it); a very big tree, such as a home folder, can take a while. With folders picked (Ctrl+click, Shift, Ctrl+A), only what those hold is added, or taken out again when they already are listed. Again with nothing picked, or opening another folder, lists the folder alone. Not on This PC or the Recycle Bin |
-| F5 | Reload the open folder (subfolders listed or not), keeping the selection and the sort order; on This PC and the Recycle Bin it reads the drives or the bins again |
+| F5 | Reload the open folder (subfolders listed or not), keeping the selection and the sort order; while subfolders are being listed it starts listing them again; on This PC and the Recycle Bin it reads the drives or the bins again |
 | Alt+← / Alt+→ | Back / forward through visited folders |
 | Alt+↑ | Go to the parent folder, selecting the folder you came from (works with text in the filter) |
 | Type text | Filter the list to names containing every typed word, in any order, ignoring case ("slides contenido" finds "Slides de contenido"); a name typed in full comes first; the matched letters are highlighted and the text is shown at the bottom left |
