@@ -5307,6 +5307,9 @@ mod tests {
         assert!(!app.tab.lister.is_pending(app.tab.shown_id), "no reload walks them all again");
     }
 
+    // Not on Windows: there the flattened tree is one watch all the way down, so no
+    // folder named `full` is ever watched on its own for the stub to refuse.
+    #[cfg(not(windows))]
     #[test]
     fn a_refusal_from_the_watch_thread_shows_the_notice_on_the_next_check() {
         let (ctx, mut app, dir) = app_in("app-flat-refused-later");
