@@ -61,6 +61,9 @@ pub fn load(path: &Path) -> Content {
     if has_extension(path, &["pdf"]) {
         return pdf_page(path);
     }
+    if super::video::is_video(path) {
+        return video_content(super::video::frame(path, IMAGE_MAX_SIDE));
+    }
     if is_image(path) {
         if meta.len() > IMAGE_LIMIT {
             return Content::Info("Image larger than 50 MB: no preview".into());
@@ -125,9 +128,22 @@ fn pdf_page(path: &Path) -> Content {
     }
 }
 
+/// A video's frame, or why there is none.
+fn video_content(frame: Result<Picture, super::video::Failure>) -> Content {
+    use super::video::Failure;
+    match frame {
+        Ok(picture) => Content::Image(picture),
+        #[cfg(not(windows))]
+        Err(Failure::Missing) => Content::Info("Install ffmpeg to preview videos".into()),
+        #[cfg(not(windows))]
+        Err(Failure::TimedOut) => Content::Info("This video takes too long to preview".into()),
+        Err(Failure::Failed) => Content::Info("Cannot preview this video".into()),
+    }
+}
+
 #[cfg(not(windows))]
 #[derive(Debug, PartialEq, Eq)]
-enum RunError {
+pub(crate) enum RunError {
     /// The program is not installed.
     Missing,
     /// It ran past the time allowed and was stopped.
@@ -138,7 +154,7 @@ enum RunError {
 
 /// Runs `command` and returns what it wrote, stopping it after `timeout`.
 #[cfg(not(windows))]
-fn run_for(mut command: std::process::Command, timeout: std::time::Duration) -> Result<Vec<u8>, RunError> {
+pub(crate) fn run_for(mut command: std::process::Command, timeout: std::time::Duration) -> Result<Vec<u8>, RunError> {
     use std::process::Stdio;
     let mut child = match command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
         Ok(child) => child,
@@ -177,11 +193,11 @@ pub(crate) fn decode_fit(path: &Path, side: u32) -> Result<Picture, image::Image
     decode_reader_fit(image::ImageReader::open(path)?, side)
 }
 
-fn decode_reader<R: std::io::BufRead + std::io::Seek>(reader: image::ImageReader<R>) -> Result<Picture, image::ImageError> {
+pub(crate) fn decode_reader<R: std::io::BufRead + std::io::Seek>(reader: image::ImageReader<R>) -> Result<Picture, image::ImageError> {
     decode_reader_fit(reader, IMAGE_MAX_SIDE)
 }
 
-fn decode_reader_fit<R: std::io::BufRead + std::io::Seek>(reader: image::ImageReader<R>, side: u32) -> Result<Picture, image::ImageError> {
+pub(crate) fn decode_reader_fit<R: std::io::BufRead + std::io::Seek>(reader: image::ImageReader<R>, side: u32) -> Result<Picture, image::ImageError> {
     // The size in the header is checked against the limit before any pixel is read.
     let mut reader = reader.with_guessed_format()?;
     let mut limits = image::Limits::default();
@@ -352,6 +368,28 @@ mod tests {
         assert_eq!(info_of(load(&dir.join("bad.pdf"))), "Cannot preview this PDF");
         write_pdf(&dir.join("good.pdf"));
         assert_eq!(info_of(pdf_page_with("lumen-no-such-pdftoppm", &dir.join("good.pdf"))), "Install poppler-utils to preview PDFs");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_video_shows_a_frame_with_its_own_size() {
+        let dir = fresh_fixture("preview-video");
+        crate::fs::video::tests::write_video(&dir.join("clip.MP4"), 320, 160, 2.0);
+        let picture = picture_of(load(&dir.join("clip.MP4")));
+        assert_eq!((picture.size, picture.original), ([320, 160], [320, 160]));
+    }
+
+    #[test]
+    fn a_video_without_a_frame_says_why() {
+        let dir = fresh_fixture("preview-video-broken");
+        std::fs::write(dir.join("bad.mkv"), "not a video").unwrap();
+        assert_eq!(info_of(load(&dir.join("bad.mkv"))), "Cannot preview this video");
+        #[cfg(not(windows))]
+        {
+            use crate::fs::video::Failure;
+            assert_eq!(info_of(video_content(Err(Failure::Missing))), "Install ffmpeg to preview videos");
+            assert_eq!(info_of(video_content(Err(Failure::TimedOut))), "This video takes too long to preview");
+        }
     }
 
     #[cfg(windows)]
