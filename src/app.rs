@@ -1018,7 +1018,7 @@ impl RefreshTimer {
             _ => News::All,
         };
         self.news = Some(match news {
-            News::Folders { folders, touched } if folders.len().max(touched.len()) > fs::watch::NEWS_LIMIT => News::All,
+            News::Folders { folders, touched } if folders.len() > fs::watch::NEWS_LIMIT || touched.len() > fs::watch::TOUCHED_LIMIT => News::All,
             news => news,
         });
     }
@@ -4874,6 +4874,15 @@ mod tests {
         changed(&ctx, &mut app, &folders);
         assert!(app.tab.lister.is_pending(app.tab.shown_id));
         assert!(app.tab.refresher.is_none());
+    }
+
+    #[test]
+    fn news_of_many_files_in_one_folder_re_read_only_that_folder() {
+        let (ctx, mut app, dir) = flat_app("app-flat-reread-many-files");
+        let files: Vec<PathBuf> = (0..=fs::watch::NEWS_LIMIT).map(|i| dir.join(format!("sub/f{i}.o"))).collect();
+        changed_touching(&ctx, &mut app, &[dir.join("sub")], &files);
+        assert!(!app.tab.lister.is_pending(app.tab.shown_id), "no walk of the whole tree");
+        assert!(app.tab.refresher.is_some());
     }
 
     #[test]
