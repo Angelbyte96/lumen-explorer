@@ -5348,6 +5348,8 @@ mod tests {
         land(&mut app);
         assert!(app.tab.flattener.is_none() && app.tab.flat_due, "listed, its walk not started yet");
         app.watcher.settle();
+        std::thread::sleep(Duration::from_millis(300));
+        app.watcher.take_news();
         std::fs::write(dir.join("sub/deeper/new.txt"), "").unwrap();
         assert!(eventually(|| app.watcher.take_changed()), "a subfolder is still watched");
     }
@@ -5364,6 +5366,8 @@ mod tests {
         assert_eq!(app.notice, None);
         app.watcher.settle();
         // Some 5,000 system watches: a machine with fewer to spare refuses them, as Lumen should.
+        // Lumen's own limit refuses at once, in `watch`, so the notice above already caught an
+        // off-by-one; only the system refusing later lands here.
         if app.watcher.take_refused() {
             eprintln!("skipped: the system has fewer than {} watches to spare", fs::watch::WATCH_LIMIT);
             return;
@@ -5942,6 +5946,18 @@ mod tests {
         assert!(app.tab.flat_due, "and walked again");
         land_flat(&ctx, &mut app);
         assert!(row_names(&app.tab.view).contains(&"new.txt"), "what the new walk found shows up");
+    }
+
+    #[test]
+    fn f5_while_a_listing_is_in_flight_keeps_the_walk_running() {
+        let (ctx, mut app, dir) = app_in("app-f5-walking-listing");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        app.walk_flat(&ctx);
+        app.navigate_as(&ctx, NavKind::Refresh, dir.clone(), None);
+        let asked = app.tab.lister.latest_id();
+        app.handle_action(&ctx, Action::Reload);
+        assert!(app.tab.flattener.is_some(), "the walk is kept: nothing would start it again");
+        assert_eq!(app.tab.lister.latest_id(), asked, "the listing in flight is not superseded");
     }
 
     #[test]

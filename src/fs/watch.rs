@@ -549,6 +549,8 @@ pub(crate) mod tests {
         assert!(changed.contains(&dir.join("sub/deeper")), "{changed:?}");
         assert!(changed.iter().all(|f| f.starts_with(&dir)), "{changed:?}");
         assert_eq!(w.take_news(), None, "told once");
+        std::thread::sleep(SETTLE);
+        assert_eq!(w.take_news(), None, "nothing more came of it");
         std::fs::write(dir.join("top.txt"), "").unwrap();
         arrived(&w);
         assert!(w.take_changed(), "take_changed takes the news too");
@@ -887,7 +889,9 @@ pub(crate) mod tests {
         fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
             if path.file_name().is_some_and(|name| name == "full") {
                 STALLED.store(true, Ordering::SeqCst);
-                while !RELEASED.load(Ordering::SeqCst) {
+                let end = std::time::Instant::now() + Duration::from_secs(10);
+                // Bounded: a test that panics before releasing must not leave the thread spinning.
+                while !RELEASED.load(Ordering::SeqCst) && std::time::Instant::now() < end {
                     std::thread::sleep(Duration::from_millis(5));
                 }
                 return Err(notify::Error::new(notify::ErrorKind::MaxFilesWatch));
@@ -936,7 +940,8 @@ pub(crate) mod tests {
         fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
             if path.file_name().is_some_and(|name| name == "stuck") {
                 STUCK.store(true, Ordering::SeqCst);
-                while !UNSTUCK.load(Ordering::SeqCst) {
+                let end = std::time::Instant::now() + Duration::from_secs(10);
+                while !UNSTUCK.load(Ordering::SeqCst) && std::time::Instant::now() < end {
                     std::thread::sleep(Duration::from_millis(5));
                 }
                 return Err(notify::Error::path_not_found());
@@ -1075,7 +1080,8 @@ pub(crate) mod tests {
     }
 
     /// Waits for news to arrive, then for the rest of them: what follows
-    /// also checks that nothing more is told.
+    /// also checks that nothing more is told. No news may be pending before
+    /// the change it waits for.
     fn arrived(w: &Watcher) {
         assert!(eventually(|| w.changed.load(Ordering::SeqCst)), "no news arrived");
         std::thread::sleep(SETTLE);
