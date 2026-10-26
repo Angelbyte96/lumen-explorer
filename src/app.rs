@@ -5351,10 +5351,11 @@ mod tests {
         land(&mut app);
         assert!(app.tab.flattener.is_none() && app.tab.flat_due, "listed, its walk not started yet");
         app.watcher.settle();
-        std::thread::sleep(Duration::from_millis(300));
-        app.watcher.take_news();
         std::fs::write(dir.join("sub/deeper/new.txt"), "").unwrap();
-        assert!(eventually(|| app.watcher.take_changed()), "a subfolder is still watched");
+        // News left from before name other folders: only this write names `sub/deeper`.
+        let deeper = dir.join("sub/deeper");
+        let told = || matches!(app.watcher.take_news(), Some(fs::watch::News::Folders { folders, .. }) if folders.contains(&deeper));
+        assert!(eventually(told), "a subfolder is still watched");
     }
 
     #[test]
@@ -5949,6 +5950,27 @@ mod tests {
         assert!(app.tab.flat_due, "and walked again");
         land_flat(&ctx, &mut app);
         assert!(row_names(&app.tab.view).contains(&"new.txt"), "what the new walk found shows up");
+    }
+
+    #[test]
+    fn f5_after_a_flatten_walk_found_entries_starts_it_again_from_nothing() {
+        let (ctx, mut app, dir) = app_in("app-f5-walk-found");
+        std::fs::write(dir.join("sub/s.txt"), "S").unwrap();
+        app.handle_action(&ctx, Action::ToggleFlat);
+        app.walk_flat(&ctx);
+        let walking = app.tab.flattener.as_ref().unwrap();
+        assert!(eventually(|| walking.found() > 0), "the walk found entries");
+        std::fs::write(dir.join("sub/new.txt"), "N").unwrap();
+        app.handle_action(&ctx, Action::Reload);
+        assert!(app.tab.flattener.is_none(), "what the walk found is dropped with it");
+        land(&mut app);
+        land_flat(&ctx, &mut app);
+        let mut names = row_names(&app.tab.view);
+        assert!(names.contains(&"new.txt") && names.contains(&"s.txt"), "the new walk found everything");
+        let shown = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), shown, "nothing found twice");
     }
 
     #[test]
