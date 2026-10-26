@@ -3988,6 +3988,7 @@ mod tests {
     use super::*;
     use crate::fs::lister::ListError;
     use crate::fs::preview::Content;
+    use crate::fs::watch::tests::eventually;
     use crate::ui::drives_view::DriveColumn;
     use std::path::Path;
     use std::time::Instant;
@@ -4574,8 +4575,7 @@ mod tests {
         land_flat(&ctx, &mut app);
         app.watcher.settle();
         std::fs::write(dir.join("sub/deeper/new.txt"), "").unwrap();
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(app.watcher.take_changed(), "a change in a subfolder of the flattened view");
+        assert!(eventually(|| app.watcher.take_changed()), "a change in a subfolder of the flattened view");
         app.handle_action(&ctx, Action::ToggleFlat);
         app.watcher.settle();
         // Not on Windows: there the subfolder's own date changes too, which the folder reports.
@@ -5313,9 +5313,13 @@ mod tests {
         land_flat(&ctx, &mut app);
         assert_eq!(app.notice, None);
         app.watcher.settle();
+        // Some 5,000 system watches: a machine with fewer to spare refuses them, as Lumen should.
+        if app.watcher.take_refused() {
+            eprintln!("skipped: the system has fewer than {} watches to spare", fs::watch::WATCH_LIMIT);
+            return;
+        }
         std::fs::write(dir.join("sub/d1/x.txt"), "").unwrap();
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(app.watcher.take_changed(), "a change deep inside reloads the view");
+        assert!(eventually(|| app.watcher.take_changed()), "a change deep inside reloads the view");
     }
 
     #[test]
