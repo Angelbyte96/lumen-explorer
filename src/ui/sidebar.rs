@@ -10,7 +10,6 @@ use crate::places::{self, Mount, Place, Usage};
 use crate::ui::file_icons::FileIcons;
 use crate::ui::icons;
 
-pub const TOGGLE: &str = "☰";
 pub const DISK: &str = "🖴";
 pub const COMPUTER: &str = "🖥";
 pub const TRASH: &str = "🗑";

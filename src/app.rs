@@ -26,6 +26,7 @@ use crate::ui::drives_view::{self, DriveRow, DriveSort, DrivesEvent};
 use crate::ui::recycle_view::{self, Picks, RecycleEvent, RecycleSort};
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
 use crate::ui::tabs::TabEvent;
+use crate::ui::app_menu::AppMenuEvent;
 use crate::ui::toolbar::{Nav, ToolbarEvent};
 use crate::ui::context_menu::{ContextMenu, MenuEvent};
 use crate::ui::tree::Tree;
@@ -2922,9 +2923,25 @@ impl LumenApp {
         });
     }
 
+    fn handle_menu(&mut self, ctx: &egui::Context, event: AppMenuEvent) {
+        match event {
+            AppMenuEvent::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
+            AppMenuEvent::GoTo => {
+                // Run with Enter or Space (the row had the focus): the box drawn
+                // below must not read that key too, closing at once or typing " ".
+                ctx.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::Space) {
+                        i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t == " "));
+                    }
+                });
+                self.path_popup.open();
+            }
+        }
+    }
+
     fn handle_toolbar(&mut self, ctx: &egui::Context, event: ToolbarEvent) {
         match event {
-            ToolbarEvent::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
             ToolbarEvent::Back => self.go_history(ctx, NavKind::Back),
             ToolbarEvent::Forward => self.go_history(ctx, NavKind::Forward),
             // Unlike Backspace, the button means "up" whatever the filter holds.
@@ -3456,6 +3473,8 @@ impl LumenApp {
             Action::Menu if self.on_recycle_bin() => self.open_recycle_menu(ctx.content_rect().center() - egui::vec2(170.0, 120.0)),
             Action::Cancel if self.on_recycle_bin() && self.tab.recycle.count() > 0 => self.tab.recycle.clear(),
             Action::FocusPathBar => self.path_popup.open(),
+            Action::ToggleSidebar => self.handle_menu(ctx, AppMenuEvent::ToggleSidebar),
+            Action::AppMenu => ui::app_menu::toggle(ctx),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
             Action::ToggleFlat => self.toggle_flat(ctx),
             // The drives or the bins are read again there, as the menu's Refresh does.
@@ -3632,8 +3651,8 @@ impl eframe::App for LumenApp {
             }
         } else if self.path_popup.is_open() || self.context_menu.is_some() {
             // The path box and the menu read their own keys when drawn.
-        } else if ui::toolbar::close_lock_menu_on_escape(&ctx) {
-            // That Escape closed the lock's menu and did nothing else.
+        } else if ui::toolbar::close_lock_menu_on_escape(&ctx) || ui::app_menu::close_on_escape(&ctx) {
+            // That Escape closed the lock's menu or the app menu and did nothing else.
         } else {
             for action in input::read_actions(&ctx) {
                 self.handle_action(&ctx, action);
@@ -3650,7 +3669,11 @@ impl eframe::App for LumenApp {
         egui::Panel::top("tabs").show(ui, |ui| {
             ui.add_space(3.0);
             let labels = self.tab_labels();
-            match ui::tabs::show(ui, &labels, self.active) {
+            let (menu, tab) = ui.horizontal(|ui| (ui::app_menu::show(ui), ui::tabs::show(ui, &labels, self.active))).inner;
+            if let Some(event) = menu {
+                self.handle_menu(&ctx, event);
+            }
+            match tab {
                 Some(TabEvent::Select(i)) => self.select_tab(&ctx, i),
                 Some(TabEvent::Close(i)) => self.close_tab(&ctx, i),
                 Some(TabEvent::New) => self.new_tab(&ctx),
@@ -6570,7 +6593,7 @@ mod tests {
         app.handle_action(&ctx, Action::ToggleBookmark);
         app.handle_action(&ctx, Action::ToggleHidden);
         app.tab.view.sort_by(SortColumn::Modified);
-        app.handle_toolbar(&ctx, ToolbarEvent::ToggleSidebar);
+        app.handle_menu(&ctx, AppMenuEvent::ToggleSidebar);
         app.handle_action(&ctx, Action::TypeChar(' ')); // preview
         app.save_settings(false);
         let written = Config::load(&path).unwrap();
@@ -6746,13 +6769,44 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_button_shows_and_hides_the_side_panel() {
+    fn the_panel_button_and_ctrl_b_show_and_hide_the_side_panel() {
         let (ctx, mut app, _) = app_in("app-sidebar-toggle");
         assert!(app.sidebar_open, "open by default");
-        app.handle_toolbar(&ctx, ToolbarEvent::ToggleSidebar);
+        app.handle_menu(&ctx, AppMenuEvent::ToggleSidebar);
         assert!(!app.sidebar_open);
-        app.handle_toolbar(&ctx, ToolbarEvent::ToggleSidebar);
+        app.handle_menu(&ctx, AppMenuEvent::ToggleSidebar);
         assert!(app.sidebar_open);
+        app.handle_action(&ctx, Action::ToggleSidebar);
+        assert!(!app.sidebar_open, "Ctrl+B");
+    }
+
+    #[test]
+    fn go_to_run_with_enter_or_space_leaves_that_key_out_of_the_path_box() {
+        for (key, text) in [(egui::Key::Enter, None), (egui::Key::Space, Some(" "))] {
+            let (ctx, mut app, _) = app_in("app-go-to-keys");
+            let mut events = vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }];
+            events.extend(text.map(|t| egui::Event::Text(t.into())));
+            let mut left = Vec::new();
+            ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+                app.handle_menu(ui.ctx(), AppMenuEvent::GoTo);
+                left = ui.ctx().input(|i| i.events.clone());
+            })
+            .drop_without_applying_deltas();
+            assert!(app.path_popup.is_open());
+            assert!(left.is_empty(), "{key:?} ran Go To and reaches nothing else: {left:?}");
+        }
+    }
+
+    #[test]
+    fn f10_opens_the_app_menu_and_go_to_opens_the_path_box() {
+        let (ctx, mut app, _) = app_in("app-app-menu");
+        app.handle_action(&ctx, Action::AppMenu);
+        assert!(ui::app_menu::is_open(&ctx));
+        app.handle_action(&ctx, Action::AppMenu);
+        assert!(!ui::app_menu::is_open(&ctx), "F10 again closes it");
+        assert!(!app.path_popup.is_open());
+        app.handle_menu(&ctx, AppMenuEvent::GoTo);
+        assert!(app.path_popup.is_open());
     }
 
     #[test]

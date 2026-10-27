@@ -178,6 +178,16 @@ pub fn paint_lock(painter: &egui::Painter, rect: Rect, color: Color32) {
     painter.add(Shape::line(shackle, Stroke::new((side * 0.1).max(1.0), color)));
 }
 
+/// The side panel button: a window outline with its left strip split off.
+pub fn paint_side_panel(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let side = rect.width().min(rect.height());
+    let frame = Rect::from_center_size(rect.center(), vec2(side * 0.56, side * 0.46));
+    let stroke = Stroke::new((side * 0.06).max(1.0), color);
+    painter.rect_stroke(frame, side * 0.06, stroke, egui::StrokeKind::Inside);
+    let x = frame.left() + frame.width() * 0.36;
+    painter.line_segment([pos2(x, frame.top()), pos2(x, frame.bottom())], stroke);
+}
+
 /// A folder icon, for rows that are not entries (the side panel).
 pub fn folder(ui: &mut egui::Ui) -> egui::Response {
     let side = ui.text_style_height(&egui::TextStyle::Body);
@@ -340,6 +350,40 @@ pub fn menu_icon(painter: &egui::Painter, rect: Rect, icon: crate::menu::MenuIco
             let end = *arc.last().expect("points");
             painter.add(Shape::line(arc, stroke));
             painter.add(Shape::line(vec![end + vec2(-s * 0.18, 0.0), end, end + vec2(0.0, -s * 0.18)], stroke));
+        }
+        I::GoTo => {
+            line(&[(0.1, 0.5), (0.72, 0.5)]);
+            line(&[(0.5, 0.28), (0.72, 0.5), (0.5, 0.72)]);
+            line(&[(0.9, 0.15), (0.9, 0.85)]);
+        }
+        I::Commands => {
+            line(&[(0.15, 0.25), (0.45, 0.5), (0.15, 0.75)]);
+            line(&[(0.55, 0.78), (0.88, 0.78)]);
+        }
+        I::LoadLayout => {
+            frame(0.1, 0.15, 0.9, 0.85);
+            line(&[(0.4, 0.15), (0.4, 0.85)]);
+            line(&[(0.4, 0.5), (0.9, 0.5)]);
+        }
+        I::SaveLayout => {
+            frame(0.1, 0.15, 0.9, 0.85);
+            line(&[(0.1, 0.38), (0.9, 0.38)]);
+            line(&[(0.4, 0.38), (0.4, 0.85)]);
+        }
+        I::Options => {
+            let center = p(0.5, 0.5);
+            painter.circle_stroke(center, s * 0.26, stroke);
+            painter.circle_stroke(center, s * 0.1, stroke);
+            for n in 0..8 {
+                let a = std::f32::consts::TAU * n as f32 / 8.0;
+                let dir = vec2(a.cos(), a.sin());
+                painter.line_segment([center + dir * s * 0.26, center + dir * s * 0.4], stroke);
+            }
+        }
+        I::Setup => {
+            line(&[(0.1, 0.6), (0.1, 0.88), (0.9, 0.88), (0.9, 0.6)]);
+            line(&[(0.5, 0.1), (0.5, 0.66)]);
+            line(&[(0.3, 0.46), (0.5, 0.66), (0.7, 0.46)]);
         }
     }
 }
