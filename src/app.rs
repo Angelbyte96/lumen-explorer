@@ -2927,9 +2927,14 @@ impl LumenApp {
         match event {
             AppMenuEvent::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
             AppMenuEvent::GoTo => {
-                // Run with Enter (the row had the focus): the box drawn below
-                // must not read that Enter too and close at once.
-                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                // Run with Enter or Space (the row had the focus): the box drawn
+                // below must not read that key too, closing at once or typing " ".
+                ctx.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::Space) {
+                        i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t == " "));
+                    }
+                });
                 self.path_popup.open();
             }
         }
@@ -6773,6 +6778,23 @@ mod tests {
         assert!(app.sidebar_open);
         app.handle_action(&ctx, Action::ToggleSidebar);
         assert!(!app.sidebar_open, "Ctrl+B");
+    }
+
+    #[test]
+    fn go_to_run_with_enter_or_space_leaves_that_key_out_of_the_path_box() {
+        for (key, text) in [(egui::Key::Enter, None), (egui::Key::Space, Some(" "))] {
+            let (ctx, mut app, _) = app_in("app-go-to-keys");
+            let mut events = vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }];
+            events.extend(text.map(|t| egui::Event::Text(t.into())));
+            let mut left = Vec::new();
+            ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+                app.handle_menu(ui.ctx(), AppMenuEvent::GoTo);
+                left = ui.ctx().input(|i| i.events.clone());
+            })
+            .drop_without_applying_deltas();
+            assert!(app.path_popup.is_open());
+            assert!(left.is_empty(), "{key:?} ran Go To and reaches nothing else: {left:?}");
+        }
     }
 
     #[test]
