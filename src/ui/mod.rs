@@ -1,4 +1,5 @@
 pub mod confirm;
+pub mod app_menu;
 pub mod context_menu;
 pub mod dnd;
 pub mod drives_view;
@@ -167,7 +168,7 @@ mod tests {
             super::toolbar::BOOKMARKED,
             super::toolbar::NOT_BOOKMARKED,
             super::toolbar::SEPARATOR,
-            super::sidebar::TOGGLE,
+            super::app_menu::MENU,
             super::sidebar::DISK,
             super::sidebar::COMPUTER,
             super::sidebar::TRASH,
@@ -204,6 +205,7 @@ mod tests {
             ("fs/transfer.rs", include_str!("../fs/transfer.rs")),
             ("fs/lister.rs", include_str!("../fs/lister.rs")),
             ("menu.rs", include_str!("../menu.rs")),
+            ("ui/app_menu.rs", include_str!("app_menu.rs")),
             ("ui/context_menu.rs", include_str!("context_menu.rs")),
             ("ui/confirm.rs", include_str!("confirm.rs")),
             ("ui/drives_view.rs", include_str!("drives_view.rs")),

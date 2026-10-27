@@ -40,8 +40,6 @@ pub struct SavedView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolbarEvent {
-    /// The ☰ button: show or hide the side panel.
-    ToggleSidebar,
     Back,
     Forward,
     Up,
@@ -101,13 +99,6 @@ fn can_go_up(path: &Path) -> bool {
 pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
     let mut event = None;
     ui.horizontal(|ui| {
-        let toggle = egui::Button::new(egui::RichText::new(crate::ui::sidebar::TOGGLE).size(16.0)).frame(false);
-        let toggle = ui.add(toggle);
-        crate::ui::focus_ring(ui, &toggle);
-        if toggle.on_hover_text("Show or hide the side panel").clicked() {
-            event = Some(ToolbarEvent::ToggleSidebar);
-        }
-        ui.separator();
         let buttons = [
             (BACK, nav.can_back, "Back (Alt+Left)", ToolbarEvent::Back),
             (FORWARD, nav.can_forward, "Forward (Alt+Right)", ToolbarEvent::Forward),
@@ -378,7 +369,6 @@ mod tests {
             Pressed::Tab(TabEvent::Select(0)),
             Pressed::Tab(TabEvent::Select(1)),
             Pressed::Tab(TabEvent::New),
-            Pressed::Bar(ToolbarEvent::ToggleSidebar),
             Pressed::Bar(ToolbarEvent::Back),
             Pressed::Bar(ToolbarEvent::Forward),
             Pressed::Bar(ToolbarEvent::Up),
@@ -411,8 +401,8 @@ mod tests {
         let menu_open = |shapes: &[egui::epaint::ClippedShape]| shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "Saved view settings"));
         for key in [egui::Key::Enter, egui::Key::Space] {
             window(&ctx, &nav, vec![]);
-            // Three tab stops, then ☰, back, forward, up: the lock is the eighth.
-            for _ in 0..8 {
+            // Three tab stops, then back, forward, up: the lock is the seventh.
+            for _ in 0..7 {
                 tap(&ctx, &nav, egui::Key::Tab, egui::Modifiers::NONE);
             }
             let (pressed, shapes) = tap(&ctx, &nav, key, egui::Modifiers::NONE);
@@ -429,7 +419,7 @@ mod tests {
         let nav = Nav { can_back: true, can_forward: true, ..nav_with(SavedView::default()) };
         let menu_open = |shapes: &[egui::epaint::ClippedShape]| shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "Saved view settings"));
         window(&ctx, &nav, vec![]);
-        for _ in 0..8 {
+        for _ in 0..7 {
             tap(&ctx, &nav, egui::Key::Tab, egui::Modifiers::NONE);
         }
         assert!(menu_open(&tap(&ctx, &nav, egui::Key::Enter, egui::Modifiers::NONE).1));
@@ -450,8 +440,8 @@ mod tests {
         let nav = Nav { can_back: true, can_forward: true, ..nav_with(SavedView::default()) };
         let menu_open = |shapes: &[egui::epaint::ClippedShape]| shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "Saved view settings"));
         window(&ctx, &nav, vec![]);
-        // Three tab stops, ☰, back, forward, up, the lock: the star is the ninth.
-        for _ in 0..9 {
+        // Three tab stops, back, forward, up, the lock: the star is the eighth.
+        for _ in 0..8 {
             tap(&ctx, &nav, egui::Key::Tab, egui::Modifiers::NONE);
         }
         let lock = ctx.read_response(lock_id()).expect("the lock was drawn").rect.center();
