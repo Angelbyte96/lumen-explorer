@@ -336,6 +336,20 @@ mod tests {
     }
 
     #[test]
+    fn a_click_opens_the_menu_while_another_part_has_the_focus() {
+        let ctx = egui::Context::default();
+        let (_, texts) = corner(&ctx, vec![]);
+        let other = ctx.data(|d| d.get_temp::<egui::Id>(egui::Id::new("other part"))).expect("drawn");
+        ctx.memory_mut(|m| m.request_focus(other));
+        corner(&ctx, vec![]);
+        corner(&ctx, pointer_click(at(&texts, MENU).center()));
+        for frame in 0..3 {
+            corner(&ctx, vec![]);
+            assert!(is_open(&ctx), "still open on frame {frame}");
+        }
+    }
+
+    #[test]
     fn go_to_is_an_event_and_the_rows_lumen_lacks_are_greyed() {
         assert_eq!(choose("Go To").0, Some(AppMenuEvent::GoTo));
         for row in ["Commands", "Load Layout", "Save Layout", "Options", "Lumen Setup"] {
