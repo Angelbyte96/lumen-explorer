@@ -174,12 +174,10 @@ impl Linux {
         if ours {
             return Ok(());
         }
-        match link.symlink_metadata() {
-            Ok(meta) if !meta.file_type().is_symlink() => {
-                return Err(format!("{} is another file (scripts/install-desktop.sh puts one there): remove it to add Lumen to the PATH", link.display()));
-            }
-            Ok(_) => super::remove_file(&link).map_err(|err| format!("Cannot replace {}: {err}", link.display()))?,
-            Err(_) => {}
+        // Lumen's own link was handled above, so anything here is someone
+        // else's: a copy install-desktop.sh put there, or a link of theirs.
+        if link.symlink_metadata().is_ok() {
+            return Err(format!("{} is another file (scripts/install-desktop.sh puts one there): remove it to add Lumen to the PATH", link.display()));
         }
         let dir = link.parent().expect("the link is in ~/.local/bin");
         std::fs::create_dir_all(dir).map_err(|err| format!("Cannot create {}: {err}", dir.display()))?;
@@ -322,9 +320,19 @@ pub fn with_folder_default(text: &str, app: Option<&str>) -> String {
             in_defaults = trimmed == "[Default Applications]";
             found_section |= in_defaults;
         } else if in_defaults && trimmed.split_once('=').is_some_and(|(key, _)| key.trim() == FOLDER_MIME) {
-            if let Some(app) = app.filter(|_| !placed) {
-                out.push(format!("{FOLDER_MIME}={app};"));
-                placed = true;
+            let (_, value) = trimmed.split_once('=').expect("the line has an =");
+            match app.filter(|_| !placed) {
+                Some(app) => {
+                    out.push(format!("{FOLDER_MIME}={app};"));
+                    placed = true;
+                }
+                // Off: only Lumen leaves the list; a fallback app stays.
+                None => {
+                    let kept: Vec<&str> = value.split(';').map(str::trim).filter(|app| !app.is_empty() && *app != ENTRY).collect();
+                    if !kept.is_empty() {
+                        out.push(format!("{FOLDER_MIME}={};", kept.join(";")));
+                    }
+                }
             }
             continue;
         }
@@ -567,5 +575,62 @@ mod tests {
     fn setting_the_default_replaces_the_old_line_in_place() {
         let text = "[Default Applications]\ninode/directory=org.gnome.Nautilus.desktop;\ntext/plain=gedit.desktop\n";
         assert_eq!(with_folder_default(text, Some("lumen.desktop")), "[Default Applications]\ninode/directory=lumen.desktop;\ntext/plain=gedit.desktop\n");
+    }
+    #[test]
+    fn a_users_own_symlink_on_the_path_is_left_alone() {
+        let (linux, home) = installed("setup-linux-path-user-link");
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::fs::write(home.join("devbuild"), "dev").unwrap();
+        std::os::unix::fs::symlink(home.join("devbuild"), home.join(".local/bin/lumen")).unwrap();
+        let err = linux.apply(Switches { path: true, ..Switches::default() }).unwrap_err();
+        assert!(err.contains("is another file"), "{err}");
+        assert_eq!(std::fs::read_link(home.join(".local/bin/lumen")).unwrap(), home.join("devbuild"));
+        assert!(!linux.read().path);
+    }
+
+    #[test]
+    fn default_through_a_symlinked_mimeapps_keeps_the_link_and_other_lines() {
+        let (linux, home) = installed("setup-linux-mimeapps-link");
+        let real = home.join("dotfiles/mimeapps.list");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        let before = "[Default Applications]\ntext/plain=gedit.desktop\n\n[Added Associations]\nimage/png=eog.desktop;\n";
+        std::fs::write(&real, before).unwrap();
+        std::os::unix::fs::symlink(&real, home.join(".config/mimeapps.list")).unwrap();
+        linux.apply(Switches { default: true, ..Switches::default() }).unwrap();
+        assert!(home.join(".config/mimeapps.list").symlink_metadata().unwrap().file_type().is_symlink());
+        linux.apply(Switches::default()).unwrap();
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), before);
+        assert!(!home.join("dotfiles/mimeapps.list.lumen-tmp").exists());
+    }
+
+    #[test]
+    fn uninstall_leaves_a_regular_lumen_on_the_path_and_other_files() {
+        let (linux, home) = installed("setup-linux-uninstall-others");
+        linux.apply(Switches { desktop_shortcut: true, right_click: true, ..Switches::default() }).unwrap();
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::fs::write(home.join(".local/bin/lumen"), "dev build").unwrap();
+        std::fs::write(home.join(".local/share/nautilus/scripts/Other"), "x").unwrap();
+        std::fs::write(home.join("Desktop/other.desktop"), "x").unwrap();
+        linux.uninstall().unwrap();
+        assert_eq!(std::fs::read_to_string(home.join(".local/bin/lumen")).unwrap(), "dev build");
+        assert!(home.join(".local/share/nautilus/scripts/Other").is_file() && home.join("Desktop/other.desktop").is_file());
+    }
+
+    #[test]
+    fn a_relative_install_path_changes_nothing() {
+        let (linux, home) = system("setup-linux-relative", "Downloads/lumen");
+        assert_eq!(linux.install(Path::new("rel/dir"), Switches::INSTALL), Err("Choose a full path, not rel/dir".into()));
+        assert!(!home.join(".config").exists() && !home.join(".local").exists());
+    }
+
+    #[test]
+    fn default_off_keeps_a_fallback_app_listed_after_lumen() {
+        let (linux, home) = installed("setup-linux-default-fallback");
+        let before = "[Default Applications]\ninode/directory=lumen.desktop;org.gnome.Nautilus.desktop;\n";
+        std::fs::create_dir_all(home.join(".config")).unwrap();
+        std::fs::write(home.join(".config/mimeapps.list"), before).unwrap();
+        assert!(linux.read().default);
+        linux.apply(Switches::default()).unwrap();
+        assert_eq!(std::fs::read_to_string(home.join(".config/mimeapps.list")).unwrap(), "[Default Applications]\ninode/directory=org.gnome.Nautilus.desktop;\n");
     }
 }
