@@ -1401,6 +1401,10 @@ pub struct LumenApp {
     context_menu: Option<ContextMenu>,
     /// The open menu is a row's (not the folder's): its commands act on the selection.
     context_on_entry: bool,
+    /// Lumen Setup, while it is on screen: it takes the whole window.
+    setup: Option<ui::setup_view::SetupScreen>,
+    /// What Setup reads and changes on this machine; `None` under test unless one is injected.
+    system: Option<Box<dyn crate::setup::System>>,
     /// The shell's menu behind the open one, loading or loaded, whose items it runs.
     #[cfg(windows)]
     shell_menu: Option<crate::shell_menu::native::Loader>,
@@ -1538,6 +1542,8 @@ impl LumenApp {
             thumbnails: Default::default(),
             context_menu: None,
             context_on_entry: false,
+            setup: None,
+            system: None,
             #[cfg(windows)]
             shell_menu: None,
             #[cfg(windows)]
@@ -1655,11 +1661,19 @@ impl LumenApp {
             Start::Folder(path) => (vec![path], 0),
             Start::Restore => restore_tabs(&settings.config.tabs, settings.config.active_tab, home),
         };
+        // Read before anything saves: the file is not there on the very first start.
+        let first_start = settings.path.as_deref().is_some_and(|path| !path.exists());
+        let record_file = settings.path.as_deref().and_then(crate::setup::record_path);
         let mut app = Self::with_config(ctx, tabs[active].clone(), log, settings);
         // Only here, never in `new`, and not under test: a test must not
-        // crawl the machine.
+        // crawl the machine or read what is installed on it.
         if !cfg!(test) {
             app.path_popup = PathPopup::with_crawler(start_index(ctx), Box::new(start_index));
+            app.system = real_system(record_file);
+            let origin = app.system.as_deref().map(|system| system.origin());
+            if origin.is_some_and(|origin| opens_setup_at_start(first_start, &origin, !cfg!(debug_assertions))) {
+                app.open_setup();
+            }
         }
         // The others list when they are first shown (see `select_tab`).
         app.tabs = tabs
@@ -2926,6 +2940,7 @@ impl LumenApp {
     fn handle_menu(&mut self, ctx: &egui::Context, event: AppMenuEvent) {
         match event {
             AppMenuEvent::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
+            AppMenuEvent::Setup => self.open_setup(),
             AppMenuEvent::GoTo => {
                 // Run with Enter or Space (the row had the focus): the box drawn
                 // below must not read that key too, closing at once or typing " ".
@@ -2938,6 +2953,49 @@ impl LumenApp {
                 self.path_popup.open();
             }
         }
+    }
+
+    /// Shows the Setup screen, when this machine has a system to set up.
+    pub fn open_setup(&mut self) {
+        if let Some(system) = self.system.as_deref() {
+            self.setup = Some(ui::setup_view::SetupScreen::open(system));
+        }
+    }
+
+    /// The Setup screen alone in the window, and what it asks for.
+    fn show_setup(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let Some(screen) = self.setup.as_mut() else { return };
+        let event = egui::CentralPanel::default_margins().show(ui, |ui| screen.show(ui)).inner;
+        let outcome = match (event, self.system.as_deref()) {
+            (Some(event), Some(system)) => screen.handle(system, event),
+            (Some(_), None) => Some(ui::setup_view::Outcome::Back),
+            (None, _) => None,
+        };
+        if let Some(outcome) = outcome {
+            self.finish_setup(ctx, outcome);
+        }
+    }
+
+    fn finish_setup(&mut self, ctx: &egui::Context, outcome: ui::setup_view::Outcome) {
+        use ui::setup_view::Outcome;
+        match outcome {
+            Outcome::Back => self.setup = None,
+            Outcome::OpenFolder(path) => {
+                self.setup = None;
+                self.navigate(ctx, path, None);
+            }
+            Outcome::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+        }
+        // The list (or the close) shows now, not at the next input.
+        ctx.request_repaint();
+    }
+
+    /// Ends every frame: remembers the window's size, then saves the settings if they changed.
+    fn end_frame(&mut self, ctx: &egui::Context) {
+        if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
+            self.window = Some([rect.width(), rect.height()]);
+        }
+        self.save_settings(false);
     }
 
     fn handle_toolbar(&mut self, ctx: &egui::Context, event: ToolbarEvent) {
@@ -3645,7 +3703,9 @@ impl eframe::App for LumenApp {
         }
 
         // An open dialog takes the keyboard; the list must not react underneath.
-        if self.dialog.is_some() {
+        if self.setup.is_some() {
+            // Setup reads its own keys when drawn; the list under it reads none.
+        } else if self.dialog.is_some() {
             if let Some(answer) = input::read_confirm(&ctx) {
                 self.answer_dialog(&ctx, answer);
             }
@@ -3664,6 +3724,12 @@ impl eframe::App for LumenApp {
             && let Some(running) = self.job.take()
         {
             self.finish_job(&ctx, running, result);
+        }
+
+        if self.setup.is_some() {
+            self.show_setup(&ctx, ui);
+            self.end_frame(&ctx);
+            return;
         }
 
         egui::Panel::top("tabs").show(ui, |ui| {
@@ -3918,10 +3984,7 @@ impl eframe::App for LumenApp {
         #[cfg(target_os = "linux")]
         self.wayland_dnd.answer(preferred, took);
 
-        if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
-            self.window = Some([rect.width(), rect.height()]);
-        }
-        self.save_settings(false);
+        self.end_frame(&ctx);
     }
 
     /// The release of a drag handed to the compositor, which egui never sees.
@@ -3967,7 +4030,7 @@ pub fn start(args: &[String]) -> Start {
 }
 
 fn start_from(args: &[String], cwd: Option<PathBuf>, home: Option<PathBuf>, windows: bool, terminal: bool) -> Start {
-    let folder = args.iter().find(|a| *a != RESTORE).cloned();
+    let folder = args.iter().find(|a| *a != RESTORE && *a != SETUP).cloned();
     if folder.is_none() && (windows || !terminal || args.iter().any(|a| a == RESTORE)) {
         return Start::Restore;
     }
@@ -3978,6 +4041,29 @@ fn start_from(args: &[String], cwd: Option<PathBuf>, home: Option<PathBuf>, wind
 
 /// The flag the desktop entry passes.
 const RESTORE: &str = "--restore";
+
+/// The flag Windows' Apps & features runs to uninstall: opens Lumen Setup.
+const SETUP: &str = "--setup";
+
+/// Whether the command line asks for the Setup screen.
+pub fn wants_setup(args: &[String]) -> bool {
+    args.iter().any(|a| a == SETUP)
+}
+
+/// This machine's Setup: `record_file` is where Install remembers its folder.
+fn real_system(record_file: Option<PathBuf>) -> Option<Box<dyn crate::setup::System>> {
+    #[cfg(windows)]
+    let system = crate::setup::windows::Windows::from_env(record_file)?;
+    #[cfg(not(windows))]
+    let system = crate::setup::linux::Linux::from_env(record_file)?;
+    Some(Box::new(system))
+}
+
+/// Whether Lumen opens on the Setup screen by itself: the first start of a
+/// release build that is not installed (a debug build is the developer's own).
+fn opens_setup_at_start(first_start: bool, origin: &crate::setup::Origin, release: bool) -> bool {
+    first_start && release && matches!(origin, crate::setup::Origin::NotInstalled { .. })
+}
 
 /// The saved tabs as they can open now: a folder that is gone gives way to
 /// its nearest parent still there, else `home`; no tabs at all is `home`.
@@ -9845,5 +9931,186 @@ mod tests {
         assert_eq!(shared_parent(&[p("/x/a/one"), p("/x/two")]), None, "a child and a top entry");
         assert_eq!(shared_parent(&[p("/x/a/n"), p("/x/b/n")]), None, "same name, different folders");
         assert_eq!(shared_parent(&[]), None);
+    }
+
+    /// A machine in memory for the Setup screen: it only says where Lumen is.
+    struct FakeSystem(crate::setup::Origin);
+
+    impl crate::setup::System for FakeSystem {
+        fn origin(&self) -> crate::setup::Origin {
+            self.0.clone()
+        }
+        fn read(&self) -> crate::setup::Switches {
+            crate::setup::Switches::default()
+        }
+        fn apply(&self, _: crate::setup::Switches) -> Result<(), String> {
+            Ok(())
+        }
+        fn install(&self, _: &Path, _: crate::setup::Switches) -> Result<(), String> {
+            Ok(())
+        }
+        fn uninstall(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn installed_in(dir: &Path) -> crate::setup::Origin {
+        crate::setup::Origin::Installed { record: crate::setup::Record { dir: dir.to_path_buf(), version: "0.6.0".into() }, running_it: false }
+    }
+
+    fn key_press(key: egui::Key, modifiers: egui::Modifiers) -> Vec<egui::Event> {
+        vec![
+            egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers },
+            egui::Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers },
+        ]
+    }
+
+    /// One frame of the whole window, as eframe runs it; the texts it painted.
+    fn window_frame(ctx: &egui::Context, app: &mut LumenApp, events: Vec<egui::Event>) -> Vec<String> {
+        let mut frame = eframe::Frame::_new_kittest();
+        let input = egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        let mut output = ctx.run_ui(input, |ui| eframe::App::ui(app, ui, &mut frame));
+        output.textures_delta.clear();
+        let mut texts = Vec::new();
+        fn collect(shape: &egui::epaint::Shape, texts: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(t) => texts.push(t.galley.text().to_owned()),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, texts)),
+                _ => {}
+            }
+        }
+        output.shapes.iter().for_each(|s| collect(&s.shape, &mut texts));
+        texts
+    }
+
+    /// An app with the Setup screen open over the fixture folder.
+    fn app_with_setup(name: &str) -> (egui::Context, LumenApp, PathBuf) {
+        let (ctx, mut app, dir) = app_in(name);
+        app.system = Some(Box::new(FakeSystem(installed_in(&dir))));
+        app.handle_menu(&ctx, AppMenuEvent::Setup);
+        (ctx, app, dir)
+    }
+
+    #[test]
+    fn the_menus_setup_row_opens_the_screen_only_when_there_is_a_system() {
+        let (ctx, mut app, dir) = app_in("app-setup-open");
+        app.handle_menu(&ctx, AppMenuEvent::Setup);
+        assert!(app.setup.is_none(), "no system, nothing to set up");
+        app.system = Some(Box::new(FakeSystem(installed_in(&dir))));
+        app.handle_menu(&ctx, AppMenuEvent::Setup);
+        assert!(app.setup.is_some());
+    }
+
+    #[test]
+    fn the_setup_screen_takes_the_whole_window() {
+        let (ctx, mut app, _) = app_with_setup("app-setup-window");
+        window_frame(&ctx, &mut app, vec![]);
+        let texts = window_frame(&ctx, &mut app, vec![]);
+        for shown in ["Modify", "Uninstall", "Back"] {
+            assert!(texts.iter().any(|t| t == shown), "{shown} is on the screen: {texts:?}");
+        }
+        for hidden in ["a.txt", "b.txt", "sub", "New tab", "Name"] {
+            assert!(!texts.iter().any(|t| t.contains(hidden)), "{hidden} is not drawn under Setup: {texts:?}");
+        }
+    }
+
+    #[test]
+    fn keys_do_not_reach_the_list_under_setup_and_do_again_after_back() {
+        let (ctx, mut app, dir) = app_with_setup("app-setup-keys");
+        pick(&mut app, &["a.txt"]);
+        window_frame(&ctx, &mut app, vec![]);
+        let (selected, picked) = (app.tab.view.selected, app.tab.view.picked_count());
+        for (key, modifiers) in [(egui::Key::F2, egui::Modifiers::NONE), (egui::Key::Delete, egui::Modifiers::NONE), (egui::Key::A, egui::Modifiers::COMMAND)] {
+            window_frame(&ctx, &mut app, key_press(key, modifiers));
+            assert!(app.rename.is_none() && app.dialog.is_none() && app.job.is_none(), "{key:?} did nothing to the list");
+            assert_eq!((app.tab.view.selected, app.tab.view.picked_count()), (selected, picked), "{key:?} left the selection as it was");
+            assert!(app.setup.is_some(), "{key:?} did not leave Setup");
+        }
+        assert!(dir.join("a.txt").exists());
+        // The control: the same key does act once Setup is gone.
+        app.setup = None;
+        window_frame(&ctx, &mut app, key_press(egui::Key::A, egui::Modifiers::COMMAND));
+        assert_ne!((app.tab.view.selected, app.tab.view.picked_count()), (selected, picked), "Ctrl+A selects on the list");
+        pick(&mut app, &["a.txt"]);
+        window_frame(&ctx, &mut app, key_press(egui::Key::F2, egui::Modifiers::NONE));
+        assert!(app.rename.is_some(), "F2 renames on the list");
+    }
+
+    #[test]
+    fn escape_goes_back_to_the_folder_list() {
+        let (ctx, mut app, dir) = app_with_setup("app-setup-escape");
+        assert!(app.setup.is_some());
+        window_frame(&ctx, &mut app, vec![]);
+        window_frame(&ctx, &mut app, key_press(egui::Key::Escape, egui::Modifiers::NONE));
+        assert!(app.setup.is_none());
+        let texts = window_frame(&ctx, &mut app, vec![]);
+        assert!(texts.iter().any(|t| t == "a.txt"), "the list is back: {texts:?}");
+        assert_eq!(app.tab.view.current, dir);
+    }
+
+    /// What a frame that handled `outcome` asked of the window.
+    fn finish_setup(ctx: &egui::Context, app: &mut LumenApp, outcome: ui::setup_view::Outcome) -> Vec<egui::ViewportCommand> {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.finish_setup(ui.ctx(), outcome.clone()));
+        output.textures_delta.clear();
+        output.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.commands.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn setups_outcomes_go_back_open_a_folder_or_close_the_window() {
+        let (ctx, mut app, dir) = app_with_setup("app-setup-outcomes");
+        let commands = finish_setup(&ctx, &mut app, ui::setup_view::Outcome::Back);
+        assert!(app.setup.is_none() && !commands.contains(&egui::ViewportCommand::Close), "Back only closes the screen: {commands:?}");
+
+        app.handle_menu(&ctx, AppMenuEvent::Setup);
+        let commands = finish_setup(&ctx, &mut app, ui::setup_view::Outcome::OpenFolder(dir.join("sub")));
+        assert!(app.setup.is_none() && !commands.contains(&egui::ViewportCommand::Close));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub")), "the tab goes to the folder");
+
+        app.handle_menu(&ctx, AppMenuEvent::Setup);
+        let commands = finish_setup(&ctx, &mut app, ui::setup_view::Outcome::Close);
+        assert!(commands.contains(&egui::ViewportCommand::Close), "{commands:?}");
+    }
+
+    #[test]
+    fn setup_is_a_flag_never_a_folder() {
+        let cwd = Some(PathBuf::from("/srv/work"));
+        let home = Some(PathBuf::from("/home/u"));
+        let start = |list: &[&str], windows, terminal| start_from(&args(list), cwd.clone(), home.clone(), windows, terminal);
+        assert!(wants_setup(&args(&["--setup"])));
+        assert!(wants_setup(&args(&["docs", "--setup"])));
+        assert!(!wants_setup(&args(&[])) && !wants_setup(&args(&["--restore", "docs"])));
+        assert_eq!(start(&["--setup"], true, true), Start::Restore, "Windows' Uninstall opens the last session under Setup");
+        assert_eq!(start(&["--setup"], false, true), Start::Folder("/srv/work".into()), "a terminal on Linux: the working directory");
+        assert_eq!(start(&["--setup"], false, false), Start::Restore, "no terminal on Linux");
+        assert_eq!(start(&["--setup", "docs"], false, true), Start::Folder("/srv/work/docs".into()), "--setup plus a folder opens that folder");
+        assert_eq!(start(&["docs", "--setup"], true, true), Start::Folder("/srv/work/docs".into()));
+        assert_eq!(start(&["--restore", "--setup"], false, true), Start::Restore);
+    }
+
+    #[test]
+    fn the_flag_opens_setup_at_start() {
+        let (_, mut app, dir) = app_in("app-setup-flag");
+        app.open_setup();
+        assert!(app.setup.is_none(), "no system");
+        app.system = Some(Box::new(FakeSystem(installed_in(&dir))));
+        app.open_setup();
+        assert!(app.setup.is_some());
+    }
+
+    #[test]
+    fn setup_opens_by_itself_only_on_the_first_release_start_when_not_installed() {
+        use crate::setup::{Origin, Record};
+        let not_installed = Origin::NotInstalled { default_dir: "/home/u/.local/share/lumen".into() };
+        let installed = Origin::Installed { record: Record { dir: "/home/u/.local/share/lumen".into(), version: "0.6.0".into() }, running_it: true };
+        let package = Origin::Package { exe: "/usr/bin/lumen".into() };
+        assert!(opens_setup_at_start(true, &not_installed, true), "the first start of a download");
+        assert!(!opens_setup_at_start(false, &not_installed, true), "not the first start");
+        assert!(!opens_setup_at_start(true, &not_installed, false), "a debug build");
+        assert!(!opens_setup_at_start(false, &not_installed, false));
+        for origin in [&installed, &package] {
+            for (first, release) in [(true, true), (true, false), (false, true), (false, false)] {
+                assert!(!opens_setup_at_start(first, origin, release), "{origin:?} first={first} release={release}");
+            }
+        }
     }
 }
