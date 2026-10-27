@@ -14,6 +14,7 @@ use std::time::SystemTime;
 
 use super::entry::is_hidden_name;
 use super::preview::{self, IMAGE_LIMIT, Picture};
+use super::video;
 
 /// A picture's longest side in pixels: the XL card's icon (224 points) with
 /// some room for a scaled screen.
@@ -31,9 +32,18 @@ pub enum Peek {
     File(PathBuf, Option<SystemTime>),
 }
 
-/// An image file's picture scaled to fit `THUMB_SIDE`; `None` for a file that
-/// is not a PNG or JPEG, too big, or cannot be decoded.
+/// Whether the file at `path` has a picture of its own: a PNG or JPEG, or a
+/// video (one of its frames).
+pub fn has_picture(path: &Path) -> bool {
+    preview::is_image(path) || video::is_video(path)
+}
+
+/// An image file's picture, or a video's frame, scaled to fit `THUMB_SIDE`;
+/// `None` for any other file, an image too big, or one that cannot be read.
 pub fn thumbnail(path: &Path) -> Option<Picture> {
+    if video::is_video(path) {
+        return video::frame(path, THUMB_SIDE).ok();
+    }
     if !preview::is_image(path) {
         return None;
     }
@@ -217,6 +227,25 @@ mod tests {
         assert_eq!(small.size, [100, 200], "a small picture is not scaled up");
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn a_video_has_a_frame_scaled_to_fit_the_thumb_side() {
+        let dir = fresh_fixture("thumbs-video");
+        crate::fs::video::tests::write_video(&dir.join("wide.mkv"), 512, 256, 2.0);
+        let frame = thumbnail(&dir.join("wide.mkv")).expect("a video has a frame");
+        assert_eq!((frame.size, frame.original), ([THUMB_SIDE as usize, THUMB_SIDE as usize / 2], [512, 256]));
+    }
+
+    #[test]
+    fn images_and_videos_have_pictures_other_files_do_not() {
+        for name in ["a.png", "b.JPG", "c.mp4", "d.webm"] {
+            assert!(has_picture(Path::new(name)), "{name}");
+        }
+        for name in ["a.txt", "b.pdf", "c.ts"] {
+            assert!(!has_picture(Path::new(name)), "{name}");
+        }
+    }
+
     #[test]
     fn files_that_are_not_pictures_or_too_big_or_broken_have_none() {
         let dir = fresh_fixture("thumbs-none");
@@ -224,7 +253,8 @@ mod tests {
         std::fs::write(dir.join("broken.png"), "not a png").unwrap();
         let huge = std::fs::File::create(dir.join("huge.jpg")).unwrap();
         huge.set_len(IMAGE_LIMIT + 1).unwrap();
-        for name in ["notes.txt", "broken.png", "huge.jpg", "missing.png"] {
+        std::fs::write(dir.join("broken.mp4"), "not a video").unwrap();
+        for name in ["notes.txt", "broken.png", "huge.jpg", "missing.png", "broken.mp4"] {
             assert!(thumbnail(&dir.join(name)).is_none(), "{name}");
         }
     }
