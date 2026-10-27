@@ -733,6 +733,11 @@ mod tests {
         );
     }
 
+    /// A full path on this platform (the fake refuses a relative one).
+    fn apps_dir() -> PathBuf {
+        if cfg!(windows) { PathBuf::from(r"C:\Users\me\Apps\Lumen") } else { PathBuf::from("/home/me/Apps/Lumen") }
+    }
+
     #[test]
     fn install_copies_to_the_folder_typed_and_shows_the_installed_screen() {
         let fake = Fake::new(
@@ -742,10 +747,10 @@ mod tests {
             Switches::default(),
         );
         let mut screen = SetupScreen::open(&fake);
-        screen.dir = " /home/me/Apps/Lumen ".into();
+        screen.dir = format!(" {} ", apps_dir().display());
         screen.want.desktop_shortcut = true;
         screen.handle(&fake, SetupEvent::Install);
-        assert_eq!(*fake.calls.borrow(), ["install /home/me/Apps/Lumen"]);
+        assert_eq!(*fake.calls.borrow(), [format!("install {}", apps_dir().display())]);
         assert_eq!(
             fake.read(),
             Switches {
@@ -756,7 +761,7 @@ mod tests {
         assert_eq!(
             screen.note(),
             Some(&Note::Done(
-                "Lumen 0.6.0 is installed in /home/me/Apps/Lumen.".into()
+                format!("Lumen 0.6.0 is installed in {}.", apps_dir().display())
             ))
         );
         assert!(matches!(screen.origin(), Origin::Installed { .. }));

@@ -623,6 +623,15 @@ mod tests {
         key_exists(&format!(r"{}\{key}", win.software))
     }
 
+    /// The text value of a key under `Classes` (the switches' own tree).
+    fn class_value(win: &Windows, key: &str, name: &str) -> Option<String> {
+        read_value(&win.classes(key), name).unwrap().map(|(text, _)| text)
+    }
+
+    fn class_exists(win: &Windows, key: &str) -> bool {
+        key_exists(&win.classes(key))
+    }
+
     #[test]
     fn started_from_a_download_lumen_is_not_installed() {
         let win = system("setup-windows-download", r"Downloads\lumen.exe");
@@ -671,7 +680,7 @@ mod tests {
         assert_eq!(win.read(), all());
         assert!(win.home.join(r"Desktop\Lumen.lnk").is_file());
         let exe = dir.join("lumen.exe");
-        let command = |key: &str| value(&win, key, "").unwrap();
+        let command = |key: &str| class_value(&win, key, "").unwrap();
         assert_eq!(command(r"Directory\shell\OpenInLumen\command"), format!("\"{}\" \"%1\"", exe.display()));
         assert_eq!(command(r"Directory\Background\shell\OpenInLumen\command"), format!("\"{}\" \"%V\"", exe.display()));
         assert_eq!(command(r"Drive\shell\OpenInLumen\command"), format!("\"{}\" \"%1\"", exe.display()));
@@ -718,21 +727,21 @@ mod tests {
         win.apply(Switches { default: true, ..Switches::default() }).unwrap();
         let command = format!("\"{}\" \"%1\"", exe.display());
         for kind in ["Directory", "Drive"] {
-            assert_eq!(value(&win, &format!(r"{kind}\shell"), "").as_deref(), Some("lumen"));
-            assert_eq!(value(&win, &format!(r"{kind}\shell\lumen"), "ProgrammaticAccessOnly").as_deref(), Some(""));
-            assert_eq!(value(&win, &format!(r"{kind}\shell\lumen\command"), "").as_deref(), Some(command.as_str()));
+            assert_eq!(class_value(&win, &format!(r"{kind}\shell"), "").as_deref(), Some("lumen"));
+            assert_eq!(class_value(&win, &format!(r"{kind}\shell\lumen"), "ProgrammaticAccessOnly").as_deref(), Some(""));
+            assert_eq!(class_value(&win, &format!(r"{kind}\shell\lumen\command"), "").as_deref(), Some(command.as_str()));
         }
         let win_e = format!(r"CLSID\{EXPLORER_CLSID}\shell\opennewwindow\command");
-        assert_eq!(value(&win, &win_e, "").as_deref(), Some(format!("\"{}\"", exe.display()).as_str()));
-        assert_eq!(value(&win, &win_e, "DelegateExecute").as_deref(), Some(""));
-        assert!(!exists(&win, r"Directory\shell\OpenInLumen"), "the right-click entry is its own switch");
+        assert_eq!(class_value(&win, &win_e, "").as_deref(), Some(format!("\"{}\"", exe.display()).as_str()));
+        assert_eq!(class_value(&win, &win_e, "DelegateExecute").as_deref(), Some(""));
+        assert!(!class_exists(&win, r"Directory\shell\OpenInLumen"), "the right-click entry is its own switch");
 
         win.apply(Switches::default()).unwrap();
         for kind in ["Directory", "Drive"] {
-            assert_eq!(value(&win, &format!(r"{kind}\shell"), ""), None);
-            assert!(!exists(&win, &format!(r"{kind}\shell\lumen")));
+            assert_eq!(class_value(&win, &format!(r"{kind}\shell"), ""), None);
+            assert!(!class_exists(&win, &format!(r"{kind}\shell\lumen")));
         }
-        assert!(!exists(&win, &format!(r"CLSID\{EXPLORER_CLSID}")));
+        assert!(!class_exists(&win, &format!(r"CLSID\{EXPLORER_CLSID}")));
     }
 
     #[test]
@@ -741,13 +750,13 @@ mod tests {
         let exe = win.home.join(r"AppData\Local\Lumen\lumen.exe");
         win.apply(Switches { right_click: true, ..Switches::default() }).unwrap();
         for key in [r"Directory\shell\OpenInLumen", r"Directory\Background\shell\OpenInLumen", r"Drive\shell\OpenInLumen"] {
-            assert_eq!(value(&win, key, "MUIVerb").as_deref(), Some("Open in Lumen"));
-            assert_eq!(value(&win, key, "Icon").as_deref(), exe.to_str());
+            assert_eq!(class_value(&win, key, "MUIVerb").as_deref(), Some("Open in Lumen"));
+            assert_eq!(class_value(&win, key, "Icon").as_deref(), exe.to_str());
         }
-        assert!(!exists(&win, r"Directory\shell\lumen"), "the default is its own switch");
+        assert!(!class_exists(&win, r"Directory\shell\lumen"), "the default is its own switch");
         win.apply(Switches::default()).unwrap();
         for key in [r"Directory\shell\OpenInLumen", r"Directory\Background\shell\OpenInLumen", r"Drive\shell\OpenInLumen"] {
-            assert!(!exists(&win, key), "{key} is still there");
+            assert!(!class_exists(&win, key), "{key} is still there");
         }
     }
 
@@ -789,8 +798,8 @@ mod tests {
         write_value(&win.classes(r"Drive\shell"), "", REG_SZ, "FileMan").unwrap();
         assert!(!win.read().default);
         win.apply(Switches::default()).unwrap();
-        assert_eq!(value(&win, r"Directory\shell", "").as_deref(), Some("FileMan"));
-        assert_eq!(value(&win, r"Drive\shell", "").as_deref(), Some("FileMan"));
+        assert_eq!(class_value(&win, r"Directory\shell", "").as_deref(), Some("FileMan"));
+        assert_eq!(class_value(&win, r"Drive\shell", "").as_deref(), Some("FileMan"));
     }
 
     #[test]
@@ -817,9 +826,9 @@ mod tests {
             r"Directory\Background\shell\OpenInLumen",
             r"Drive\shell\OpenInLumen",
         ] {
-            assert!(!exists(&win, key), "{key} is still there");
+            assert!(!class_exists(&win, key), "{key} is still there");
         }
-        assert!(!exists(&win, &format!(r"CLSID\{EXPLORER_CLSID}")));
+        assert!(!class_exists(&win, &format!(r"CLSID\{EXPLORER_CLSID}")));
         assert_eq!(value(&win, "Environment", "Path").as_deref(), Some(r"C:\Tools"));
         assert_eq!(std::fs::read_to_string(home.join(r"AppData\Roaming\lumen\config")).unwrap(), "bookmarks");
         assert_eq!(win.origin(), Origin::NotInstalled { default_dir: home.join(r"AppData\Local\Lumen") });
