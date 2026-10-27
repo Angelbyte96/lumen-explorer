@@ -33,7 +33,10 @@ use eframe::egui;
 fn main() -> eframe::Result {
     // LUMEN_LOG=1 prints how long every folder listing takes to stderr.
     let log = std::env::var_os("LUMEN_LOG").is_some_and(|v| v != "0");
-    let start = app::start(&std::env::args().skip(1).collect::<Vec<_>>());
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let start = app::start(&args);
+    // `--setup` (Windows' Apps & features "Uninstall") opens Lumen Setup.
+    let setup = app::wants_setup(&args);
     let home = fs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
     let config_home = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
     let appdata = std::env::var_os("APPDATA").filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
@@ -53,7 +56,11 @@ fn main() -> eframe::Result {
         "Lumen",
         options,
         Box::new(move |cc| {
-            Ok(Box::new(app::LumenApp::start(&cc.egui_ctx, start, &home, log, settings)))
+            let mut app = app::LumenApp::start(&cc.egui_ctx, start, &home, log, settings);
+            if setup {
+                app.open_setup();
+            }
+            Ok(Box::new(app))
         }),
     )
 }

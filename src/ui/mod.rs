@@ -12,6 +12,7 @@ pub mod list_view;
 pub mod path_popup;
 pub mod preview;
 pub mod recycle_view;
+pub mod setup_view;
 pub mod sidebar;
 pub mod status_bar;
 pub mod tabs;
