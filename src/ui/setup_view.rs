@@ -717,7 +717,7 @@ mod tests {
         );
         let shown = texts(&mut screen);
         for line in [
-            "Lumen 0.6.0 is not installed.",
+            &format!("Lumen {} is not installed.", env!("CARGO_PKG_VERSION")),
             "Install Path:",
             "Install",
             "Back",
@@ -761,7 +761,7 @@ mod tests {
         assert_eq!(
             screen.note(),
             Some(&Note::Done(
-                format!("Lumen 0.6.0 is installed in {}.", apps_dir().display())
+                format!("Lumen {} is installed in {}.", env!("CARGO_PKG_VERSION"), apps_dir().display())
             ))
         );
         assert!(matches!(screen.origin(), Origin::Installed { .. }));
@@ -850,7 +850,7 @@ mod tests {
         let mut screen = SetupScreen::open(&fake);
         let shown = texts(&mut screen);
         assert!(
-            shown.contains("Install this copy (v0.6.0) over v0.6.0"),
+            shown.contains(&format!("Install this copy (v{}) over v0.6.0", env!("CARGO_PKG_VERSION"))),
             "{shown}"
         );
         screen.handle(&fake, SetupEvent::Install);
@@ -874,7 +874,7 @@ mod tests {
         let mut screen = SetupScreen::open(&fake);
         let shown = texts(&mut screen);
         for line in [
-            "Installed version 0.6.0 (apt).",
+            &format!("Installed version {} (apt).", env!("CARGO_PKG_VERSION")),
             "/usr/bin",
             "Lumen was installed with apt. To uninstall it, run:",
             APT_REMOVE,
