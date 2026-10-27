@@ -151,6 +151,13 @@ pub fn parse_user_dirs(text: &str, home: &Path) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
+/// The folder user-dirs.dirs names for `key` (`DESKTOP`): `None` when it
+/// does not name one, `Some(None)` when it is set to the home folder.
+#[cfg(not(windows))]
+pub fn user_dir(text: &str, home: &Path, key: &str) -> Option<Option<PathBuf>> {
+    named_user_dirs(text, home).into_iter().rev().find(|(k, _)| k == key).map(|(_, path)| path)
+}
+
 /// Every key the file names; `None` for a key set to the home folder.
 fn named_user_dirs(text: &str, home: &Path) -> Vec<(String, Option<PathBuf>)> {
     text.lines()
