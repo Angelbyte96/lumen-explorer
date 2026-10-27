@@ -12,7 +12,43 @@ LUMEN_LOG=1 cargo run          # print how long each folder listing takes
 cargo test                     # unit tests (fixtures live in ~/pruebas-explorador)
 ```
 
-## Install (Linux)
+## Lumen Setup
+
+Lumen installs itself, like File Pilot, for your user only: no admin rights on
+Windows, no sudo on Linux. ☰ (F10) ▸ Lumen Setup shows the installed version
+and folder and four switches; Modify applies them:
+
+| Switch | Windows | Linux |
+|---|---|---|
+| Desktop shortcut | `Lumen.lnk` on the desktop | `lumen.desktop` in the desktop folder, marked trusted |
+| Set as default | folders, drives and Win+E open in Lumen (HKCU) | `inode/directory=lumen.desktop` in `~/.config/mimeapps.list` |
+| Right-click entries | "Open in Lumen" on folders, drives and a folder's background | the Nautilus script "Open in Lumen" (right click ▸ Scripts) |
+| Add to PATH | the install folder in your user `Path` | the link `~/.local/bin/lumen` |
+
+Uninstall removes Lumen, its menu entry and every switch; your settings
+(bookmarks, tabs) stay. Turning Set as default off gives folders back to the
+desktop's own file manager.
+
+To install a release:
+
+- Windows: double-click `lumen-<version>-windows-x86_64.exe`. The first time,
+  Lumen opens Setup: Install copies it to `%LOCALAPPDATA%\Lumen` and adds it
+  to the Start menu and to Settings ▸ Apps, where Uninstall opens Setup again.
+- Linux: a downloaded program cannot be started with a double click, so the
+  first start is from a terminal, once:
+
+  ```sh
+  tar xzf lumen-<version>-linux-x86_64.tar.gz
+  ./lumen/lumen     # opens Setup; Install copies it to ~/.local/share/lumen
+  ```
+
+  From then on Lumen is in the app menu.
+
+With the `.deb` (below) apt owns Lumen: Setup changes the switches but neither
+installs nor uninstalls; it shows `sudo apt remove lumen` instead, and Add to
+PATH is always on (`/usr/bin`).
+
+## Install from source (Linux)
 
 ```sh
 scripts/install-desktop.sh             # build release, add Lumen to the app menu
@@ -122,7 +158,7 @@ A tag that does not match `Cargo.toml` fails without publishing anything
 | Enter (or double click) | Enter folder / open file with the default app |
 | Backspace | Erase the last filter character, or go to the parent folder when the filter is empty (holding it stops once the filter is empty) |
 | Ctrl+L | Open the path box, centred on the window, with the current path selected (type a name to replace it): it lists what is in the folder typed so far, narrowed by the words you type, in any order ("tareas revision" finds "revision tareas.pdf"), with the matching letters highlighted, a name typed in full listed first, and the first match picked. Up/Down pick a row, Enter or a click opens it (a file in its app) or the typed path (`~` is your home; on Windows `C:` is the drive's top, and `C:Us` lists it narrowed to `Users`), Tab completes it, Ctrl+Enter opens it in a new tab (a file: its folder, with the file selected), Escape closes. A word with no path (`down`, no `/`) searches your places instead, folders and files, letters in order ("down" finds "Windows NT"), ignoring case and accents ("videos" finds "Vídeos"), marked, each with its folder; folders you visit often come first. On Linux it searches your home folder, the other disks and the network shares (NFS, SMB, SSHFS, and those opened in Files); on Windows every drive and network drive. System and program folders are left out (`/usr`, `/etc` and the rest of `/`; `Windows`, `Program Files`, `ProgramData`, `AppData`), and so are `node_modules`, `.git`, `target` and `.cache`. It shows "Indexing…" with what it has found while the first scan runs, and when the box opens the index is scanned again in the background if it is over 10 minutes old or Lumen created, renamed, moved, pasted or deleted something since. Clicking the empty part of the crumb bar does the same |
-| F10 | Open the app menu (also ☰ in the top-left corner) with Go To focused: Go To opens the path box (as Ctrl+L); Commands, Load Layout, Save Layout, Options and Lumen Setup are greyed until Lumen has them; the last line is the version. ↑/↓ move through the rows it has, Enter runs one, Esc or F10 again closes it. Hovering ☰ or the panel button beside it names its command and shortcut |
+| F10 | Open the app menu (also ☰ in the top-left corner) with Go To focused: Go To opens the path box (as Ctrl+L), Lumen Setup opens the [setup screen](#lumen-setup) (Esc or Back returns); Commands, Load Layout, Save Layout and Options are greyed until Lumen has them; the last line is the version. ↑/↓ move through the rows it has, Enter runs one, Esc or F10 again closes it. Hovering ☰ or the panel button beside it names its command and shortcut |
 | Ctrl+B | Show / hide the side panel (also the panel button beside ☰) |
 | Ctrl+T | Open the current folder in a new tab (also the + in the tab bar) |
 | Ctrl+W | Close the tab (also its ×); the last tab stays open |
