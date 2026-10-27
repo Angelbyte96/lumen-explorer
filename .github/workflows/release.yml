@@ -69,6 +69,14 @@ jobs:
         run: |
           mkdir dist
           scripts/build-deb.sh target/release/lumen dist
+      - name: Pack the binary
+        # A .tar.gz keeps the binary runnable, which a plain download loses:
+        # tar xzf it, then the first ./lumen/lumen opens Lumen Setup to install it.
+        run: |
+          mkdir -p pack/lumen
+          install -m 0755 target/release/lumen pack/lumen/lumen
+          # A branch run by hand may hold a slash (feat/x): no subfolder in the name.
+          tar -czf "dist/lumen-${GITHUB_REF_NAME//\//-}-linux-x86_64.tar.gz" -C pack lumen
       - uses: actions/upload-artifact@v7
         with:
           name: release-linux
