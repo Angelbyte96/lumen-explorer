@@ -205,25 +205,37 @@ impl Windows {
         Ok(())
     }
 
-    /// Hands the install folder to a hidden `cmd.exe` that outlives Lumen:
-    /// Windows cannot delete the exe that is running. The ping waits for
-    /// Lumen to close; `rmdir` without /s only removes an empty folder.
+    /// Hands the install folder to a hidden PowerShell that outlives Lumen:
+    /// Windows cannot delete the exe that is running, so it waits for this
+    /// process to exit, however long the user takes to close Lumen.
     fn remove_after_exit(&self, exe: &Path, dir: &Path) -> Result<(), String> {
         use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW alone: with DETACHED_PROCESS Windows ignores it and
-        // the ping may flash a console. The child outlives Lumen either way.
+        // CREATE_NO_WINDOW alone: with DETACHED_PROCESS Windows ignores it.
+        // The child outlives Lumen either way.
         use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-        let (exe, dir) = (quotable(exe)?, quotable(dir)?);
-        std::process::Command::new("cmd.exe")
-            .raw_arg(format!("/d /c ping -n 3 127.0.0.1 >nul & del /f /q \"{exe}\" & rmdir \"{dir}\""))
+        let script = removal_script(std::process::id(), &text(exe)?, &text(dir)?);
+        std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .map(|_| ())
-            .map_err(|err| format!("Cannot remove {exe} after Lumen closes: {err}"))
+            .map_err(|err| format!("Cannot remove {} after Lumen closes: {err}", exe.display()))
     }
+}
+
+/// Waits for process `pid` to exit, then removes `exe`, then `dir` when it
+/// is empty. Single-quoted: PowerShell expands nothing inside, not even %VAR%.
+fn removal_script(pid: u32, exe: &str, dir: &str) -> String {
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let (exe, dir) = (quote(exe), quote(dir));
+    format!(
+        "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
+         Remove-Item -LiteralPath {exe} -Force -ErrorAction SilentlyContinue; \
+         if (-not (Get-ChildItem -LiteralPath {dir} -Force -ErrorAction SilentlyContinue)) {{ Remove-Item -LiteralPath {dir} -ErrorAction SilentlyContinue }}"
+    )
 }
 
 impl System for Windows {
@@ -863,5 +875,14 @@ mod tests {
         assert_eq!(path_with(r"C:\A;c:\l\;C:\B", r"C:\L", true), r"C:\A;c:\l\;C:\B", "already there");
         assert_eq!(path_with(r"C:\A;c:\l\;;C:\B", r"C:\L", false), r"C:\A;;C:\B");
         assert_eq!(path_with(r"C:\A;;C:\B", r"C:\L", false), r"C:\A;;C:\B", "not there");
+    }
+
+    #[test]
+    fn the_removal_waits_for_lumen_to_exit_before_deleting() {
+        let script = removal_script(4242, r"C:\Users\o'neil\Lumen\lumen.exe", r"C:\Users\o'neil\Lumen");
+        let wait = script.find("Wait-Process -Id 4242").expect("waits for Lumen");
+        let delete = script.find(r"Remove-Item -LiteralPath 'C:\Users\o''neil\Lumen\lumen.exe' -Force").expect("deletes the exe");
+        assert!(wait < delete, "{script}");
+        assert!(script.contains(r"if (-not (Get-ChildItem -LiteralPath 'C:\Users\o''neil\Lumen' -Force"), "the folder only when empty: {script}");
     }
 }
