@@ -12,6 +12,7 @@ pub mod search;
 pub mod pdf;
 pub mod thumbs;
 pub mod transfer;
+pub mod video;
 pub mod watch;
 
 use std::path::{Path, PathBuf};
