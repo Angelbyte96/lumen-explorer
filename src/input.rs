@@ -29,6 +29,10 @@ pub enum Action {
     /// Alt+Up: the parent folder, whatever the filter holds.
     Up,
     FocusPathBar,
+    /// Ctrl+B: show or hide the side panel.
+    ToggleSidebar,
+    /// F10: open or close the app menu (the ☰ in the corner).
+    AppMenu,
     ToggleHidden,
     /// Ctrl+E: also list what the subfolders hold, all the way down.
     ToggleFlat,
@@ -198,6 +202,17 @@ fn read_keys(ctx: &Context, typing: bool, list: bool) -> Vec<Action> {
         if i.consume_key(Modifiers::COMMAND, Key::W) {
             actions.push(Action::CloseTab);
         }
+        if i.consume_key(Modifiers::COMMAND, Key::B) {
+            actions.push(Action::ToggleSidebar);
+        }
+        // Matching ignores an extra Shift, and Shift+F10 is the selection's menu.
+        i.events.retain(|event| match event {
+            Event::Key { key: Key::F10, pressed: true, modifiers, .. } if modifiers.is_none() => {
+                actions.push(Action::AppMenu);
+                false
+            }
+            _ => true,
+        });
         // With Shift first: matching ignores an extra Shift.
         if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Tab) {
             actions.push(Action::PrevTab);
@@ -477,10 +492,10 @@ mod tests {
     }
 
     #[test]
-    fn shift_f10_opens_the_menu_and_a_plain_f10_does_not() {
+    fn shift_f10_opens_the_menu_and_a_plain_f10_the_app_menu() {
         let events = vec![Event::ModifiersChanged(Modifiers::SHIFT), key(Key::F10, Modifiers::SHIFT)];
         assert_eq!(actions_for(events), [Action::Menu]);
-        assert_eq!(actions_for(vec![key(Key::F10, Modifiers::NONE)]), []);
+        assert_eq!(actions_for(vec![key(Key::F10, Modifiers::NONE)]), [Action::AppMenu]);
     }
 
     #[test]
@@ -722,11 +737,13 @@ mod tests {
             key(Key::D, Modifiers::COMMAND),
             key(Key::ArrowLeft, Modifiers::ALT),
             key(Key::Tab, Modifiers::COMMAND),
+            key(Key::B, Modifiers::COMMAND),
+            key(Key::F10, Modifiers::NONE),
         ];
         let actions = with_button(&ctx, keys, false);
         assert_eq!(
             actions,
-            [Action::FocusPathBar, Action::ToggleBookmark, Action::NewTab, Action::NextTab, Action::Back]
+            [Action::FocusPathBar, Action::ToggleBookmark, Action::NewTab, Action::ToggleSidebar, Action::AppMenu, Action::NextTab, Action::Back]
         );
     }
 

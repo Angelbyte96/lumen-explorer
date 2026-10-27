@@ -88,11 +88,18 @@ pub enum MenuIcon {
     Terminal,
     Sort,
     Refresh,
+    /// The app menu's rows (the ☰ in the corner).
+    GoTo,
+    Commands,
+    LoadLayout,
+    SaveLayout,
+    Options,
+    Setup,
 }
 
 impl MenuIcon {
     #[cfg(test)]
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 24] = [
         Self::Open,
         Self::OpenWith,
         Self::NewTab,
@@ -111,6 +118,12 @@ impl MenuIcon {
         Self::Terminal,
         Self::Sort,
         Self::Refresh,
+        Self::GoTo,
+        Self::Commands,
+        Self::LoadLayout,
+        Self::SaveLayout,
+        Self::Options,
+        Self::Setup,
     ];
 
     /// The icon a command shows; sort columns have none, like Dolphin's.
