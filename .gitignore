@@ -2,3 +2,6 @@
 
 # Engram memory exports live in their own repo, never here.
 .engram/
+
+# ODD task records stay local (mirrored in Engram), never in the public repo.
+/odd/
