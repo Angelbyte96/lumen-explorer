@@ -135,7 +135,7 @@ pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
     event
 }
 
-fn lock_id() -> egui::Id {
+pub(crate) fn lock_id() -> egui::Id {
     egui::Id::new("lumen_saved_view_lock")
 }
 
