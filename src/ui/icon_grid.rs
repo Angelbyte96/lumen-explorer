@@ -51,6 +51,7 @@ pub struct GridOut {
     pub shape: GridShape,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     view: &View,
@@ -59,6 +60,7 @@ pub fn show(
     scroll: Option<Scroll>,
     mut edit: Option<&mut RenameEdit>,
     art: Art,
+    overscroll: bool,
 ) -> GridOut {
     let Art { file_icons, thumbs } = art;
     let text_height = ui.text_style_height(&egui::TextStyle::Body);
@@ -72,7 +74,9 @@ pub fn show(
     ui.ctx().data_mut(|d| d.remove::<Rect>(file_list::cursor_row_id()));
 
     egui::ScrollArea::vertical().id_salt("lumen_icon_grid").auto_shrink(false).show_viewport(ui, |ui, viewport| {
-        let height = shape.lines() as f32 * pitch + GAP;
+        // Scroll Beyond Last Item: room to bring the last line to the top.
+        let beyond = if overscroll && shape.total > 0 { (whole.height() - pitch).max(0.0) } else { 0.0 };
+        let height = shape.lines() as f32 * pitch + GAP + beyond;
         let (content, background) = ui.allocate_exact_size(vec2(ui.available_width(), height.max(viewport.height())), egui::Sense::click());
         let origin = content.min + vec2(GAP, GAP);
         let place = |i: usize| {
@@ -301,7 +305,7 @@ pub(crate) mod tests {
         let input = egui::RawInput { screen_rect: Some(screen), events, time, ..Default::default() };
         let mut out = None;
         let mut output = ctx.run_ui(input, |ui| {
-            out = Some(show(ui, view, &[], growth, None, None, Art { file_icons: &FileIcons::default(), thumbs: &Thumbnails::default() }));
+            out = Some(show(ui, view, &[], growth, None, None, Art { file_icons: &FileIcons::default(), thumbs: &Thumbnails::default() }, false));
             crate::ui::dnd::finish(ui.ctx());
         });
         output.textures_delta.clear();
@@ -389,7 +393,7 @@ pub(crate) mod tests {
             let mut shapes = Vec::new();
             for _ in 0..2 {
                 let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-                    show(ui, view, &[], 0.0, None, None, Art { file_icons: &FileIcons::default(), thumbs: &Thumbnails::default() });
+                    show(ui, view, &[], 0.0, None, None, Art { file_icons: &FileIcons::default(), thumbs: &Thumbnails::default() }, false);
                 });
                 output.textures_delta.clear();
                 shapes = output.shapes;
@@ -418,7 +422,7 @@ pub(crate) mod tests {
         let mut shapes = Vec::new();
         for _ in 0..2 {
             let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-                show(ui, &view, &[], 1.0, None, None, Art { file_icons: &FileIcons::default(), thumbs: &thumbs });
+                show(ui, &view, &[], 1.0, None, None, Art { file_icons: &FileIcons::default(), thumbs: &thumbs }, false);
             });
             output.textures_delta.clear();
             shapes = output.shapes;
@@ -445,7 +449,7 @@ pub(crate) mod tests {
         let mut shapes = Vec::new();
         for _ in 0..2 {
             let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-                show(ui, &view, &[], 1.0, None, None, Art { file_icons: &FileIcons::default(), thumbs: &thumbs });
+                show(ui, &view, &[], 1.0, None, None, Art { file_icons: &FileIcons::default(), thumbs: &thumbs }, false);
             });
             output.textures_delta.clear();
             shapes = output.shapes;
@@ -816,7 +820,7 @@ pub(crate) mod tests {
         let mut shapes = Vec::new();
         for _ in 0..2 {
             let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
-                show(ui, view, &[], growth, None, None, Art { file_icons, thumbs });
+                show(ui, view, &[], growth, None, None, Art { file_icons, thumbs }, false);
             });
             output.textures_delta.clear();
             shapes = output.shapes;
@@ -988,5 +992,40 @@ pub(crate) mod tests {
             assert_eq!(crate::ui::dnd::take_drop(&ctx).map(|d| d.target), Some(PathBuf::from("/x")));
         }
         crate::ui::dnd::set_outside(&ctx, None);
+    }
+
+    /// Where the last card's top ends up after scrolling all the way down a long folder.
+    fn last_card_top_after_scrolling_down(overscroll: bool) -> f32 {
+        let ctx = egui::Context::default();
+        let names: Vec<String> = (0..80).map(|n| format!("file-{n:02}")).collect();
+        let files: Vec<&str> = names.iter().map(String::as_str).collect();
+        let view = listed(&[], &files);
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 480.0));
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -100_000.0), modifiers: Default::default(), phase: egui::TouchPhase::Move };
+        let mut top = f32::NAN;
+        for (n, events) in std::iter::once(vec![egui::Event::PointerMoved(screen.center())]).chain(std::iter::once(vec![wheel])).chain((0..40).map(|_| vec![])).enumerate() {
+            let input = egui::RawInput { screen_rect: Some(screen), events, time: Some(n as f64 / 60.0), ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| {
+                show(ui, &view, &[], 0.0, None, None, Art { file_icons: &FileIcons::default(), thumbs: &Thumbnails::default() }, overscroll);
+            });
+            output.textures_delta.clear();
+            top = output
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.text() == "file-79" => Some(t.pos.y),
+                    _ => None,
+                })
+                .unwrap_or(f32::NAN);
+        }
+        top
+    }
+
+    #[test]
+    fn the_icons_stop_at_the_last_card_unless_scroll_beyond_last_item_is_on() {
+        let off = last_card_top_after_scrolling_down(false);
+        assert!(off > 480.0 - 200.0, "the last card sits at the bottom of the window: {off}");
+        let on = last_card_top_after_scrolling_down(true);
+        assert!(on < 200.0, "the last card can be scrolled up to the top: {on}");
     }
 }

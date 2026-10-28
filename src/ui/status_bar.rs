@@ -12,6 +12,8 @@ pub struct Status<'a> {
     pub filter: &'a str,
     /// Typing goes to the filter now (no path box or rename open): show its cursor.
     pub caret: bool,
+    /// Ctrl+F filter mode: the cursor shows before anything is typed.
+    pub filter_mode: bool,
     pub item_count: usize,
     pub hidden_count: usize,
     pub show_hidden: bool,
@@ -74,7 +76,7 @@ pub fn show(ctx: &egui::Context, area: egui::Rect, status: &Status<'_>) -> Optio
     corner("lumen_island_filter", egui::Align2::LEFT_BOTTOM, area.left_bottom() + egui::vec2(EDGE, -EDGE)).show(ctx, |ui| {
         island(ctx).show(ui, |ui| {
             ui.horizontal(|ui| {
-                filter_bar(ui, status.filter, status.item_count, status.caret);
+                filter_bar(ui, status.filter, status.item_count, status.caret && (status.filter_mode || !status.filter.is_empty()));
                 if !status.filter.is_empty() {
                     ui.weak(count_text(status.item_count, true));
                 }
@@ -147,7 +149,8 @@ fn note(ctx: &egui::Context, area: egui::Rect, above: f32, status: &Status<'_>) 
 
 /// Always-visible filter at the bottom left. It is drawn, not a text field:
 /// typing anywhere in the list feeds it, so it never has to take focus. With
-/// `caret`, a steady text cursor follows the typed text; an empty filter has
+/// `caret`, a steady text cursor follows the typed text, or stands before the
+/// placeholder of an empty filter (Ctrl+F); otherwise an empty filter has
 /// none, so it does not look like a field waiting for input.
 fn filter_bar(ui: &mut egui::Ui, filter: &str, items: usize, caret: bool) {
     let text = if filter.is_empty() {
@@ -164,8 +167,8 @@ fn filter_bar(ui: &mut egui::Ui, filter: &str, items: usize, caret: bool) {
             ui.set_min_width(180.0);
             crate::ui::icons::magnifier(ui);
             let label = ui.add(egui::Label::new(text).selectable(false)).rect;
-            if caret && !filter.is_empty() {
-                let x = label.right() + 1.0;
+            if caret {
+                let x = if filter.is_empty() { label.left() - 1.0 } else { label.right() + 1.0 };
                 let stroke = ui.visuals().text_cursor.stroke;
                 ui.painter().line_segment([egui::pos2(x, label.top()), egui::pos2(x, label.bottom())], stroke);
             }
@@ -245,11 +248,12 @@ mod tests {
     use super::*;
 
     /// The filter bar's text and its cursor (a line in the text cursor colour), if any.
-    fn painted_bar(filter: &str, caret: bool) -> (egui::Rect, Option<egui::Rect>) {
+    fn painted_bar(filter: &str, caret: bool, filter_mode: bool) -> (egui::Rect, Option<egui::Rect>) {
         let ctx = egui::Context::default();
         let status = Status {
             filter,
             caret,
+            filter_mode,
             item_count: 9,
             hidden_count: 0,
             show_hidden: false,
@@ -295,6 +299,7 @@ mod tests {
         let status = Status {
             filter: "",
             caret: false,
+            filter_mode: false,
             item_count: 9,
             hidden_count: 0,
             show_hidden: false,
@@ -363,12 +368,22 @@ mod tests {
 
     #[test]
     fn the_filter_bar_shows_a_cursor_while_typing_goes_to_it() {
-        let (text, cursor) = painted_bar("f6", true);
+        let (text, cursor) = painted_bar("f6", true, false);
         let cursor = cursor.expect("cursor painted");
         assert!((cursor.left() - text.right()).abs() <= 2.0, "after the text: {cursor:?} vs {text:?}");
         assert!(cursor.top() <= text.top() + 1.0 && cursor.bottom() >= text.bottom() - 1.0, "as tall as the text");
-        assert_eq!(painted_bar("", true).1, None, "no cursor while nothing is typed");
-        assert_eq!(painted_bar("f6", false).1, None, "no cursor while the path box or a rename takes the keys");
+        assert_eq!(painted_bar("", true, false).1, None, "no cursor while nothing is typed");
+        assert_eq!(painted_bar("f6", false, false).1, None, "no cursor while the path box or a rename takes the keys");
+    }
+
+    #[test]
+    fn ctrl_f_filter_mode_shows_the_cursor_before_anything_is_typed() {
+        let (text, cursor) = painted_bar("", true, true);
+        let cursor = cursor.expect("cursor painted in filter mode");
+        assert!((cursor.left() - text.left()).abs() <= 2.0, "before the placeholder: {cursor:?} vs {text:?}");
+        assert_eq!(painted_bar("", false, true).1, None, "not while the path box or a rename takes the keys");
+        let (text, cursor) = painted_bar("f6", true, true);
+        assert!((cursor.expect("cursor").left() - text.right()).abs() <= 2.0, "after typed text, as before");
     }
 
     const LONG_ERROR: &str = "Cannot rename C:\\Users\\someone\\Documents\\a very long folder name\\report.txt: \
@@ -382,6 +397,7 @@ mod tests {
         let status = Status {
             filter: "",
             caret: false,
+            filter_mode: false,
             item_count: 9,
             hidden_count: 0,
             show_hidden: false,

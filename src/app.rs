@@ -22,6 +22,7 @@ use crate::fs::ops::Renamed;
 use crate::fs::preview::Previewer;
 use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
 use crate::recycle_bin::{self, Recycled};
+use crate::behavior::{NewTab, Startup};
 use crate::ui::drives_view::{self, DriveRow, DriveSort, DrivesEvent};
 use crate::ui::recycle_view::{self, Picks, RecycleEvent, RecycleSort};
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
@@ -235,6 +236,23 @@ impl View {
     pub fn push_filter(&mut self, c: char) {
         self.filter.push(c);
         self.refilter(None);
+    }
+
+    /// Type-to-select: the cursor to the first row whose name starts with
+    /// `prefix` (ignoring case), looking from the row after `after` and
+    /// wrapping round, or from the top when `after` is `None`. The filter is
+    /// left alone. `false`, and nothing moves, when no name matches.
+    pub fn select_prefix(&mut self, prefix: &str, after: Option<usize>) -> bool {
+        let prefix = prefix.to_lowercase();
+        let count = self.rows.len();
+        let start = after.map_or(0, |row| row + 1);
+        let found = (0..count)
+            .map(|step| (start + step) % count)
+            .find(|&row| self.entry(self.rows[row]).name.to_lowercase().starts_with(&prefix));
+        if let Some(row) = found {
+            self.move_to(row);
+        }
+        found.is_some()
     }
 
     /// Erases the last filter character. `false` when there was none.
@@ -971,6 +989,10 @@ const DISKS_WATCH: Duration = if cfg!(windows) { MASK_INTERVAL } else { DISKS_IN
 /// window ride along, so a long copy reloads a few times a second, not per file.
 pub const REFRESH_DELAY: Duration = Duration::from_millis(200);
 
+/// How long without a typed character before type-to-select starts a new
+/// prefix, in seconds.
+const TYPE_SELECT_RESET: f64 = 1.0;
+
 /// How long a notice stays in the status bar.
 const NOTICE_TIME: Duration = Duration::from_secs(4);
 
@@ -1511,6 +1533,13 @@ pub struct LumenApp {
     refresh: RefreshTimer,
     /// Side panel toggled with Space.
     preview_open: bool,
+    /// What type-to-select (Select Typed Item) has typed and when (egui time,
+    /// seconds) the last character came: a pause of `TYPE_SELECT_RESET` ends it.
+    typed: Option<(String, f64)>,
+    /// Ctrl+F filter mode: letters go to the filter whatever Character Key
+    /// Action says. `Some(false)` until the filter holds text, `Some(true)`
+    /// after; Esc, or the filter left empty after that, ends it.
+    filter_mode: Option<bool>,
     /// The Backspace or Esc being held started by undoing something softer
     /// (filter text, a count), so the hold must not run on into the next thing.
     hold_absorbed: bool,
@@ -1519,6 +1548,8 @@ pub struct LumenApp {
     preview: Option<PreviewPane>,
     /// The color schemes in use (Options window).
     schemes: ui::theme::Schemes,
+    /// The behavior options (Options window).
+    behavior: crate::behavior::Behavior,
     /// The Options window (Ctrl+,).
     options: ui::options::Options,
 }
@@ -1626,10 +1657,13 @@ impl LumenApp {
             }),
             refresh: RefreshTimer::default(),
             preview_open: false,
+            typed: None,
+            filter_mode: None,
             hold_absorbed: false,
             previewer: Previewer::new(),
             preview: None,
             schemes: ui::theme::Schemes::default(),
+            behavior: crate::behavior::Behavior::default(),
             options: ui::options::Options::default(),
         };
         if let Some(home) = fs::home_dir() {
@@ -1675,17 +1709,23 @@ impl LumenApp {
         app.window = config.window;
         app.schemes = config.schemes;
         app.schemes.apply(ctx);
+        app.behavior = config.behavior;
         app.saved = app.settings(true);
         app.config_path = path;
         app
     }
 
-    /// Opens what `start` says with the saved settings: one folder, or the
-    /// last session's tabs (`home` stands in for folders that are gone).
+    /// Opens what `start` says with the saved settings: one folder, or what
+    /// Load On Startup says (the last session's tabs, home, or a chosen
+    /// folder); `home` stands in for folders that are gone.
     pub fn start(ctx: &egui::Context, start: Start, home: &Path, log: bool, settings: Settings) -> Self {
         let (tabs, active) = match start {
             Start::Folder(path) => (vec![path], 0),
-            Start::Restore => restore_tabs(&settings.config.tabs, settings.config.active_tab, home),
+            Start::Restore => match &settings.config.behavior.startup {
+                Startup::LastSession => restore_tabs(&settings.config.tabs, settings.config.active_tab, home),
+                Startup::Home => (vec![home.to_path_buf()], 0),
+                Startup::Folder(path) => restore_tabs(std::slice::from_ref(path), 0, home),
+            },
         };
         // Read before anything saves: the file is not there on the very first start.
         let first_start = settings.path.as_deref().is_some_and(|path| !path.exists());
@@ -1737,6 +1777,7 @@ impl LumenApp {
             visited: if with_window { self.visits.list().to_vec() } else { self.saved.visited.clone() },
             folder_views: self.folder_views.clone(),
             schemes: self.schemes,
+            behavior: self.behavior.clone(),
         }
     }
 
@@ -2897,15 +2938,26 @@ impl LumenApp {
         self.tabs.iter().map(|slot| slot.as_ref().unwrap_or(&self.tab).view.current.clone()).collect()
     }
 
-    /// Ctrl+T or +: opens the current folder in a new tab after this one.
+    /// Ctrl+T or +: opens the folder New Tab Show says in a new tab after this one.
+    fn new_tab_shown(&mut self, ctx: &egui::Context) {
+        let folder = new_tab_folder(self.behavior.new_tab, &self.tab.view.current, fs::home_dir(), cfg!(windows));
+        self.new_tab_at(ctx, folder);
+    }
+
+    /// Opens the current folder in a new tab after this one.
     fn new_tab(&mut self, ctx: &egui::Context) {
-        let tab = Tab::new(self.tab.view.current.clone(), Some(&self.tab), self.log);
+        self.new_tab_at(ctx, self.tab.view.current.clone());
+    }
+
+    /// Opens `folder` in a new tab after this one.
+    fn new_tab_at(&mut self, ctx: &egui::Context, folder: PathBuf) {
+        let tab = Tab::new(folder.clone(), Some(&self.tab), self.log);
         self.leave_tab();
         let old = std::mem::replace(&mut self.tab, tab);
         self.tabs[self.active] = Some(old);
         self.active += 1;
         self.tabs.insert(self.active, None);
-        self.navigate(ctx, self.tab.view.current.clone(), None);
+        self.navigate(ctx, folder, None);
     }
 
     /// Ctrl+W or ×: closes tab `index`; the last tab stays open.
@@ -3540,7 +3592,46 @@ impl LumenApp {
         0.35 + 0.65 * done
     }
 
+    /// Select Typed Item: `c` joins the prefix typed in quick succession and
+    /// the cursor goes to the first name starting with it. One letter repeated
+    /// walks on through the names starting with that letter, wrapping round.
+    fn type_to_select(&mut self, ctx: &egui::Context, c: char) {
+        let now = ctx.input(|i| i.time);
+        let mut prefix = match self.typed.take() {
+            Some((prefix, at)) if now - at < TYPE_SELECT_RESET => prefix,
+            _ => String::new(),
+        };
+        let repeat = !prefix.is_empty() && prefix.chars().all(|p| p.to_lowercase().eq(c.to_lowercase()));
+        prefix.push(c);
+        if repeat {
+            let from = self.tab.view.selected;
+            self.tab.view.select_prefix(&c.to_string(), from);
+        } else {
+            self.tab.view.select_prefix(&prefix, None);
+        }
+        self.typed = Some((prefix, now));
+    }
+
+    /// Ends the filter mode once the filter it typed in is empty again
+    /// (erased, or a folder change cleared it).
+    fn settle_filter_mode(&mut self) {
+        let typed = !self.tab.view.filter().is_empty();
+        self.filter_mode = match self.filter_mode {
+            Some(_) if typed => Some(true),
+            Some(true) => None,
+            mode => mode,
+        };
+    }
+
+    /// Whether the filter bar shows the filter mode's cursor this frame;
+    /// settles first, so a folder change that emptied the filter shows none.
+    fn filter_mode_shown(&mut self) -> bool {
+        self.settle_filter_mode();
+        self.filter_mode.is_some()
+    }
+
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
+        self.settle_filter_mode();
         match action {
             // The This PC view has drives, not entries: the keys move over those.
             Action::Move(delta) if self.on_this_pc() => self.move_drive(|at, last| match at {
@@ -3590,6 +3681,7 @@ impl LumenApp {
             Action::ZoomOut => self.tab.view_size = self.tab.view_size.smaller(),
             Action::ZoomReset => self.tab.view_size = ui::view_size::ViewSize::default(),
             Action::FitColumns => self.run_command(ctx, Command::FitAllColumns),
+            Action::FilterMode => self.filter_mode = Some(!self.tab.view.filter().is_empty()),
             Action::Activate => self.activate_selected(ctx),
             Action::GoParent => {
                 self.hold_absorbed = self.tab.view.pop_filter();
@@ -3640,7 +3732,13 @@ impl LumenApp {
             Action::TypeChar(' ') if self.tab.view.filter().is_empty() => {
                 self.preview_open = !self.preview_open;
             }
-            Action::TypeChar(c) => self.tab.view.push_filter(c),
+            Action::TypeChar(c) if c == ' ' || self.filter_mode.is_some() || self.behavior.char_key == crate::behavior::CharKey::TypeInFilter => {
+                self.tab.view.push_filter(c);
+                self.settle_filter_mode();
+            }
+            Action::TypeChar(c) if self.behavior.char_key == crate::behavior::CharKey::SelectTypedItem => self.type_to_select(ctx, c),
+            // Trigger Hotkey: no single-letter hotkeys exist yet.
+            Action::TypeChar(_) => {}
             Action::Up => self.go_parent(ctx),
             Action::Back => self.go_history(ctx, NavKind::Back),
             Action::Forward => self.go_history(ctx, NavKind::Forward),
@@ -3654,7 +3752,7 @@ impl LumenApp {
             Action::Paste => self.paste(ctx),
             Action::Count => self.count_selected(ctx),
             Action::ToggleBookmark => self.toggle_bookmark(self.tab.view.current.clone()),
-            Action::NewTab => self.new_tab(ctx),
+            Action::NewTab => self.new_tab_shown(ctx),
             Action::CloseTab => self.close_tab(ctx, self.active),
             Action::NextTab => self.select_tab(ctx, (self.active + 1) % self.tabs.len()),
             Action::PrevTab => {
@@ -3665,7 +3763,9 @@ impl LumenApp {
             Action::Cancel => {
                 // Picks the user cannot see are dropped too, but do not use up the press.
                 let seen = self.tab.view.picked_count() > 0;
-                self.hold_absorbed = self.tab.view.clear_filter() || (self.tab.view.drop_picks() && seen);
+                // Leaving the filter mode is softer still: it uses up the press too.
+                let left_mode = self.filter_mode.take().is_some();
+                self.hold_absorbed = self.tab.view.clear_filter() || left_mode || (self.tab.view.drop_picks() && seen);
                 if !self.hold_absorbed && self.cancel_count() {
                     self.notice = Some("Calculation cancelled".into());
                     self.hold_absorbed = true;
@@ -3710,6 +3810,10 @@ impl eframe::App for LumenApp {
         #[cfg(not(any(windows, target_os = "linux")))]
         let _ = frame;
         let ctx = ui.ctx().clone();
+        if self.behavior.reverse_scroll {
+            // What every scroll area reads; the wheel events stay, so Ctrl+wheel zoom keeps its direction.
+            ctx.input_mut(|i| i.smooth_scroll_delta = -i.smooth_scroll_delta);
+        }
         // Files dragged over the window from another app, if any.
         #[cfg(target_os = "linux")]
         ui::dnd::set_outside(&ctx, self.wayland_dnd.poll(frame, &ctx));
@@ -3894,10 +3998,10 @@ impl eframe::App for LumenApp {
                 // The unfolded folders belong to the Tree view alone.
                 self.tab.view.fold_all();
             }
-            let sizes = ui::file_list::Sizes { widths: self.columns, shown: self.shown_columns, order: self.column_order, tree };
+            let sizes = ui::file_list::Sizes { widths: self.columns, shown: self.shown_columns, order: self.column_order, tree, overscroll: self.behavior.overscroll };
             let lined = match (self.tab.view_size.layout(), self.tab.view_size.growth()) {
-                (_, Some(growth)) => Some(ui::icon_grid::show(ui, &self.tab.view, &cut, growth, scroll, self.rename.as_mut(), ui::icon_grid::Art { file_icons: &self.file_icons, thumbs: &self.thumbnails })),
-                (ui::view_size::Layout::List, _) => Some(ui::list_view::show(ui, &self.tab.view, &cut, scroll, self.rename.as_mut(), &self.file_icons)),
+                (_, Some(growth)) => Some(ui::icon_grid::show(ui, &self.tab.view, &cut, growth, scroll, self.rename.as_mut(), ui::icon_grid::Art { file_icons: &self.file_icons, thumbs: &self.thumbnails }, self.behavior.overscroll)),
+                (ui::view_size::Layout::List, _) => Some(ui::list_view::show(ui, &self.tab.view, &cut, scroll, self.rename.as_mut(), &self.file_icons, self.behavior.overscroll)),
                 _ => None,
             };
             self.grid = lined.as_ref().map(|out| out.shape);
@@ -3912,6 +4016,7 @@ impl eframe::App for LumenApp {
             });
         });
 
+        let filter_mode = self.filter_mode_shown();
         // Floating over the list's bottom, in the room left for them there.
         let picked = ui::status_bar::show(
             &ctx,
@@ -3919,6 +4024,7 @@ impl eframe::App for LumenApp {
             &Status {
                 filter: self.tab.view.filter(),
                 caret: !self.path_popup.is_open() && self.rename.is_none(),
+                filter_mode,
                 item_count: if self.on_this_pc() {
                     self.drives.len()
                 } else if self.on_recycle_bin() {
@@ -3979,7 +4085,7 @@ impl eframe::App for LumenApp {
             self.handle_popup(&ctx, event);
         }
         // A scheme chosen shows from now on; end_frame saves it with the other settings.
-        self.options.show(&ctx, &mut self.schemes);
+        self.options.show(&ctx, &mut self.schemes, &mut self.behavior, &current);
 
         // A click on another row or a scroll can take focus without ending the
         // edit above (one event per frame); an unfocused field is a cancel.
@@ -4122,6 +4228,17 @@ pub fn restore_tabs(tabs: &[PathBuf], active: usize, home: &Path) -> (Vec<PathBu
     (tabs.iter().map(usable).collect(), active.min(tabs.len() - 1))
 }
 
+/// The folder Ctrl+T opens, by New Tab Show: `/` on Linux and the This PC
+/// view of the drives on Windows for Root; no home folder is the current one.
+fn new_tab_folder(show: NewTab, current: &Path, home: Option<PathBuf>, windows: bool) -> PathBuf {
+    match show {
+        NewTab::Current => current.to_path_buf(),
+        NewTab::Home => home.unwrap_or_else(|| current.to_path_buf()),
+        NewTab::Root if windows => places::this_pc(),
+        NewTab::Root => PathBuf::from("/"),
+    }
+}
+
 fn start_dir_from(arg: Option<String>, cwd: Option<PathBuf>, home: Option<PathBuf>, use_cwd: bool) -> PathBuf {
     let root = || PathBuf::from("/");
     match arg {
@@ -4210,6 +4327,93 @@ mod tests {
         let app = LumenApp::start(&ctx, Start::Folder(dir.clone()), &dir, false, Settings { config, path: None, error: None });
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.tab.lister.last_requested(), Some(dir));
+    }
+
+    /// Starts from the saved session `a`, `b` (the second active) with `startup` chosen, `home` being `dir/home`.
+    fn started_with(name: &str, startup: Startup, start: impl FnOnce(&Path) -> Start) -> (LumenApp, PathBuf) {
+        let dir = crate::fs::ops::tests::fresh_fixture(name);
+        for sub in ["a", "b", "home"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        let ctx = egui::Context::default();
+        let behavior = crate::behavior::Behavior { startup, ..Default::default() };
+        let config = Config { tabs: vec![dir.join("a"), dir.join("b")], active_tab: 1, behavior, ..Config::default() };
+        let settings = Settings { config, path: None, error: None };
+        let app = LumenApp::start(&ctx, start(&dir), &dir.join("home"), false, settings);
+        (app, dir)
+    }
+
+    #[test]
+    fn load_on_startup_home_opens_one_tab_on_the_home_folder() {
+        let (app, dir) = started_with("app-startup-home", Startup::Home, |_| Start::Restore);
+        assert_eq!(app.session(), (vec![dir.join("home")], 0));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("home")));
+    }
+
+    #[test]
+    fn load_on_startup_folder_opens_one_tab_on_that_folder_or_its_nearest_parent() {
+        let dir = crate::fs::ops::tests::fresh_fixture("app-startup-folder");
+        for sub in ["a", "b", "home"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::fs::write(dir.join("file"), "x").unwrap();
+        let ctx = egui::Context::default();
+        let started = |folder: PathBuf| {
+            let behavior = crate::behavior::Behavior { startup: Startup::Folder(folder), ..Default::default() };
+            let config = Config { tabs: vec![dir.join("a")], behavior, ..Config::default() };
+            LumenApp::start(&ctx, Start::Restore, &dir.join("home"), false, Settings { config, path: None, error: None })
+        };
+        let app = started(dir.join("b"));
+        assert_eq!(app.session(), (vec![dir.join("b")], 0));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("b")));
+        assert_eq!(started(dir.join("b/gone/deeper")).session().0, vec![dir.join("b")], "a folder that is gone: its nearest parent");
+        assert_eq!(started(dir.join("file")).session().0, vec![dir.clone()], "a file is no folder: the one it is in");
+        assert_eq!(started(PathBuf::from("relative/nowhere")).session().0, vec![dir.join("home")], "nothing there: home");
+    }
+
+    #[test]
+    fn load_on_startup_last_session_is_the_default_and_a_folder_start_ignores_every_mode() {
+        let (app, dir) = started_with("app-startup-last", Startup::LastSession, |_| Start::Restore);
+        assert_eq!(app.session(), (vec![dir.join("a"), dir.join("b")], 1));
+        for startup in [Startup::LastSession, Startup::Home, Startup::Folder(PathBuf::from("/"))] {
+            let (app, dir) = started_with("app-startup-arg", startup, |dir| Start::Folder(dir.join("a")));
+            assert_eq!(app.session(), (vec![dir.join("a")], 0));
+        }
+    }
+
+    #[test]
+    fn new_tab_show_home_and_root_open_there_and_current_is_today() {
+        let (ctx, mut app, dir) = app_in("app-newtab-show");
+        app.behavior.new_tab = NewTab::Home;
+        app.handle_action(&ctx, Action::NewTab);
+        assert_eq!(app.tab.lister.last_requested(), Some(fs::home_dir().unwrap_or_else(|| dir.clone())));
+        app.behavior.new_tab = NewTab::Root;
+        app.handle_action(&ctx, Action::NewTab);
+        assert_eq!((app.tabs.len(), app.active), (3, 2));
+        assert_eq!(app.tab.lister.last_requested(), Some(PathBuf::from(if cfg!(windows) { places::THIS_PC } else { "/" })));
+        app.behavior.new_tab = NewTab::Current;
+        app.handle_action(&ctx, Action::NewTab);
+        assert_eq!(app.tab.lister.last_requested(), Some(app.tabs[2].as_ref().unwrap().view.current.clone()), "the folder it was opened from");
+    }
+
+    #[test]
+    fn new_tab_show_leaves_the_commands_that_open_a_given_place_alone() {
+        let (ctx, mut app, dir) = app_in("app-newtab-place");
+        app.behavior.new_tab = NewTab::Root;
+        app.run_command(&ctx, Command::OpenPlaceInNewTab(dir.join("sub")));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub")));
+        assert_eq!(app.tabs.len(), 2);
+    }
+
+    #[test]
+    fn new_tab_folder_picks_home_the_root_or_the_drives() {
+        let (current, home) = (Path::new("/srv/work"), Some(PathBuf::from("/home/u")));
+        let show = |show, home: Option<PathBuf>, windows| new_tab_folder(show, current, home, windows);
+        assert_eq!(show(NewTab::Current, home.clone(), false), current);
+        assert_eq!(show(NewTab::Home, home.clone(), false), PathBuf::from("/home/u"));
+        assert_eq!(show(NewTab::Home, None, false), current, "no home: the current folder");
+        assert_eq!(show(NewTab::Root, home.clone(), false), PathBuf::from("/"));
+        assert_eq!(show(NewTab::Root, home, true), places::this_pc(), "the drives on Windows");
     }
 
     #[test]
@@ -4307,6 +4511,175 @@ mod tests {
         app.handle_action(&ctx, Action::TypeChar(' '));
         assert_eq!(app.tab.view.filter(), "a ");
         assert!(!app.preview_open);
+    }
+
+    /// `app_in` plus `apple`, `apricot` and `Cherry`, in `char_key` mode: the
+    /// rows are sub, a.txt, apple, apricot, b.txt, Cherry.
+    fn typing_in(name: &str, char_key: crate::behavior::CharKey) -> (egui::Context, LumenApp) {
+        let (ctx, mut app, dir) = app_in(name);
+        for file in ["apple", "apricot", "Cherry"] {
+            std::fs::write(dir.join(file), "x").unwrap();
+        }
+        let entries = fs::lister::read_entries(&dir).unwrap();
+        app.tab.view.apply_listing(Listing { id: 0, path: dir, result: Ok(entries), elapsed: Duration::ZERO }, None);
+        app.behavior.char_key = char_key;
+        (ctx, app)
+    }
+
+    /// Types `c` at egui time `time`; the name of the selected entry after.
+    fn typed_at(ctx: &egui::Context, app: &mut LumenApp, time: f64, c: char) -> Option<String> {
+        frame_at(ctx, time);
+        app.handle_action(ctx, Action::TypeChar(c));
+        app.tab.view.selected_entry().map(|e| e.name.clone())
+    }
+
+    #[test]
+    fn type_in_filter_still_filters_by_default() {
+        let (ctx, mut app, _) = app_in("app-char-default");
+        assert_eq!(app.behavior.char_key, crate::behavior::CharKey::TypeInFilter);
+        app.handle_action(&ctx, Action::TypeChar('b'));
+        assert_eq!(app.tab.view.filter(), "b");
+        let rows: Vec<_> = app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i).name.as_str()).collect();
+        assert_eq!(rows, ["sub", "b.txt"], "only the names with a b stay");
+    }
+
+    #[test]
+    fn trigger_hotkey_leaves_plain_characters_alone() {
+        let (ctx, mut app) = typing_in("app-char-hotkey", crate::behavior::CharKey::TriggerHotkey);
+        let rows = app.tab.view.rows.clone();
+        let selected = app.tab.view.selected;
+        assert_eq!(typed_at(&ctx, &mut app, 1.0, 'c').as_deref(), Some("sub"));
+        assert_eq!(app.tab.view.filter(), "", "nothing reaches the filter");
+        assert_eq!(app.tab.view.rows, rows);
+        assert_eq!(app.tab.view.selected, selected, "and nothing is selected");
+    }
+
+    #[test]
+    fn select_typed_item_selects_the_entry_starting_with_the_letter_ignoring_case() {
+        let (ctx, mut app) = typing_in("app-char-select", crate::behavior::CharKey::SelectTypedItem);
+        let rows = app.tab.view.rows.clone();
+        assert_eq!(typed_at(&ctx, &mut app, 1.0, 'c').as_deref(), Some("Cherry"));
+        assert_eq!(app.tab.view.filter(), "", "the filter is never touched");
+        assert_eq!(app.tab.view.rows, rows);
+        assert_eq!(app.tab.view.scroll, Some(Scroll::Smooth), "revealed like an arrow move");
+    }
+
+    #[test]
+    fn select_typed_item_builds_a_prefix_from_quick_keys() {
+        let (ctx, mut app) = typing_in("app-char-prefix", crate::behavior::CharKey::SelectTypedItem);
+        assert_eq!(typed_at(&ctx, &mut app, 1.0, 'a').as_deref(), Some("a.txt"));
+        assert_eq!(typed_at(&ctx, &mut app, 1.3, 'p').as_deref(), Some("apple"));
+        assert_eq!(typed_at(&ctx, &mut app, 1.6, 'r').as_deref(), Some("apricot"));
+    }
+
+    #[test]
+    fn select_typed_item_forgets_the_prefix_after_a_pause() {
+        let (ctx, mut app) = typing_in("app-char-pause", crate::behavior::CharKey::SelectTypedItem);
+        assert_eq!(typed_at(&ctx, &mut app, 1.0, 'b').as_deref(), Some("b.txt"));
+        assert_eq!(typed_at(&ctx, &mut app, 3.0, 'a').as_deref(), Some("a.txt"), "a fresh prefix, not `ba`");
+        assert_eq!(typed_at(&ctx, &mut app, 3.5, 'p').as_deref(), Some("apple"), "`ap`");
+        assert_eq!(typed_at(&ctx, &mut app, 5.0, 'r').as_deref(), Some("apple"), "`r` alone matches nothing: unchanged");
+    }
+
+    #[test]
+    fn select_typed_item_repeating_one_letter_cycles_through_its_entries() {
+        let (ctx, mut app) = typing_in("app-char-cycle", crate::behavior::CharKey::SelectTypedItem);
+        let names: Vec<_> = (0..4).map(|i| typed_at(&ctx, &mut app, 1.0 + 0.2 * f64::from(i), 'a').unwrap()).collect();
+        assert_eq!(names, ["a.txt", "apple", "apricot", "a.txt"], "wraps to the first");
+    }
+
+    #[test]
+    fn select_typed_item_with_no_match_keeps_the_selection() {
+        let (ctx, mut app) = typing_in("app-char-nomatch", crate::behavior::CharKey::SelectTypedItem);
+        typed_at(&ctx, &mut app, 1.0, 'b');
+        app.tab.view.scroll = None;
+        assert_eq!(typed_at(&ctx, &mut app, 4.0, 'z').as_deref(), Some("b.txt"));
+        assert_eq!(app.tab.view.scroll, None, "and nothing scrolls");
+        assert_eq!(app.tab.view.filter(), "");
+    }
+
+    /// Letters that reach the filter after Ctrl+F, whatever Character Key Action says.
+    #[test]
+    fn ctrl_f_sends_letters_to_the_filter_in_every_mode() {
+        for mode in [crate::behavior::CharKey::SelectTypedItem, crate::behavior::CharKey::TriggerHotkey, crate::behavior::CharKey::TypeInFilter] {
+            let (ctx, mut app) = typing_in("app-ctrl-f-modes", mode);
+            app.handle_action(&ctx, Action::FilterMode);
+            typed_at(&ctx, &mut app, 1.0, 'a');
+            typed_at(&ctx, &mut app, 1.1, 'p');
+            assert_eq!(app.tab.view.filter(), "ap", "{mode:?}");
+            let rows: Vec<_> = app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i).name.clone()).collect();
+            assert_eq!(rows, ["apple", "apricot"], "{mode:?}: the filter narrows the rows");
+            if mode == crate::behavior::CharKey::SelectTypedItem {
+                assert_eq!(app.typed, None, "nothing typed to select");
+            }
+        }
+    }
+
+    #[test]
+    fn escape_ends_the_filter_mode_and_the_letters_select_again() {
+        let (ctx, mut app) = typing_in("app-ctrl-f-escape", crate::behavior::CharKey::SelectTypedItem);
+        app.handle_action(&ctx, Action::FilterMode);
+        typed_at(&ctx, &mut app, 1.0, 'a');
+        app.handle_action(&ctx, Action::Cancel);
+        assert_eq!(app.tab.view.filter(), "", "Esc clears the filter as before");
+        assert_eq!(typed_at(&ctx, &mut app, 5.0, 'c').as_deref(), Some("Cherry"), "Select Typed Item is back");
+        assert_eq!(app.tab.view.filter(), "");
+    }
+
+    #[test]
+    fn escape_ends_the_filter_mode_before_anything_is_typed() {
+        let (ctx, mut app) = typing_in("app-ctrl-f-escape-empty", crate::behavior::CharKey::SelectTypedItem);
+        app.handle_action(&ctx, Action::FilterMode);
+        app.handle_action(&ctx, Action::Cancel);
+        assert_eq!(typed_at(&ctx, &mut app, 5.0, 'c').as_deref(), Some("Cherry"));
+        assert_eq!(app.tab.view.filter(), "");
+    }
+
+    #[test]
+    fn erasing_the_filter_ends_the_filter_mode_without_going_up() {
+        let (ctx, mut app) = typing_in("app-ctrl-f-backspace", crate::behavior::CharKey::SelectTypedItem);
+        let here = app.tab.view.current.clone();
+        app.handle_action(&ctx, Action::FilterMode);
+        typed_at(&ctx, &mut app, 1.0, 'a');
+        app.handle_action(&ctx, Action::GoParent);
+        assert_eq!(app.tab.view.filter(), "");
+        assert_eq!(app.tab.view.current, here, "the press only erased");
+        assert_eq!(typed_at(&ctx, &mut app, 5.0, 'c').as_deref(), Some("Cherry"), "Select Typed Item is back");
+        assert_eq!(app.tab.view.filter(), "");
+    }
+
+    #[test]
+    fn a_folder_change_that_clears_the_filter_hides_the_filter_mode_cursor_at_once() {
+        let (ctx, mut app) = typing_in("app-ctrl-f-navigate", crate::behavior::CharKey::SelectTypedItem);
+        app.handle_action(&ctx, Action::FilterMode);
+        assert!(app.filter_mode_shown(), "armed: the cursor shows before anything is typed");
+        typed_at(&ctx, &mut app, 1.0, 'a');
+        app.tab.view.clear_filter(); // as entering another folder does
+        assert!(!app.filter_mode_shown(), "the mode ended with the filter, no stale cursor");
+        assert_eq!(typed_at(&ctx, &mut app, 5.0, 'c').as_deref(), Some("Cherry"));
+    }
+
+    #[test]
+    fn space_still_toggles_the_preview_in_the_filter_mode() {
+        let (ctx, mut app) = typing_in("app-ctrl-f-space", crate::behavior::CharKey::SelectTypedItem);
+        app.handle_action(&ctx, Action::FilterMode);
+        app.handle_action(&ctx, Action::TypeChar(' '));
+        assert!(app.preview_open, "a leading Space is the preview key");
+        typed_at(&ctx, &mut app, 1.0, 'a');
+        assert_eq!(app.tab.view.filter(), "a", "the mode is still on");
+    }
+
+    #[test]
+    fn space_is_the_same_in_select_typed_item() {
+        let (ctx, mut app) = typing_in("app-char-select-space", crate::behavior::CharKey::SelectTypedItem);
+        let selected = app.tab.view.selected;
+        assert_eq!(typed_at(&ctx, &mut app, 1.0, ' ').as_deref(), Some("sub"));
+        assert!(app.preview_open, "a leading Space is the preview key");
+        assert_eq!(app.tab.view.selected, selected);
+        assert_eq!(app.tab.view.filter(), "");
+        app.tab.view.push_filter('a');
+        app.handle_action(&ctx, Action::TypeChar(' '));
+        assert_eq!(app.tab.view.filter(), "a ", "after text it is a filter space");
     }
 
     #[test]
@@ -10144,6 +10517,56 @@ mod tests {
         }
         output.shapes.iter().for_each(|s| collect(&s.shape, &mut texts));
         texts
+    }
+
+    /// `app_in` with a hundred more files in the folder.
+    fn long_app_in(name: &str) -> (egui::Context, LumenApp, PathBuf) {
+        let dir = crate::fs::ops::tests::fresh_fixture(name);
+        for n in 0..100 {
+            std::fs::write(dir.join(format!("file-{n:03}.txt")), "x").unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut app = LumenApp::new(&ctx, dir.clone(), false);
+        let entries = fs::lister::read_entries(&dir).unwrap();
+        let listing = Listing { id: 0, path: dir.clone(), result: Ok(entries), elapsed: Duration::ZERO };
+        app.tab.view.apply_listing(listing, None);
+        app.tab.shown_id = app.tab.lister.latest_id();
+        app.tab.look_for = Some((dir.clone(), Look::default()));
+        (ctx, app, dir)
+    }
+
+    /// A wheel turn of `y` points over the middle of the list, then the frames it takes to settle.
+    fn wheel_over_list(ctx: &egui::Context, app: &mut LumenApp, y: f32) -> Vec<String> {
+        let over = egui::pos2(400.0, 300.0);
+        window_frame(ctx, app, vec![egui::Event::PointerMoved(over)]);
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, y), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move };
+        window_frame(ctx, app, vec![wheel]);
+        let mut texts = Vec::new();
+        for _ in 0..30 {
+            texts = window_frame(ctx, app, vec![]);
+        }
+        texts
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_list_down_when_reverse_scroll_is_off() {
+        let (ctx, mut app, _) = long_app_in("app-wheel-normal");
+        window_frame(&ctx, &mut app, vec![]);
+        let texts = wheel_over_list(&ctx, &mut app, -600.0);
+        assert!(!texts.iter().any(|t| t == "file-000.txt"), "scrolled past the first rows: {texts:?}");
+        let texts = wheel_over_list(&ctx, &mut app, 600.0);
+        assert!(texts.iter().any(|t| t == "file-000.txt"), "and back up: {texts:?}");
+    }
+
+    #[test]
+    fn reverse_scroll_makes_the_wheel_scroll_the_list_the_other_way() {
+        let (ctx, mut app, _) = long_app_in("app-wheel-reverse");
+        app.behavior.reverse_scroll = true;
+        window_frame(&ctx, &mut app, vec![]);
+        let texts = wheel_over_list(&ctx, &mut app, -600.0);
+        assert!(texts.iter().any(|t| t == "file-000.txt"), "a turn that scrolled down now scrolls up, and the list is at the top: {texts:?}");
+        let texts = wheel_over_list(&ctx, &mut app, 600.0);
+        assert!(!texts.iter().any(|t| t == "file-000.txt"), "the other turn scrolls down: {texts:?}");
     }
 
     #[test]
