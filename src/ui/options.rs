@@ -223,6 +223,8 @@ struct Keys {
     down: bool,
     enter: bool,
     escape: bool,
+    /// Ctrl+R: the picked row (or the listed option) back to its default.
+    reset: bool,
 }
 
 impl Keys {
@@ -233,6 +235,7 @@ impl Keys {
             down: i.consume_key(Modifiers::NONE, Key::ArrowDown),
             enter: i.consume_key(Modifiers::NONE, Key::Enter),
             escape: i.consume_key(Modifiers::NONE, Key::Escape),
+            reset: i.consume_key(Modifiers::COMMAND, Key::R),
         })
     }
 }
@@ -256,7 +259,7 @@ const BACK: &str = "‹";
 const CURRENT: &str = "•";
 /// The window's height besides its rows: search box, separators, footer and margins.
 const CHROME: f32 = 140.0;
-const FOOTER: &str = "Up Down to navigate · Enter to use · Escape to dismiss";
+const FOOTER: &str = "Up Down to navigate · Enter to use · Ctrl+R to reset · Escape to dismiss";
 
 fn field_id() -> egui::Id {
     egui::Id::new("lumen_options_field")
@@ -364,6 +367,12 @@ impl Options {
             }
             if keys.enter {
                 self.use_row(prefs, here, self.picked);
+            }
+            if keys.reset {
+                let opt = self.list.or_else(|| listed(prefs, &self.search).get(self.picked).copied());
+                if let Some(opt) = opt {
+                    opt.restore(prefs);
+                }
             }
         }
         // Enter may have opened or left the list: pick within what shows now.
@@ -679,7 +688,7 @@ mod tests {
             assert!(!painted(&texts, row), "{row} does not match");
         }
         assert!(painted(&texts, FOOTER), "the footer stays");
-        assert_eq!(FOOTER, "Up Down to navigate · Enter to use · Escape to dismiss", "File Pilot's footer");
+        assert_eq!(FOOTER, "Up Down to navigate · Enter to use · Ctrl+R to reset · Escape to dismiss", "File Pilot's footer, with Lumen's reset key");
     }
 
     #[test]
@@ -924,6 +933,57 @@ mod tests {
         at(&rows, "Select Typed Item ›");
         window.click_on(RESET);
         assert_eq!(window.behavior.char_key, CharKey::TypeInFilter);
+    }
+
+    fn ctrl(key: Key) -> Vec<Event> {
+        vec![
+            Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND },
+            Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::COMMAND },
+        ]
+    }
+
+    /// Up or Down until `row` is picked: the rows in order, from the first.
+    fn pick(window: &mut Window, row: Opt) {
+        let index = listed(&Prefs { schemes: window.schemes, behavior: window.behavior.clone() }, "").iter().position(|&o| o == row).unwrap();
+        for _ in 0..index {
+            window.step(key(Key::ArrowDown));
+        }
+    }
+
+    #[test]
+    fn ctrl_r_resets_the_picked_row_only() {
+        let changed = Behavior { overscroll: true, reverse_scroll: true, char_key: CharKey::SelectTypedItem, ..Behavior::default() };
+        let mut window = Window::opened(changed);
+        pick(&mut window, Opt::ReverseScroll);
+        let rows = window.step(ctrl(Key::R));
+        assert!(!window.behavior.reverse_scroll, "the picked row is back at its default");
+        assert!(window.behavior.overscroll && window.behavior.char_key == CharKey::SelectTypedItem, "the others are kept");
+        assert!(window.options.is_open(), "the window stays");
+        assert_eq!(window.options.picked, listed(&Prefs::default(), "").iter().position(|&o| o == Opt::ReverseScroll).unwrap(), "the pick stays");
+        assert_eq!(rows.iter().filter(|(t, _)| t == RESET).count(), 2, "{rows:?}");
+        window.step(ctrl(Key::R));
+        assert!(!window.behavior.reverse_scroll && window.behavior.overscroll, "on a row at its default it changes nothing");
+        assert_eq!(window.schemes, Schemes::default());
+    }
+
+    #[test]
+    fn ctrl_r_in_a_list_resets_its_option_and_moves_the_mark() {
+        let mut window = Window::opened(Behavior { char_key: CharKey::SelectTypedItem, ..Behavior::default() });
+        window.click_on(CHAR_KEY);
+        let list = window.step(ctrl(Key::R));
+        assert_eq!(window.behavior.char_key, CharKey::TypeInFilter);
+        let list = if painted(&list, CURRENT) { list } else { window.step(vec![]) };
+        assert!((at(&list, CURRENT).center().y - at(&list, "Type In Filter").center().y).abs() < 1.0, "the default is marked");
+        assert!(painted(&list, "Select Typed Item"), "still in the list");
+    }
+
+    #[test]
+    fn ctrl_r_with_text_in_the_search_types_nothing() {
+        let mut window = Window::opened(Behavior { overscroll: true, ..Behavior::default() });
+        window.step(vec![Event::Text("scroll".into())]);
+        window.step(ctrl(Key::R));
+        assert_eq!(window.options.search, "scroll");
+        assert!(!window.behavior.overscroll, "Scroll Beyond Last Item is the first row shown");
     }
 
     #[test]
