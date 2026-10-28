@@ -58,6 +58,8 @@ pub struct Windows {
     pub desktop: Option<PathBuf>,
     /// Where Install goes by default: `%LOCALAPPDATA%\Lumen`.
     pub default_dir: PathBuf,
+    /// Where uninstalling the running copy moves its exe: `%TEMP%`.
+    pub temp: PathBuf,
     /// Tells Explorer and the other windows about the changes. Off under
     /// test: it would reach the real desktop.
     pub run_tools: bool,
@@ -74,6 +76,7 @@ impl Windows {
             start_menu: env_dir("APPDATA")?.join(r"Microsoft\Windows\Start Menu\Programs"),
             desktop: known_desktop(),
             default_dir: env_dir("LOCALAPPDATA")?.join("Lumen"),
+            temp: std::env::temp_dir(),
             run_tools: true,
         })
     }
@@ -205,37 +208,15 @@ impl Windows {
         Ok(())
     }
 
-    /// Hands the install folder to a hidden PowerShell that outlives Lumen:
-    /// Windows cannot delete the exe that is running, so it waits for this
-    /// process to exit, however long the user takes to close Lumen.
-    fn remove_after_exit(&self, exe: &Path, dir: &Path) -> Result<(), String> {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW alone: with DETACHED_PROCESS Windows ignores it.
-        // The child outlives Lumen either way.
-        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-        let script = removal_script(std::process::id(), &text(exe)?, &text(dir)?);
-        std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map(|_| ())
-            .map_err(|err| format!("Cannot remove {} after Lumen closes: {err}", exe.display()))
+    /// Windows cannot delete the exe that is running, but it can move it on
+    /// the same drive: the exe goes to `%TEMP%`, which Windows cleans up, so
+    /// the install folder is removed at once and no helper process outlives
+    /// Lumen (a hidden shell deleting the exe made Defender call it a trojan).
+    fn park_running(&self, exe: &Path) -> Result<(), String> {
+        let parked = self.temp.join(format!("lumen-uninstalled-{}.exe", std::process::id()));
+        std::fs::rename(exe, &parked)
+            .map_err(|err| format!("Cannot move {} out of its folder: {err}. Delete it after closing Lumen.", exe.display()))
     }
-}
-
-/// Waits for process `pid` to exit, then removes `exe`, then `dir` when it
-/// is empty. Single-quoted: PowerShell expands nothing inside, not even %VAR%.
-fn removal_script(pid: u32, exe: &str, dir: &str) -> String {
-    let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    let (exe, dir) = (quote(exe), quote(dir));
-    format!(
-        "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
-         Remove-Item -LiteralPath {exe} -Force -ErrorAction SilentlyContinue; \
-         if (-not (Get-ChildItem -LiteralPath {dir} -Force -ErrorAction SilentlyContinue)) {{ Remove-Item -LiteralPath {dir} -ErrorAction SilentlyContinue }}"
-    )
 }
 
 impl System for Windows {
@@ -316,9 +297,10 @@ impl System for Windows {
         }
         let exe = record.dir.join(BINARY);
         if running_it {
-            return self.remove_after_exit(&exe, &record.dir);
+            self.park_running(&exe)?;
+        } else {
+            super::remove_file(&exe).map_err(|err| format!("Cannot remove {}: {err}", exe.display()))?;
         }
-        super::remove_file(&exe).map_err(|err| format!("Cannot remove {}: {err}", exe.display()))?;
         // Only when empty: the folder may hold the user's own files.
         let _ = std::fs::remove_dir(&record.dir);
         Ok(())
@@ -588,6 +570,7 @@ mod tests {
         let exe = home.join(exe);
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
         std::fs::write(&exe, "MZ").unwrap();
+        std::fs::create_dir_all(home.join(r"AppData\Local\Temp")).unwrap();
         let software = format!(r"Software\LumenTest\{name}");
         delete_tree(&software).unwrap();
         let windows = Windows {
@@ -598,6 +581,7 @@ mod tests {
             start_menu: home.join(r"AppData\Roaming\Microsoft\Windows\Start Menu\Programs"),
             desktop: Some(home.join("Desktop")),
             default_dir: home.join(r"AppData\Local\Lumen"),
+            temp: home.join(r"AppData\Local\Temp"),
             run_tools: false,
         };
         Fixture { windows, home }
@@ -886,12 +870,41 @@ mod tests {
         assert_eq!(path_with(r"C:\A;;C:\B", r"C:\L", false), r"C:\A;;C:\B", "not there");
     }
 
+    /// The installed copy of `fixture`, as if it were the one running.
+    fn running_installed(fixture: &Fixture) -> Windows {
+        Windows {
+            exe: fixture.default_dir.join("lumen.exe"),
+            record_file: fixture.record_file.clone(),
+            software: fixture.software.clone(),
+            environment: fixture.environment.clone(),
+            start_menu: fixture.start_menu.clone(),
+            desktop: fixture.desktop.clone(),
+            default_dir: fixture.default_dir.clone(),
+            temp: fixture.temp.clone(),
+            run_tools: false,
+        }
+    }
+
     #[test]
-    fn the_removal_waits_for_lumen_to_exit_before_deleting() {
-        let script = removal_script(4242, r"C:\Users\o'neil\Lumen\lumen.exe", r"C:\Users\o'neil\Lumen");
-        let wait = script.find("Wait-Process -Id 4242").expect("waits for Lumen");
-        let delete = script.find(r"Remove-Item -LiteralPath 'C:\Users\o''neil\Lumen\lumen.exe' -Force").expect("deletes the exe");
-        assert!(wait < delete, "{script}");
-        assert!(script.contains(r"if (-not (Get-ChildItem -LiteralPath 'C:\Users\o''neil\Lumen' -Force"), "the folder only when empty: {script}");
+    fn uninstalling_the_running_copy_moves_it_to_temp_and_removes_the_folder() {
+        let fixture = installed("setup-windows-uninstall-running");
+        let win = running_installed(&fixture);
+        assert!(matches!(win.origin(), Origin::Installed { running_it: true, .. }));
+        win.uninstall().unwrap();
+        let parked = fixture.temp.join(format!("lumen-uninstalled-{}.exe", std::process::id()));
+        assert_eq!(std::fs::read(&parked).unwrap(), b"MZ", "the running exe is moved out, not deleted");
+        assert!(!fixture.default_dir.exists(), "the install folder is gone at once");
+        assert!(!exists(&win, r"Microsoft\Windows\CurrentVersion\Uninstall\Lumen"));
+        assert_eq!(win.origin(), Origin::NotInstalled { default_dir: fixture.default_dir.clone() });
+    }
+
+    #[test]
+    fn uninstalling_the_running_copy_keeps_a_folder_that_holds_other_files() {
+        let fixture = installed("setup-windows-uninstall-running-shared");
+        std::fs::write(fixture.default_dir.join("notes.txt"), "mine").unwrap();
+        let win = running_installed(&fixture);
+        win.uninstall().unwrap();
+        assert_eq!(std::fs::read_to_string(fixture.default_dir.join("notes.txt")).unwrap(), "mine");
+        assert!(!fixture.default_dir.join("lumen.exe").exists());
     }
 }
