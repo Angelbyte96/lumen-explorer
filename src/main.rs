@@ -5,6 +5,7 @@
 mod app;
 #[cfg(not(windows))]
 mod apps;
+mod behavior;
 mod config;
 mod drag;
 mod folder_views;

@@ -1519,6 +1519,8 @@ pub struct LumenApp {
     preview: Option<PreviewPane>,
     /// The color schemes in use (Options window).
     schemes: ui::theme::Schemes,
+    /// The behavior options (Options window).
+    behavior: crate::behavior::Behavior,
     /// The Options window (Ctrl+,).
     options: ui::options::Options,
 }
@@ -1630,6 +1632,7 @@ impl LumenApp {
             previewer: Previewer::new(),
             preview: None,
             schemes: ui::theme::Schemes::default(),
+            behavior: crate::behavior::Behavior::default(),
             options: ui::options::Options::default(),
         };
         if let Some(home) = fs::home_dir() {
@@ -1675,6 +1678,7 @@ impl LumenApp {
         app.window = config.window;
         app.schemes = config.schemes;
         app.schemes.apply(ctx);
+        app.behavior = config.behavior;
         app.saved = app.settings(true);
         app.config_path = path;
         app
@@ -1737,6 +1741,7 @@ impl LumenApp {
             visited: if with_window { self.visits.list().to_vec() } else { self.saved.visited.clone() },
             folder_views: self.folder_views.clone(),
             schemes: self.schemes,
+            behavior: self.behavior.clone(),
         }
     }
 
@@ -3979,7 +3984,7 @@ impl eframe::App for LumenApp {
             self.handle_popup(&ctx, event);
         }
         // A scheme chosen shows from now on; end_frame saves it with the other settings.
-        self.options.show(&ctx, &mut self.schemes);
+        self.options.show(&ctx, &mut self.schemes, &mut self.behavior, &current);
 
         // A click on another row or a scroll can take focus without ending the
         // edit above (one event per frame); an unfocused field is a cancel.
