@@ -9,7 +9,8 @@ use super::preview::Picture;
 /// Video files, by extension. `.ts` is left out: it is mostly TypeScript.
 const EXTENSIONS: &[&str] = &["mp4", "m4v", "mkv", "webm", "mov", "avi", "wmv", "flv", "mpg", "mpeg", "3gp", "ogv"];
 
-/// A video that takes longer to give a frame is left without one.
+/// A video that takes longer to give a frame is left without one: one limit
+/// for ffprobe and every ffmpeg run together.
 #[cfg(not(windows))]
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -36,7 +37,7 @@ pub fn is_video(path: &Path) -> bool {
 /// `side`; `original` is the video's own size.
 #[cfg(not(windows))]
 pub fn frame(path: &Path, side: u32) -> Result<Picture, Failure> {
-    frame_with("ffmpeg", "ffprobe", path, side)
+    frame_with("ffmpeg", "ffprobe", path, side, TIMEOUT)
 }
 
 /// Where to take the frame from, in seconds: a tenth of the way in, as
@@ -49,21 +50,25 @@ fn seek_for(duration: Option<f64>) -> Option<f64> {
 
 /// The video's length in seconds, read by ffprobe (installed with ffmpeg).
 #[cfg(not(windows))]
-fn duration_with(program: &str, path: &Path) -> Option<f64> {
+fn duration_with(program: &str, path: &Path, timeout: std::time::Duration) -> Option<f64> {
     let mut command = std::process::Command::new(program);
     command.args(["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"]);
     command.arg(Path::new(".").join(path));
-    let out = super::preview::run_for(command, TIMEOUT).ok()?;
+    let out = super::preview::run_for(command, timeout).ok()?;
     // "N/A" when the container does not say.
     String::from_utf8_lossy(&out).trim().parse::<f64>().ok().filter(|seconds| seconds.is_finite() && *seconds > 0.0)
 }
 
 #[cfg(not(windows))]
-fn frame_with(program: &str, probe: &str, path: &Path, side: u32) -> Result<Picture, Failure> {
+fn frame_with(program: &str, probe: &str, path: &Path, side: u32, limit: std::time::Duration) -> Result<Picture, Failure> {
     use super::preview::RunError;
+    let deadline = std::time::Instant::now() + limit;
+    let left = || deadline.saturating_duration_since(std::time::Instant::now());
+    // ffprobe and the seek get half of what is left each, so a slow one
+    // still leaves time to read the start.
     // A seek that lands past the last frame gives nothing (and exits fine),
     // so the video is read again from the start.
-    let seek = seek_for(duration_with(probe, path)).map(|seconds| format!("{seconds:.3}"));
+    let seek = seek_for(duration_with(probe, path, left() / 2)).map(|seconds| format!("{seconds:.3}"));
     let mut png = Vec::new();
     for seek in [seek.as_deref(), None] {
         let mut command = std::process::Command::new(program);
@@ -74,9 +79,12 @@ fn frame_with(program: &str, probe: &str, path: &Path, side: u32) -> Result<Pict
         // A path starting with "-" would be read as an option.
         command.arg("-i").arg(Path::new(".").join(path));
         command.args(["-map", "0:v:0", "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"]);
-        png = match super::preview::run_for(command, TIMEOUT) {
+        let time = if seek.is_some() { left() / 2 } else { left() };
+        png = match super::preview::run_for(command, time) {
             Ok(png) => png,
             Err(RunError::Missing) => return Err(Failure::Missing),
+            // A seek deep into a slow video is given up for the start.
+            Err(RunError::TimedOut) if seek.is_some() => Vec::new(),
             Err(RunError::TimedOut) => return Err(Failure::TimedOut),
             Err(RunError::Failed) => return Err(Failure::Failed),
         };
@@ -205,7 +213,73 @@ pub(crate) mod tests {
         assert_eq!(frame(&dir.join("bad.mp4"), 256).err(), Some(Failure::Failed));
         assert_eq!(frame(&dir.join("missing.mp4"), 256).err(), Some(Failure::Failed));
         write_video(&dir.join("good.mp4"), 40, 20, 1.0);
-        assert_eq!(frame_with("lumen-no-such-ffmpeg", "lumen-no-such-ffprobe", &dir.join("good.mp4"), 256).err(), Some(Failure::Missing));
+        assert_eq!(frame_with("lumen-no-such-ffmpeg", "lumen-no-such-ffprobe", &dir.join("good.mp4"), 256, TIMEOUT).err(), Some(Failure::Missing));
+    }
+
+    /// An executable shell script named `name` in `dir`, standing in for
+    /// ffmpeg or ffprobe; its path as a string.
+    #[cfg(not(windows))]
+    fn write_stand_in(dir: &Path, name: &str, script: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// ffmpeg that hangs when asked to seek and is the real one otherwise.
+    #[cfg(not(windows))]
+    const HANGS_ON_SEEK: &str = "case \" $* \" in *\" -ss \"*) exec sleep 30;; esac\nexec ffmpeg \"$@\"";
+
+    #[cfg(not(windows))]
+    #[test]
+    fn ffprobe_and_ffmpeg_share_one_time_limit() {
+        let dir = fresh_fixture("video-shared-limit");
+        write_video(&dir.join("clip.mp4"), 40, 20, 1.0);
+        let probe = write_stand_in(&dir, "probe", "exec sleep 30");
+        let ffmpeg = write_stand_in(&dir, "ffmpeg", "exec sleep 30");
+        let start = std::time::Instant::now();
+        let got = frame_with(&ffmpeg, &probe, &dir.join("clip.mp4"), 256, std::time::Duration::from_secs(1));
+        let took = start.elapsed();
+        assert_eq!(got.err(), Some(Failure::TimedOut));
+        assert!(took < std::time::Duration::from_millis(1500), "one 1 s limit for both, not one each: {took:?}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_slow_ffprobe_still_leaves_time_to_read_the_start() {
+        let dir = fresh_fixture("video-slow-probe");
+        write_video(&dir.join("clip.mp4"), 40, 20, 1.0);
+        let probe = write_stand_in(&dir, "probe", "exec sleep 30");
+        let start = std::time::Instant::now();
+        let got = frame_with("ffmpeg", &probe, &dir.join("clip.mp4"), 256, std::time::Duration::from_secs(2));
+        let took = start.elapsed();
+        assert_eq!(got.expect("a frame from the start").size, [40, 20]);
+        assert!(took < std::time::Duration::from_secs(2), "within the limit: {took:?}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_seek_that_runs_out_of_time_is_retried_from_the_start() {
+        let dir = fresh_fixture("video-slow-seek");
+        write_video(&dir.join("clip.mp4"), 40, 20, 2.0);
+        let ffmpeg = write_stand_in(&dir, "ffmpeg", HANGS_ON_SEEK);
+        let start = std::time::Instant::now();
+        let got = frame_with(&ffmpeg, "ffprobe", &dir.join("clip.mp4"), 256, std::time::Duration::from_secs(2));
+        let took = start.elapsed();
+        assert_eq!(got.expect("a frame from the start").size, [40, 20]);
+        assert!(took < std::time::Duration::from_secs(2), "within the limit: {took:?}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_seek_past_the_last_frame_is_retried_from_the_start() {
+        let dir = fresh_fixture("video-seek-past-end");
+        write_video(&dir.join("clip.mp4"), 40, 20, 1.0);
+        // A container that claims 1000 s sends the seek to 100 s, past the end.
+        let probe = write_stand_in(&dir, "probe", "echo 1000");
+        let got = frame_with("ffmpeg", &probe, &dir.join("clip.mp4"), 256, TIMEOUT);
+        assert_eq!(got.expect("a frame from the start").size, [40, 20]);
     }
 
     #[cfg(windows)]
