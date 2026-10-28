@@ -147,8 +147,12 @@ fn step_through(ctx: &egui::Context, rows: &[egui::Response]) {
     }
 }
 
-/// The ☰ and the panel button, side by side.
-pub fn show(ui: &mut egui::Ui) -> Option<AppMenuEvent> {
+/// Hovering a greyed Lumen Setup says why.
+const SETUP_HELD: &str = "Lumen Setup returns once Lumen is code-signed";
+
+/// The ☰ and the panel button, side by side; `setup` is whether the Lumen
+/// Setup row can open its screen (greyed when not).
+pub fn show(ui: &mut egui::Ui, setup: bool) -> Option<AppMenuEvent> {
     let mut event = None;
     let ctx = ui.ctx().clone();
     let open = is_open(&ctx);
@@ -174,7 +178,12 @@ pub fn show(ui: &mut egui::Ui) -> Option<AppMenuEvent> {
                 ui.separator();
             }
             for &(icon, name, shortcut, on_click) in *group {
-                let row = ui.add_enabled_ui(on_click.is_some(), |ui| row(ui, icon, name, shortcut)).inner;
+                let held = on_click == Some(AppMenuEvent::Setup) && !setup;
+                let on_click = if held { None } else { on_click };
+                let mut row = ui.add_enabled_ui(on_click.is_some(), |ui| row(ui, icon, name, shortcut)).inner;
+                if held {
+                    row = row.on_disabled_hover_text(SETUP_HELD);
+                }
                 if focus_first && n == 0 && name == GROUPS[0][0].1 {
                     row.request_focus();
                 }
@@ -206,11 +215,16 @@ mod tests {
 
     /// One frame of the corner with `events`; what it returned and the texts painted.
     fn corner(ctx: &egui::Context, events: Vec<egui::Event>) -> (Option<AppMenuEvent>, Vec<(String, egui::Rect)>) {
+        corner_with(ctx, events, true)
+    }
+
+    /// `corner`, with the Setup row enabled or not.
+    fn corner_with(ctx: &egui::Context, events: Vec<egui::Event>, setup: bool) -> (Option<AppMenuEvent>, Vec<(String, egui::Rect)>) {
         let input = egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
         let mut event = None;
         let mut output = ctx.run_ui(input, |root| {
             egui::Panel::top("tabs").show(root, |ui| {
-                ui.horizontal(|ui| event = show(ui));
+                ui.horizontal(|ui| event = show(ui, setup));
             });
             // Something below the menu that can take the focus, like the side panel.
             egui::CentralPanel::default().show(root, |ui| {
@@ -276,7 +290,7 @@ mod tests {
         let input = egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
         let mut output = ctx.run_ui(input, |root| {
             egui::Panel::top("tabs").show(root, |ui| {
-                ui.horizontal(show);
+                ui.horizontal(|ui| show(ui, true));
             });
         });
         output.textures_delta.clear();
@@ -363,6 +377,16 @@ mod tests {
         for row in ["Commands", "Load Layout", "Save Layout", "Options"] {
             assert_eq!(choose(row).0, None, "{row} does nothing yet");
         }
+    }
+
+    #[test]
+    fn the_setup_row_is_greyed_when_setup_cannot_open() {
+        let ctx = egui::Context::default();
+        let (_, texts) = corner_with(&ctx, vec![], false);
+        corner_with(&ctx, pointer_click(at(&texts, MENU).center()), false);
+        let (_, menu) = corner_with(&ctx, vec![], false);
+        let (event, _) = corner_with(&ctx, pointer_click(at(&menu, "Lumen Setup").center()), false);
+        assert_eq!(event, None, "a greyed Lumen Setup does nothing");
     }
 
     #[test]

@@ -7,8 +7,9 @@ A fast, lightweight, keyboard-first file explorer written in Rust with eframe/eg
 Lumen is free and open source (MIT). Download it from
 [GitHub Releases](https://github.com/Angelbyte96/lumen-explorer/releases):
 
-- `lumen-<version>-windows-x86_64.exe`: Windows 10/11, installs itself for your
-  user (see [Lumen Setup](#lumen-setup)).
+- `lumen-<version>-windows-x86_64.exe`: Windows 10/11, portable: run it from
+  any folder (Install is held back until the `.exe` is signed, see
+  [Lumen Setup](#lumen-setup)).
 - `lumen_<version>_amd64.deb`: Ubuntu 24.04 or later, Debian 13.
 - `lumen-<version>-linux-x86_64.tar.gz`: any x86_64 Linux.
 
@@ -43,11 +44,21 @@ Uninstall removes Lumen, its menu entry and every switch; your settings
 (bookmarks, tabs) stay. Turning Set as default off gives folders back to the
 desktop's own file manager.
 
+On Windows, Install and Modify are held back until the release `.exe` is
+code-signed: Microsoft Defender flags an unsigned program that copies itself
+into `%LOCALAPPDATA%` and adds shortcuts (`Trojan:Win32/Bearfoos.A!ml`), and
+quarantines it. Until then the `.exe` runs portable, ☰ ▸ Lumen Setup is
+greyed, and Lumen does not open Setup by itself. A Lumen installed by an
+earlier release still opens Setup, from the menu or from Settings ▸ Apps, to
+uninstall it. Windows SmartScreen may warn before the first run: More info ▸
+Run anyway.
+
 To install a release:
 
-- Windows: double-click `lumen-<version>-windows-x86_64.exe`. The first time,
-  Lumen opens Setup: Install copies it to `%LOCALAPPDATA%\Lumen` and adds it
-  to the Start menu and to Settings ▸ Apps, where Uninstall opens Setup again.
+- Windows: double-click `lumen-<version>-windows-x86_64.exe`; it runs from
+  where it is (see above). Once signed, the first start opens Setup again:
+  Install copies it to `%LOCALAPPDATA%\Lumen` and adds it to the Start menu
+  and to Settings ▸ Apps, where Uninstall opens Setup again.
 - Linux: a downloaded program cannot be started with a double click, so the
   first start is from a terminal, once:
 
