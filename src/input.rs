@@ -78,6 +78,9 @@ pub enum Action {
     ZoomReset,
     /// Every list column's width to its content (Ctrl+Shift+F).
     FitColumns,
+    /// Ctrl+F: letters go to the filter until Esc or the filter is erased,
+    /// whatever Character Key Action says.
+    FilterMode,
     /// Escape: clears the filter, else drops the picks, else stops a running count,
     /// else a Ctrl+E walk, else the copy or move, else forgets a cut, else unselects.
     Cancel,
@@ -246,6 +249,10 @@ fn read_keys(ctx: &Context, typing: bool, list: bool) -> Vec<Action> {
         }
         if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::F) {
             actions.push(Action::FitColumns);
+        }
+        // After Ctrl+Shift+F, which this would match too.
+        if i.consume_key(Modifiers::COMMAND, Key::F) {
+            actions.push(Action::FilterMode);
         }
         if i.consume_key(Modifiers::COMMAND, Key::Minus) {
             actions.push(Action::ZoomOut);
@@ -581,7 +588,12 @@ mod tests {
     #[test]
     fn ctrl_shift_f_sizes_every_column_to_fit() {
         assert_eq!(actions_for(vec![key(Key::F, Modifiers::COMMAND | Modifiers::SHIFT)]), [Action::FitColumns]);
-        assert_eq!(actions_for(vec![key(Key::F, Modifiers::COMMAND)]), [], "Ctrl+F alone does nothing");
+    }
+
+    #[test]
+    fn ctrl_f_starts_the_filter_mode() {
+        assert_eq!(actions_for(vec![key(Key::F, Modifiers::COMMAND)]), [Action::FilterMode]);
+        assert_eq!(actions_for(vec![key(Key::F, Modifiers::COMMAND | Modifiers::SHIFT)]), [Action::FitColumns], "Ctrl+Shift+F still fits the columns");
     }
 
     #[test]

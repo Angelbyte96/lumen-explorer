@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::behavior::{Behavior, CharKey, NewTab, Startup};
 use crate::app::{Sort, SortColumn};
 use crate::folder_views::{FolderViews, Look, Rule, Scope};
 use crate::places::{VISIT_LIMIT, Visit};
@@ -39,6 +40,8 @@ pub struct Config {
     pub folder_views: FolderViews,
     /// The color schemes chosen in the Options window.
     pub schemes: Schemes,
+    /// The Options window's behavior options.
+    pub behavior: Behavior,
 }
 
 impl Default for Config {
@@ -59,6 +62,7 @@ impl Default for Config {
             visited: Vec::new(),
             folder_views: FolderViews::default(),
             schemes: Schemes::default(),
+            behavior: Behavior::default(),
         }
     }
 }
@@ -95,6 +99,11 @@ impl Config {
                 "system_scheme" => config.schemes.follow_system = parse_bool(value).unwrap_or(config.schemes.follow_system),
                 "light_scheme" => config.schemes.light = Scheme::from_name(value).unwrap_or(config.schemes.light),
                 "dark_scheme" => config.schemes.dark = Scheme::from_name(value).unwrap_or(config.schemes.dark),
+                "overscroll" => config.behavior.overscroll = parse_bool(value).unwrap_or(config.behavior.overscroll),
+                "reverse_scroll" => config.behavior.reverse_scroll = parse_bool(value).unwrap_or(config.behavior.reverse_scroll),
+                "character_key_action" => config.behavior.char_key = CharKey::from_key(value).unwrap_or(config.behavior.char_key),
+                "load_on_startup" => config.behavior.startup = Startup::parse(value).unwrap_or(config.behavior.startup),
+                "new_tab_show" => config.behavior.new_tab = NewTab::from_key(value).unwrap_or(config.behavior.new_tab),
                 _ => {}
             }
         }
@@ -137,6 +146,28 @@ impl Config {
         }
         if schemes.dark != default.dark {
             text += &format!("dark_scheme = {}\n", schemes.dark.name());
+        }
+        let (behavior, default) = (&self.behavior, Behavior::default());
+        if behavior.overscroll != default.overscroll {
+            text += &format!("overscroll = {}\n", behavior.overscroll);
+        }
+        if behavior.reverse_scroll != default.reverse_scroll {
+            text += &format!("reverse_scroll = {}\n", behavior.reverse_scroll);
+        }
+        if behavior.char_key != default.char_key {
+            text += &format!("character_key_action = {}\n", behavior.char_key.key());
+        }
+        match &behavior.startup {
+            Startup::LastSession => {}
+            Startup::Home => text += "load_on_startup = home\n",
+            Startup::Folder(path) => {
+                if let Some(path) = one_line(path) {
+                    text += &format!("load_on_startup = folder {path}\n");
+                }
+            }
+        }
+        if behavior.new_tab != default.new_tab {
+            text += &format!("new_tab_show = {}\n", behavior.new_tab.key());
         }
         for path in self.bookmarks.iter().filter_map(|p| one_line(p)) {
             text += &format!("bookmark = {path}\n");
@@ -220,6 +251,22 @@ impl Config {
         }
         if was.dark != now.dark {
             kept.dark = now.dark;
+        }
+        let (was, now, kept) = (&before.behavior, &after.behavior, &mut merged.behavior);
+        if was.overscroll != now.overscroll {
+            kept.overscroll = now.overscroll;
+        }
+        if was.reverse_scroll != now.reverse_scroll {
+            kept.reverse_scroll = now.reverse_scroll;
+        }
+        if was.char_key != now.char_key {
+            kept.char_key = now.char_key;
+        }
+        if was.startup != now.startup {
+            kept.startup = now.startup.clone();
+        }
+        if was.new_tab != now.new_tab {
+            kept.new_tab = now.new_tab;
         }
         if (&before.tabs, before.active_tab) != (&after.tabs, after.active_tab) {
             (merged.tabs, merged.active_tab) = (after.tabs.clone(), after.active_tab);
@@ -485,7 +532,45 @@ mod tests {
             ],
             folder_views: FolderViews::default(),
             schemes: Schemes::default(),
+            behavior: Behavior::default(),
         }
+    }
+
+    #[test]
+    fn the_behavior_options_are_kept_as_words() {
+        let behavior = Behavior {
+            overscroll: true,
+            reverse_scroll: true,
+            char_key: CharKey::SelectTypedItem,
+            startup: Startup::Folder(PathBuf::from("/srv/my files")),
+            new_tab: NewTab::Root,
+        };
+        let lines = "overscroll = true\nreverse_scroll = true\ncharacter_key_action = select_typed_item\nload_on_startup = folder /srv/my files\nnew_tab_show = root\n";
+        assert_eq!(Config::parse(lines).behavior, behavior);
+        let written = Config { behavior: behavior.clone(), ..Config::default() }.to_text();
+        assert!(written.contains(lines), "{written}");
+        assert_eq!(Config::parse(&written).behavior, behavior);
+        let defaults = Config::default().to_text();
+        for key in ["overscroll", "reverse_scroll", "character_key_action", "load_on_startup", "new_tab_show"] {
+            assert!(!defaults.contains(key), "the defaults: no {key} line");
+        }
+        let others = Behavior { char_key: CharKey::TriggerHotkey, startup: Startup::Home, new_tab: NewTab::Home, ..Behavior::default() };
+        let written = Config { behavior: others.clone(), ..Config::default() }.to_text();
+        assert!(written.contains("character_key_action = trigger_hotkey\nload_on_startup = home\nnew_tab_show = home\n"), "{written}");
+        assert_eq!(Config::parse(&written).behavior, others);
+        let broken = Config::parse("overscroll = maybe\nreverse_scroll =\ncharacter_key_action = Type In Filter\nload_on_startup = folder\nnew_tab_show = there\n");
+        assert_eq!(broken.behavior, Behavior::default(), "unknown words keep the defaults");
+        assert_eq!(Config::parse("load_on_startup = sometimes\n").behavior.startup, Startup::LastSession);
+    }
+
+    #[test]
+    fn a_behavior_option_changed_here_does_not_undo_one_changed_in_another_window() {
+        let before = Config::default();
+        let here = Config { behavior: Behavior { reverse_scroll: true, new_tab: NewTab::Home, ..Behavior::default() }, ..before.clone() };
+        let disk = Config { behavior: Behavior { overscroll: true, startup: Startup::Home, char_key: CharKey::TriggerHotkey, ..Behavior::default() }, ..before.clone() };
+        let merged = Config::merge(&disk, &before, &here).behavior;
+        assert_eq!(merged, Behavior { overscroll: true, reverse_scroll: true, char_key: CharKey::TriggerHotkey, startup: Startup::Home, new_tab: NewTab::Home });
+        assert_eq!(Config::merge(&disk, &before, &before).behavior, disk.behavior, "nothing changed here: the other window's stays");
     }
 
     #[test]

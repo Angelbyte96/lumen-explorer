@@ -30,6 +30,7 @@ pub fn show(
     scroll: Option<Scroll>,
     mut edit: Option<&mut RenameEdit>,
     file_icons: &FileIcons,
+    overscroll: bool,
 ) -> GridOut {
     let text_height = ui.text_style_height(&egui::TextStyle::Body);
     let cell = vec2(COLUMN, text_height + 8.0);
@@ -44,7 +45,9 @@ pub fn show(
     ui.ctx().data_mut(|d| d.remove::<Rect>(file_list::cursor_row_id()));
 
     egui::ScrollArea::horizontal().id_salt("lumen_list_view").auto_shrink(false).show_viewport(ui, |ui, viewport| {
-        let width = shape.lines() as f32 * step + GAP;
+        // Scroll Beyond Last Item: room to bring the last column to the left edge.
+        let beyond = if overscroll && shape.total > 0 { (whole.width() - step).max(0.0) } else { 0.0 };
+        let width = shape.lines() as f32 * step + GAP + beyond;
         let (content, background) = ui.allocate_exact_size(vec2(width.max(viewport.width()), ui.available_height()), egui::Sense::click());
         let origin = content.min + vec2(GAP, GAP);
         let place = |i: usize| {
@@ -150,7 +153,7 @@ mod tests {
         let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
         let mut out = None;
         let mut output = ctx.run_ui(input, |ui| {
-            out = Some(show(ui, view, &[], None, None, &FileIcons::default()));
+            out = Some(show(ui, view, &[], None, None, &FileIcons::default(), false));
             crate::ui::dnd::finish(ui.ctx());
         });
         output.textures_delta.clear();
@@ -190,7 +193,7 @@ mod tests {
             let mut output = ctx.run_ui(input, |root| {
                 egui::CentralPanel::default_margins().show(root, |ui| {
                     crate::ui::status_bar::above_islands(ui, room, |ui| {
-                        show(ui, &view, &[], None, None, &FileIcons::default());
+                        show(ui, &view, &[], None, None, &FileIcons::default(), false);
                     });
                 });
             });
@@ -497,5 +500,39 @@ mod tests {
         draw(&ctx, &view, vec![]);
         let (out, _) = draw(&ctx, &view, click(egui::pos2(780.0, 200.0)));
         assert!(matches!(out.event, Some(ListEvent::Empty { menu: false })));
+    }
+
+    /// Where the last cell's left ends up after scrolling all the way across a long folder.
+    fn last_cell_left_after_scrolling_across(overscroll: bool) -> f32 {
+        let ctx = egui::Context::default();
+        let files: Vec<String> = (0..200).map(|n| format!("file-{n:03}.txt")).collect();
+        let view = listed(&[], &files);
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 300.0));
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(-100_000.0, 0.0), modifiers: Default::default(), phase: egui::TouchPhase::Move };
+        let mut left = f32::NAN;
+        for (n, events) in std::iter::once(vec![egui::Event::PointerMoved(screen.center())]).chain(std::iter::once(vec![wheel])).chain((0..40).map(|_| vec![])).enumerate() {
+            let input = egui::RawInput { screen_rect: Some(screen), events, time: Some(n as f64 / 60.0), ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| {
+                show(ui, &view, &[], None, None, &FileIcons::default(), overscroll);
+            });
+            output.textures_delta.clear();
+            left = output
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.text() == "file-199.txt" => Some(t.pos.x),
+                    _ => None,
+                })
+                .unwrap_or(f32::NAN);
+        }
+        left
+    }
+
+    #[test]
+    fn the_list_stops_at_the_last_column_unless_scroll_beyond_last_item_is_on() {
+        let off = last_cell_left_after_scrolling_across(false);
+        assert!(off > 800.0 - COLUMN - 2.0 * GAP - 40.0, "the last column ends at the right edge: {off}");
+        let on = last_cell_left_after_scrolling_across(true);
+        assert!(on < 100.0, "the last column can be scrolled to the left edge: {on}");
     }
 }

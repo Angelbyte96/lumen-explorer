@@ -118,11 +118,13 @@ pub struct Sizes {
     pub order: Order,
     /// The Tree view: a chevron before each folder, children indented under it.
     pub tree: bool,
+    /// Scroll Beyond Last Item: empty room after the last row.
+    pub overscroll: bool,
 }
 
 impl Default for Sizes {
     fn default() -> Self {
-        Self { widths: DEFAULT_WIDTHS, shown: ALL_SHOWN, order: DEFAULT_ORDER, tree: false }
+        Self { widths: DEFAULT_WIDTHS, shown: ALL_SHOWN, order: DEFAULT_ORDER, tree: false, overscroll: false }
     }
 }
 
@@ -160,6 +162,8 @@ pub fn show(
     remember_width(ui.ctx(), whole.width());
     focus_stop(ui, whole);
 
+    // Scroll Beyond Last Item: as many empty rows as fit the body, less one.
+    let beyond = if sizes.overscroll && !rows.is_empty() { ((whole.height() - header_height) / pitch).floor().max(1.0) as usize - 1 } else { 0 };
     egui::ScrollArea::horizontal().id_salt("lumen_list_columns").auto_shrink(false).show(ui, |ui| {
         let mut table = TableBuilder::new(ui)
             .striped(true)
@@ -206,8 +210,29 @@ pub fn show(
                 light_hovered_rows(body.ui_mut());
                 band_scroll(body.ui_mut());
                 let clip = body.ui_mut().clip_rect();
-                body.rows(row_height, rows.len(), |mut row| {
+                body.rows(row_height, rows.len() + beyond, |mut row| {
                     let i = row.index();
+                    if i >= rows.len() {
+                        // Scroll Beyond Last Item: blank room that acts as the space below the rows.
+                        row.set_hovered(false);
+                        for _ in &shown {
+                            row.col(|ui| {
+                                let spacing = ui.spacing().item_spacing;
+                                let painter = egui::Painter::new(ui.ctx().clone(), ui.layer_id(), clip);
+                                painter.rect_filled(ui.max_rect().expand2(0.5 * spacing), 0, ui.visuals().panel_fill);
+                            });
+                        }
+                        let response = row.response();
+                        if pressed && response.is_pointer_button_down_on() {
+                            band_may_start = true;
+                        }
+                        if response.clicked() {
+                            event = Some(ListEvent::Empty { menu: false });
+                        } else if response.secondary_clicked() {
+                            event = Some(ListEvent::Empty { menu: true });
+                        }
+                        return;
+                    }
                     let entry = view.entry(rows[i]);
                     let mut on_name = false;
                     // Where the folder's chevron is drawn (Tree).
@@ -2847,5 +2872,40 @@ pub(crate) mod tests {
         let roomy = [200.0, 110.0, 150.0, 90.0, 90.0, 90.0];
         assert_eq!(painted_like(&view, roomy, SIZE_BEFORE_FILES, "Folders").trim_end(), "Folders");
         assert_eq!(painted_like(&view, roomy, SIZE_BEFORE_FILES, "2023").len(), "2023-11-14 22:13".len(), "date whole");
+    }
+
+    /// Where the last row's name ends up after scrolling all the way down a long folder.
+    fn last_row_top_after_scrolling_down(overscroll: bool) -> f32 {
+        let ctx = egui::Context::default();
+        let names: Vec<String> = (0..200).map(|n| format!("file-{n:03}.txt")).collect();
+        let view = listed(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -100_000.0), modifiers: Default::default(), phase: egui::TouchPhase::Move };
+        let mut top = f32::NAN;
+        for (n, events) in std::iter::once(vec![egui::Event::PointerMoved(crate::ui::testing::SCREEN.center())]).chain(std::iter::once(vec![wheel])).chain((0..40).map(|_| vec![])).enumerate() {
+            let input = egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), events, time: Some(n as f64 / 60.0), ..Default::default() };
+            let mut output = ctx.run_ui(input, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    show(ui, &view, &[], Sizes { overscroll, ..Sizes::default() }, None, None, &FileIcons::default());
+                });
+            });
+            output.textures_delta.clear();
+            top = output
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.text() == "file-199.txt" => Some(t.pos.y),
+                    _ => None,
+                })
+                .unwrap_or(f32::NAN);
+        }
+        top
+    }
+
+    #[test]
+    fn the_details_stop_at_the_last_row_unless_scroll_beyond_last_item_is_on() {
+        let off = last_row_top_after_scrolling_down(false);
+        assert!(off > 600.0 - 80.0, "the last row sits at the bottom of the window: {off}");
+        let on = last_row_top_after_scrolling_down(true);
+        assert!(on < 150.0, "the last row can be scrolled up under the header: {on}");
     }
 }
