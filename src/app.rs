@@ -2767,7 +2767,12 @@ impl LumenApp {
     /// Something other than the list reads the keys: a question, the path
     /// box, the Options window, the menu or a rename.
     fn keys_taken(&self) -> bool {
-        self.dialog.is_some() || self.path_popup.is_open() || self.options.is_open() || self.context_menu.is_some() || self.rename.is_some()
+        self.dialog.is_some() || self.overlay_open() || self.rename.is_some()
+    }
+
+    /// The path box, the Options window or the menu: each reads its own keys when drawn.
+    fn overlay_open(&self) -> bool {
+        self.path_popup.is_open() || self.options.is_open() || self.context_menu.is_some()
     }
 
     /// Asks the paste's parked question once nothing else has the keyboard.
@@ -3734,7 +3739,7 @@ impl eframe::App for LumenApp {
             ctx.request_repaint_after(left);
         }
         ui::skip_panel_borders(&ctx);
-        if self.dialog.is_none() && !self.path_popup.is_open() && !self.options.is_open() && self.context_menu.is_none() {
+        if self.dialog.is_none() && !self.overlay_open() {
             ui::shift_tab_from_list(&ctx);
         }
 
@@ -3745,7 +3750,7 @@ impl eframe::App for LumenApp {
             if let Some(answer) = input::read_confirm(&ctx) {
                 self.answer_dialog(&ctx, answer);
             }
-        } else if self.path_popup.is_open() || self.options.is_open() || self.context_menu.is_some() {
+        } else if self.overlay_open() {
             // The path box, the Options window and the menu read their own keys when drawn.
         } else if ui::toolbar::close_lock_menu_on_escape(&ctx) || ui::app_menu::close_on_escape(&ctx) {
             // That Escape closed the lock's menu or the app menu and did nothing else.

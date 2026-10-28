@@ -172,12 +172,22 @@ impl Options {
         }
         match listed(schemes, &self.search).get(index) {
             Some(Opt::System) => schemes.follow_system = !schemes.follow_system,
-            Some(&opt) => {
+            Some(&opt @ (Opt::Scheme | Opt::Light | Opt::Dark)) => {
                 self.list = Some(opt);
                 self.picked = opt.choice(schemes).and_then(|s| Scheme::ALL.iter().position(|&a| a == s)).unwrap_or(0);
             }
             None => {}
         }
+    }
+
+    /// How many rows (or choices of the list) Up/Down go through.
+    fn count(&self, schemes: &Schemes) -> usize {
+        if self.list.is_some() { Scheme::ALL.len() } else { listed(schemes, &self.search).len() }
+    }
+
+    /// Keeps the pick on a row that is there.
+    fn clamp_picked(&mut self, schemes: &Schemes) {
+        self.picked = self.picked.min(self.count(schemes).saturating_sub(1));
     }
 
     /// Leaves the list for the rows, with the row it came from picked.
@@ -207,8 +217,8 @@ impl Options {
                 // cancel that move, or the window would lose the keyboard.
                 ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
             }
-            let count = if self.list.is_some() { Scheme::ALL.len() } else { listed(schemes, &self.search).len() };
-            self.picked = self.picked.min(count.saturating_sub(1));
+            self.clamp_picked(schemes);
+            let count = self.count(schemes);
             if count > 0 && keys.down {
                 self.picked = (self.picked + 1) % count;
             }
@@ -219,9 +229,9 @@ impl Options {
                 self.use_row(schemes, self.picked);
             }
         }
+        // Enter may have opened or left the list: pick within what shows now.
+        self.clamp_picked(schemes);
         let rows = listed(schemes, &self.search);
-        let count = if self.list.is_some() { Scheme::ALL.len() } else { rows.len() };
-        self.picked = self.picked.min(count.saturating_sub(1));
 
         let frame = egui::Frame::popup(&ctx.global_style());
         let width = WIDTH.min(ctx.content_rect().width() - frame.total_margin().sum().x).max(0.0);
@@ -295,14 +305,20 @@ fn symbol_button(ui: &mut egui::Ui, id: egui::Id, symbol: &str, hint: &str) -> e
     response.on_hover_text(hint)
 }
 
-/// A switch, on or off.
+/// The switch's track: a pill twice as long as it is high, nearly.
+const SWITCH: egui::Vec2 = egui::vec2(34.0, 18.0);
+/// The gap between the knob and the track's edge.
+const KNOB_GAP: f32 = 2.5;
+
+/// A switch, on or off: the knob rests at the right end when on.
 fn switch(ui: &mut egui::Ui, on: bool) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(34.0, 18.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(SWITCH, egui::Sense::hover());
     let visuals = ui.visuals();
     let fill = if on { visuals.selection.bg_fill } else { visuals.widgets.inactive.bg_fill };
-    ui.painter().rect_filled(rect, 9, fill);
-    let knob = if on { rect.right() - 9.0 } else { rect.left() + 9.0 };
-    ui.painter().circle_filled(egui::pos2(knob, rect.center().y), 6.5, visuals.strong_text_color());
+    let end = SWITCH.y / 2.0;
+    ui.painter().rect_filled(rect, end, fill);
+    let knob = if on { rect.right() - end } else { rect.left() + end };
+    ui.painter().circle_filled(egui::pos2(knob, rect.center().y), end - KNOB_GAP, visuals.strong_text_color());
 }
 
 /// A row of the window: the name over what it does, the control on the right
@@ -389,8 +405,6 @@ mod tests {
     use crate::ui::theme::Scheme;
     use eframe::egui::{Event, Key, Modifiers};
 
-    const FOOTER: &str = "Up Down to navigate · Enter to use · Escape to dismiss";
-    const RESET: &str = "↺";
     const SYSTEM: &str = "System Light / Dark Scheme";
 
     type Texts = Vec<(String, egui::Rect)>;
@@ -517,6 +531,7 @@ mod tests {
             assert!(!painted(&texts, row), "{row} does not match");
         }
         assert!(painted(&texts, FOOTER), "the footer stays");
+        assert_eq!(FOOTER, "Up Down to navigate · Enter to use · Escape to dismiss", "File Pilot's footer");
     }
 
     #[test]
