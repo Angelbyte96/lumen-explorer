@@ -241,6 +241,7 @@ file shown.
 | Alt+R | Count the selected folder: its size and how many folders and files it holds, all the way down (runs in the background; symlinks are not followed and other disks are not entered). Folders show `--` until counted; the result stays while you are in this folder |
 | Ctrl+Plus / Ctrl+Minus, Ctrl+wheel | Move the view slider: Details, Tree, List, then icons that grow from M to L to XL (and back) |
 | Ctrl+0 | Back to the Details view |
+| Ctrl+F | Filter mode: letters go to the filter (a cursor shows in it) whatever Character Key Action says, until Esc or the filter is erased; Space still opens the preview first |
 | Ctrl+Shift+F | Size every list column to fit the list's width, no sideways scroll (also in the header's right-click menu) |
 | Esc | Clear the filter; with an empty filter, drop a multiple selection, then stop the Alt+R count, then stop listing the subfolders (Ctrl+E) and list the folder alone, then cancel the copy or move in progress with the entries still waiting, then forget a cut waiting to be pasted, then unselect as a click on the empty space does (holding it stops at the first thing it undid) |
 
@@ -255,7 +256,7 @@ After the color options come the behavior options, in File Pilot's order:
 
 - **Scroll Beyond Last Item** (off): lets the Details, List and Icons views scroll about one view past the last item.
 - **Reverse Scroll Direction** (off): turns the wheel and touchpad scroll around in every view; Ctrl+wheel zoom keeps its direction.
-- **Character Key Action**: what a letter typed without Ctrl or Alt does. **Type In Filter** (the default) types it into the filter; **Select Typed Item** selects the first entry whose name starts with what you type quickly (a pause of 1 s starts over; pressing the same letter again goes to the next entry starting with it); **Trigger Hotkey** leaves letters to hotkeys, and Lumen has no single-key hotkeys yet, so they do nothing. Space works as before in every mode.
+- **Character Key Action**: what a letter typed without Ctrl or Alt does. **Type In Filter** (the default) types it into the filter; **Select Typed Item** selects the first entry whose name starts with what you type quickly (a pause of 1 s starts over; pressing the same letter again goes to the next entry starting with it); **Trigger Hotkey** leaves letters to hotkeys, and Lumen has no single-key hotkeys yet, so they do nothing. Space works as before in every mode, and Ctrl+F sends letters to the filter in every mode until Esc.
 - **Load On Startup**: what a window opens when no folder is given to it. **Last Session** (the default) reopens the tabs of the last window closed, **Home** your home folder, and **Folder: …** the folder of the current tab when you chose it (a folder that is gone gives its nearest parent). A folder passed to Lumen, or Lumen started in a terminal on Linux, still opens that folder.
 - **New Tab Show**: where Ctrl+T's new tab opens. **Current** (the default) the folder you are in, **Home** your home folder, **Root** `/` on Linux and This PC on Windows. Open In New Tab from a menu still opens what it names.
 
