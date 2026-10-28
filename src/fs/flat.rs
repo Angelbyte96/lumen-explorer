@@ -99,9 +99,20 @@ pub(crate) mod held {
 
     static HELD: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
     static MOVED: Condvar = Condvar::new();
+    /// Roots of the walks waiting in [`wait`] right now.
+    static WAITING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
     fn lock() -> MutexGuard<'static, Vec<PathBuf>> {
         HELD.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn waiting() -> MutexGuard<'static, Vec<PathBuf>> {
+        WAITING.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether a walk of `root` got to the end and waits on a hold.
+    pub(super) fn is_waiting(root: &Path) -> bool {
+        waiting().contains(&real(root))
     }
 
     /// Where `path` leads, so two spellings of one folder match.
@@ -133,7 +144,14 @@ pub(crate) mod held {
     pub(super) fn wait(roots: &[PathBuf]) {
         let roots: Vec<PathBuf> = roots.iter().map(|root| real(root)).collect();
         let inside = |held: &Vec<PathBuf>| roots.iter().any(|root| held.iter().any(|dir| root.starts_with(dir)));
+        waiting().extend(roots.iter().cloned());
         drop(MOVED.wait_while(lock(), |held| inside(held)).unwrap_or_else(|e| e.into_inner()));
+        let mut waiting = waiting();
+        for root in &roots {
+            if let Some(i) = waiting.iter().position(|r| r == root) {
+                waiting.swap_remove(i);
+            }
+        }
     }
 }
 
@@ -354,14 +372,19 @@ mod tests {
         assert_eq!(walked.found.len(), 3);
     }
 
-    /// Whether a walk of `root` is delivered within `wait`.
-    fn delivered(root: &Path, wait: std::time::Duration) -> (Flattener, mpsc::Receiver<()>, bool) {
+    /// Starts a walk of `root` and tells, once it got to the end (or after
+    /// 2 s), whether it waits on a hold without being delivered.
+    fn held_back(root: &Path) -> (Flattener, mpsc::Receiver<()>, bool) {
         let (tx, rx) = mpsc::channel();
         let flattener = Flattener::start(vec![root.to_path_buf()], move || {
             let _ = tx.send(());
         });
-        let done = rx.recv_timeout(wait).is_ok();
-        (flattener, rx, done)
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !super::held::is_waiting(root) && std::time::Instant::now() < until {
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let back = super::held::is_waiting(root) && rx.try_recv().is_err();
+        (flattener, rx, back)
     }
 
     #[cfg(unix)]
@@ -372,8 +395,8 @@ mod tests {
         let _ = fs::remove_file(&link);
         std::os::unix::fs::symlink(&root, &link).unwrap();
         let hold = super::held::hold(&link);
-        let (_walk, rx, done) = delivered(&root.join("deps"), std::time::Duration::from_millis(200));
-        assert!(!done, "held: the link leads to the same folder");
+        let (_walk, rx, back) = held_back(&root.join("deps"));
+        assert!(back, "held: the link leads to the same folder");
         drop(hold);
         assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok(), "let go");
     }
@@ -384,8 +407,8 @@ mod tests {
         let first = super::held::hold(&root);
         let second = super::held::hold(&root);
         drop(first);
-        let (_walk, rx, done) = delivered(&root.join("deps"), std::time::Duration::from_millis(200));
-        assert!(!done, "the second hold still holds");
+        let (_walk, rx, back) = held_back(&root.join("deps"));
+        assert!(back, "the second hold still holds");
         drop(second);
         assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok(), "let go");
     }
