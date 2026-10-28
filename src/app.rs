@@ -237,6 +237,23 @@ impl View {
         self.refilter(None);
     }
 
+    /// Type-to-select: the cursor to the first row whose name starts with
+    /// `prefix` (ignoring case), looking from the row after `after` and
+    /// wrapping round, or from the top when `after` is `None`. The filter is
+    /// left alone. `false`, and nothing moves, when no name matches.
+    pub fn select_prefix(&mut self, prefix: &str, after: Option<usize>) -> bool {
+        let prefix = prefix.to_lowercase();
+        let count = self.rows.len();
+        let start = after.map_or(0, |row| row + 1);
+        let found = (0..count)
+            .map(|step| (start + step) % count)
+            .find(|&row| self.entry(self.rows[row]).name.to_lowercase().starts_with(&prefix));
+        if let Some(row) = found {
+            self.move_to(row);
+        }
+        found.is_some()
+    }
+
     /// Erases the last filter character. `false` when there was none.
     pub fn pop_filter(&mut self) -> bool {
         if self.filter.pop().is_none() {
@@ -971,6 +988,10 @@ const DISKS_WATCH: Duration = if cfg!(windows) { MASK_INTERVAL } else { DISKS_IN
 /// window ride along, so a long copy reloads a few times a second, not per file.
 pub const REFRESH_DELAY: Duration = Duration::from_millis(200);
 
+/// How long without a typed character before type-to-select starts a new
+/// prefix, in seconds.
+const TYPE_SELECT_RESET: f64 = 1.0;
+
 /// How long a notice stays in the status bar.
 const NOTICE_TIME: Duration = Duration::from_secs(4);
 
@@ -1511,6 +1532,9 @@ pub struct LumenApp {
     refresh: RefreshTimer,
     /// Side panel toggled with Space.
     preview_open: bool,
+    /// What type-to-select (Select Typed Item) has typed and when (egui time,
+    /// seconds) the last character came: a pause of `TYPE_SELECT_RESET` ends it.
+    typed: Option<(String, f64)>,
     /// The Backspace or Esc being held started by undoing something softer
     /// (filter text, a count), so the hold must not run on into the next thing.
     hold_absorbed: bool,
@@ -1628,6 +1652,7 @@ impl LumenApp {
             }),
             refresh: RefreshTimer::default(),
             preview_open: false,
+            typed: None,
             hold_absorbed: false,
             previewer: Previewer::new(),
             preview: None,
@@ -3545,6 +3570,26 @@ impl LumenApp {
         0.35 + 0.65 * done
     }
 
+    /// Select Typed Item: `c` joins the prefix typed in quick succession and
+    /// the cursor goes to the first name starting with it. One letter repeated
+    /// walks on through the names starting with that letter, wrapping round.
+    fn type_to_select(&mut self, ctx: &egui::Context, c: char) {
+        let now = ctx.input(|i| i.time);
+        let mut prefix = match self.typed.take() {
+            Some((prefix, at)) if now - at < TYPE_SELECT_RESET => prefix,
+            _ => String::new(),
+        };
+        let repeat = !prefix.is_empty() && prefix.chars().all(|p| p.to_lowercase().eq(c.to_lowercase()));
+        prefix.push(c);
+        if repeat {
+            let from = self.tab.view.selected;
+            self.tab.view.select_prefix(&c.to_string(), from);
+        } else {
+            self.tab.view.select_prefix(&prefix, None);
+        }
+        self.typed = Some((prefix, now));
+    }
+
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             // The This PC view has drives, not entries: the keys move over those.
@@ -3645,7 +3690,10 @@ impl LumenApp {
             Action::TypeChar(' ') if self.tab.view.filter().is_empty() => {
                 self.preview_open = !self.preview_open;
             }
-            Action::TypeChar(c) => self.tab.view.push_filter(c),
+            Action::TypeChar(c) if c == ' ' || self.behavior.char_key == crate::behavior::CharKey::TypeInFilter => self.tab.view.push_filter(c),
+            Action::TypeChar(c) if self.behavior.char_key == crate::behavior::CharKey::SelectTypedItem => self.type_to_select(ctx, c),
+            // Trigger Hotkey: no single-letter hotkeys exist yet.
+            Action::TypeChar(_) => {}
             Action::Up => self.go_parent(ctx),
             Action::Back => self.go_history(ctx, NavKind::Back),
             Action::Forward => self.go_history(ctx, NavKind::Forward),
@@ -4316,6 +4364,104 @@ mod tests {
         app.handle_action(&ctx, Action::TypeChar(' '));
         assert_eq!(app.tab.view.filter(), "a ");
         assert!(!app.preview_open);
+    }
+
+    /// `app_in` plus `apple`, `apricot` and `Cherry`, in `char_key` mode: the
+    /// rows are sub, a.txt, apple, apricot, b.txt, Cherry.
+    fn typing_in(name: &str, char_key: crate::behavior::CharKey) -> (egui::Context, LumenApp) {
+        let (ctx, mut app, dir) = app_in(name);
+        for file in ["apple", "apricot", "Cherry"] {
+            std::fs::write(dir.join(file), "x").unwrap();
+        }
+        let entries = fs::lister::read_entries(&dir).unwrap();
+        app.tab.view.apply_listing(Listing { id: 0, path: dir, result: Ok(entries), elapsed: Duration::ZERO }, None);
+        app.behavior.char_key = char_key;
+        (ctx, app)
+    }
+
+    /// Types `c` at egui time `time`; the name of the selected entry after.
+    fn typed_at(ctx: &egui::Context, app: &mut LumenApp, time: f64, c: char) -> Option<String> {
+        frame_at(ctx, time);
+        app.handle_action(ctx, Action::TypeChar(c));
+        app.tab.view.selected_entry().map(|e| e.name.clone())
+    }
+
+    #[test]
+    fn type_in_filter_still_filters_by_default() {
+        let (ctx, mut app, _) = app_in("app-char-default");
+        assert_eq!(app.behavior.char_key, crate::behavior::CharKey::TypeInFilter);
+        app.handle_action(&ctx, Action::TypeChar('b'));
+        assert_eq!(app.tab.view.filter(), "b");
+        let rows: Vec<_> = app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i).name.as_str()).collect();
+        assert_eq!(rows, ["sub", "b.txt"], "only the names with a b stay");
+    }
+
+    #[test]
+    fn trigger_hotkey_leaves_plain_characters_alone() {
+        let (ctx, mut app) = typing_in("app-char-hotkey", crate::behavior::CharKey::TriggerHotkey);
+        let rows = app.tab.view.rows.clone();
+        let selected = app.tab.view.selected;
+        assert_eq!(typed_at(&ctx, &mut app, 1.0, 'c').as_deref(), Some("sub"));
+        assert_eq!(app.tab.view.filter(), "", "nothing reaches the filter");
+        assert_eq!(app.tab.view.rows, rows);
+        assert_eq!(app.tab.view.selected, selected, "and nothing is selected");
+    }
+
+    #[test]
+    fn select_typed_item_selects_the_entry_starting_with_the_letter_ignoring_case() {
+        let (ctx, mut app) = typing_in("app-char-select", crate::behavior::CharKey::SelectTypedItem);
+        let rows = app.tab.view.rows.clone();
+        assert_eq!(typed_at(&ctx, &mut app, 1.0, 'c').as_deref(), Some("Cherry"));
+        assert_eq!(app.tab.view.filter(), "", "the filter is never touched");
+        assert_eq!(app.tab.view.rows, rows);
+        assert_eq!(app.tab.view.scroll, Some(Scroll::Smooth), "revealed like an arrow move");
+    }
+
+    #[test]
+    fn select_typed_item_builds_a_prefix_from_quick_keys() {
+        let (ctx, mut app) = typing_in("app-char-prefix", crate::behavior::CharKey::SelectTypedItem);
+        assert_eq!(typed_at(&ctx, &mut app, 1.0, 'a').as_deref(), Some("a.txt"));
+        assert_eq!(typed_at(&ctx, &mut app, 1.3, 'p').as_deref(), Some("apple"));
+        assert_eq!(typed_at(&ctx, &mut app, 1.6, 'r').as_deref(), Some("apricot"));
+    }
+
+    #[test]
+    fn select_typed_item_forgets_the_prefix_after_a_pause() {
+        let (ctx, mut app) = typing_in("app-char-pause", crate::behavior::CharKey::SelectTypedItem);
+        assert_eq!(typed_at(&ctx, &mut app, 1.0, 'b').as_deref(), Some("b.txt"));
+        assert_eq!(typed_at(&ctx, &mut app, 3.0, 'a').as_deref(), Some("a.txt"), "a fresh prefix, not `ba`");
+        assert_eq!(typed_at(&ctx, &mut app, 3.5, 'p').as_deref(), Some("apple"), "`ap`");
+        assert_eq!(typed_at(&ctx, &mut app, 5.0, 'r').as_deref(), Some("apple"), "`r` alone matches nothing: unchanged");
+    }
+
+    #[test]
+    fn select_typed_item_repeating_one_letter_cycles_through_its_entries() {
+        let (ctx, mut app) = typing_in("app-char-cycle", crate::behavior::CharKey::SelectTypedItem);
+        let names: Vec<_> = (0..4).map(|i| typed_at(&ctx, &mut app, 1.0 + 0.2 * f64::from(i), 'a').unwrap()).collect();
+        assert_eq!(names, ["a.txt", "apple", "apricot", "a.txt"], "wraps to the first");
+    }
+
+    #[test]
+    fn select_typed_item_with_no_match_keeps_the_selection() {
+        let (ctx, mut app) = typing_in("app-char-nomatch", crate::behavior::CharKey::SelectTypedItem);
+        typed_at(&ctx, &mut app, 1.0, 'b');
+        app.tab.view.scroll = None;
+        assert_eq!(typed_at(&ctx, &mut app, 4.0, 'z').as_deref(), Some("b.txt"));
+        assert_eq!(app.tab.view.scroll, None, "and nothing scrolls");
+        assert_eq!(app.tab.view.filter(), "");
+    }
+
+    #[test]
+    fn space_is_the_same_in_select_typed_item() {
+        let (ctx, mut app) = typing_in("app-char-select-space", crate::behavior::CharKey::SelectTypedItem);
+        let selected = app.tab.view.selected;
+        assert_eq!(typed_at(&ctx, &mut app, 1.0, ' ').as_deref(), Some("sub"));
+        assert!(app.preview_open, "a leading Space is the preview key");
+        assert_eq!(app.tab.view.selected, selected);
+        assert_eq!(app.tab.view.filter(), "");
+        app.tab.view.push_filter('a');
+        app.handle_action(&ctx, Action::TypeChar(' '));
+        assert_eq!(app.tab.view.filter(), "a ", "after text it is a filter space");
     }
 
     #[test]
