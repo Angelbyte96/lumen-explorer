@@ -1519,6 +1519,8 @@ pub struct LumenApp {
     preview: Option<PreviewPane>,
     /// The color schemes in use (Options window).
     schemes: ui::theme::Schemes,
+    /// The Options window (Ctrl+,).
+    options: ui::options::Options,
 }
 
 /// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
@@ -1617,6 +1619,7 @@ impl LumenApp {
             previewer: Previewer::new(),
             preview: None,
             schemes: ui::theme::Schemes::default(),
+            options: ui::options::Options::default(),
         };
         if let Some(home) = fs::home_dir() {
             let data_home = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()).map(PathBuf::from);
@@ -2751,9 +2754,9 @@ impl LumenApp {
     }
 
     /// Something other than the list reads the keys: a question, the path
-    /// box, the menu or a rename.
+    /// box, the Options window, the menu or a rename.
     fn keys_taken(&self) -> bool {
-        self.dialog.is_some() || self.path_popup.is_open() || self.context_menu.is_some() || self.rename.is_some()
+        self.dialog.is_some() || self.path_popup.is_open() || self.options.is_open() || self.context_menu.is_some() || self.rename.is_some()
     }
 
     /// Asks the paste's parked question once nothing else has the keyboard.
@@ -2952,19 +2955,28 @@ impl LumenApp {
     }
 
     fn handle_menu(&mut self, ctx: &egui::Context, event: AppMenuEvent) {
+        // A window the row opens must not read the key that ran the row too:
+        // Enter would use its first row, Space would type " ".
+        fn use_up_activation(ctx: &egui::Context) {
+            ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Space) {
+                    i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t == " "));
+                }
+            });
+        }
         match event {
             AppMenuEvent::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
             AppMenuEvent::Setup => self.open_setup(),
             AppMenuEvent::GoTo => {
-                // Run with Enter or Space (the row had the focus): the box drawn
-                // below must not read that key too, closing at once or typing " ".
-                ctx.input_mut(|i| {
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
-                    if i.consume_key(egui::Modifiers::NONE, egui::Key::Space) {
-                        i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t == " "));
-                    }
-                });
+                use_up_activation(ctx);
                 self.path_popup.open();
+            }
+            AppMenuEvent::Options => {
+                use_up_activation(ctx);
+                // Ctrl+, may come with the menu open: the window is drawn over nothing.
+                ui::app_menu::close(ctx);
+                self.options.open();
             }
         }
     }
@@ -3557,6 +3569,7 @@ impl LumenApp {
             Action::FocusPathBar => self.path_popup.open(),
             Action::ToggleSidebar => self.handle_menu(ctx, AppMenuEvent::ToggleSidebar),
             Action::AppMenu => ui::app_menu::toggle(ctx),
+            Action::Options => self.handle_menu(ctx, AppMenuEvent::Options),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
             Action::ToggleFlat => self.toggle_flat(ctx),
             // The drives or the bins are read again there, as the menu's Refresh does.
@@ -3722,7 +3735,7 @@ impl eframe::App for LumenApp {
             ctx.request_repaint_after(left);
         }
         ui::skip_panel_borders(&ctx);
-        if self.dialog.is_none() && !self.path_popup.is_open() && self.context_menu.is_none() {
+        if self.dialog.is_none() && !self.path_popup.is_open() && !self.options.is_open() && self.context_menu.is_none() {
             ui::shift_tab_from_list(&ctx);
         }
 
@@ -3733,8 +3746,8 @@ impl eframe::App for LumenApp {
             if let Some(answer) = input::read_confirm(&ctx) {
                 self.answer_dialog(&ctx, answer);
             }
-        } else if self.path_popup.is_open() || self.context_menu.is_some() {
-            // The path box and the menu read their own keys when drawn.
+        } else if self.path_popup.is_open() || self.options.is_open() || self.context_menu.is_some() {
+            // The path box, the Options window and the menu read their own keys when drawn.
         } else if ui::toolbar::close_lock_menu_on_escape(&ctx) || ui::app_menu::close_on_escape(&ctx) {
             // That Escape closed the lock's menu or the app menu and did nothing else.
         } else {
@@ -3961,6 +3974,8 @@ impl eframe::App for LumenApp {
         if let Some(event) = self.path_popup.show(&ctx, list.response.rect, &current, home.as_deref(), shown, || self.visits.scores(unix_now())) {
             self.handle_popup(&ctx, event);
         }
+        // A scheme chosen shows from now on; end_frame saves it with the other settings.
+        self.options.show(&ctx, &mut self.schemes);
 
         // A click on another row or a scroll can take focus without ending the
         // edit above (one event per frame); an unfocused field is a cancel.
@@ -6933,6 +6948,96 @@ mod tests {
         assert!(!app.path_popup.is_open());
         app.handle_menu(&ctx, AppMenuEvent::GoTo);
         assert!(app.path_popup.is_open());
+    }
+
+    #[test]
+    fn ctrl_comma_and_the_menus_options_row_open_the_options_window() {
+        let (ctx, mut app, _) = app_in("app-options-open");
+        window_frame(&ctx, &mut app, vec![]);
+        assert!(!app.options.is_open());
+        window_frame(&ctx, &mut app, key_press(egui::Key::Comma, egui::Modifiers::COMMAND));
+        assert!(app.options.is_open(), "Ctrl+,");
+        window_frame(&ctx, &mut app, vec![]);
+        let texts = window_frame(&ctx, &mut app, vec![]);
+        assert!(texts.iter().any(|t| t == "System Light / Dark Scheme"), "the window is drawn: {texts:?}");
+        let (ctx, mut app, _) = app_in("app-options-row");
+        app.handle_menu(&ctx, AppMenuEvent::Options);
+        assert!(app.options.is_open(), "the ☰ Options row");
+        assert!(!app.path_popup.is_open());
+    }
+
+    #[test]
+    fn options_run_with_enter_or_space_leaves_that_key_out_of_the_window() {
+        for (key, text) in [(egui::Key::Enter, None), (egui::Key::Space, Some(" "))] {
+            let (ctx, mut app, _) = app_in("app-options-keys");
+            let mut events = vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }];
+            events.extend(text.map(|t| egui::Event::Text(t.into())));
+            let mut left = Vec::new();
+            ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+                app.handle_menu(ui.ctx(), AppMenuEvent::Options);
+                left = ui.ctx().input(|i| i.events.clone());
+            })
+            .drop_without_applying_deltas();
+            assert!(app.options.is_open());
+            assert!(left.is_empty(), "{key:?} ran Options and reaches nothing else: {left:?}");
+        }
+    }
+
+    #[test]
+    fn ctrl_comma_closes_the_app_menu_it_was_pressed_over() {
+        let (ctx, mut app, _) = app_in("app-options-over-menu");
+        app.handle_action(&ctx, Action::AppMenu);
+        assert!(ui::app_menu::is_open(&ctx));
+        app.handle_action(&ctx, Action::Options);
+        assert!(app.options.is_open());
+        assert!(!ui::app_menu::is_open(&ctx), "the window is not drawn under an open menu");
+    }
+
+    #[test]
+    fn while_the_options_window_is_open_the_list_reads_no_keys() {
+        let (ctx, mut app, _) = app_in("app-options-keys-taken");
+        window_frame(&ctx, &mut app, vec![]);
+        assert!(!app.keys_taken());
+        app.handle_action(&ctx, Action::Options);
+        assert!(app.keys_taken());
+        window_frame(&ctx, &mut app, vec![]);
+        window_frame(&ctx, &mut app, vec![]);
+        let hidden = app.tab.view.show_hidden;
+        window_frame(&ctx, &mut app, key_press(egui::Key::H, egui::Modifiers::COMMAND));
+        assert_eq!(app.tab.view.show_hidden, hidden, "Ctrl+H does nothing under the window");
+        window_frame(&ctx, &mut app, vec![egui::Event::Text("a".into())]);
+        assert_eq!(app.tab.view.filter(), "", "typing goes to the window's search, not the list's filter");
+        window_frame(&ctx, &mut app, key_press(egui::Key::Escape, egui::Modifiers::NONE));
+        assert!(!app.options.is_open());
+        window_frame(&ctx, &mut app, key_press(egui::Key::H, egui::Modifiers::COMMAND));
+        assert_ne!(app.tab.view.show_hidden, hidden, "closed, the list has its keys back");
+    }
+
+    #[test]
+    fn a_scheme_chosen_in_the_options_window_applies_at_once_and_is_saved() {
+        use ui::theme::Scheme;
+        let (ctx, mut app, dir) = app_in("app-options-choose");
+        let path = dir.join("config");
+        app.config_path = Some(path.clone());
+        app.saved = app.settings(true);
+        app.handle_action(&ctx, Action::Options);
+        window_frame(&ctx, &mut app, vec![]);
+        window_frame(&ctx, &mut app, vec![]);
+        let press = |ctx: &egui::Context, app: &mut LumenApp, key| window_frame(ctx, app, key_press(key, egui::Modifiers::NONE));
+        press(&ctx, &mut app, egui::Key::ArrowDown);
+        let list = press(&ctx, &mut app, egui::Key::Enter);
+        assert!(list.iter().any(|t| t == "Dracula"), "the list of schemes: {list:?}");
+        // Lumen is the fourth scheme, Dracula the seventh.
+        for _ in 0..3 {
+            press(&ctx, &mut app, egui::Key::ArrowDown);
+        }
+        press(&ctx, &mut app, egui::Key::Enter);
+        assert_eq!(app.settings(false).schemes.scheme, Scheme::Dracula);
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            assert_eq!(ctx.style_of(theme).visuals, Scheme::Dracula.visuals(theme));
+        }
+        assert_eq!(Config::load(&path).unwrap().schemes.scheme, Scheme::Dracula, "saved at the end of the frame");
+        assert!(app.options.is_open());
     }
 
     #[test]
