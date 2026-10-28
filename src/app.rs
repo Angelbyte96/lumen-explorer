@@ -1536,6 +1536,10 @@ pub struct LumenApp {
     /// What type-to-select (Select Typed Item) has typed and when (egui time,
     /// seconds) the last character came: a pause of `TYPE_SELECT_RESET` ends it.
     typed: Option<(String, f64)>,
+    /// Ctrl+F filter mode: letters go to the filter whatever Character Key
+    /// Action says. `Some(false)` until the filter holds text, `Some(true)`
+    /// after; Esc, or the filter left empty after that, ends it.
+    filter_mode: Option<bool>,
     /// The Backspace or Esc being held started by undoing something softer
     /// (filter text, a count), so the hold must not run on into the next thing.
     hold_absorbed: bool,
@@ -1654,6 +1658,7 @@ impl LumenApp {
             refresh: RefreshTimer::default(),
             preview_open: false,
             typed: None,
+            filter_mode: None,
             hold_absorbed: false,
             previewer: Previewer::new(),
             preview: None,
@@ -3607,7 +3612,19 @@ impl LumenApp {
         self.typed = Some((prefix, now));
     }
 
+    /// Ends the filter mode once the filter it typed in is empty again
+    /// (erased, or a folder change cleared it).
+    fn settle_filter_mode(&mut self) {
+        let typed = !self.tab.view.filter().is_empty();
+        self.filter_mode = match self.filter_mode {
+            Some(_) if typed => Some(true),
+            Some(true) => None,
+            mode => mode,
+        };
+    }
+
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
+        self.settle_filter_mode();
         match action {
             // The This PC view has drives, not entries: the keys move over those.
             Action::Move(delta) if self.on_this_pc() => self.move_drive(|at, last| match at {
@@ -3657,6 +3674,7 @@ impl LumenApp {
             Action::ZoomOut => self.tab.view_size = self.tab.view_size.smaller(),
             Action::ZoomReset => self.tab.view_size = ui::view_size::ViewSize::default(),
             Action::FitColumns => self.run_command(ctx, Command::FitAllColumns),
+            Action::FilterMode => self.filter_mode = Some(!self.tab.view.filter().is_empty()),
             Action::Activate => self.activate_selected(ctx),
             Action::GoParent => {
                 self.hold_absorbed = self.tab.view.pop_filter();
@@ -3707,7 +3725,9 @@ impl LumenApp {
             Action::TypeChar(' ') if self.tab.view.filter().is_empty() => {
                 self.preview_open = !self.preview_open;
             }
-            Action::TypeChar(c) if c == ' ' || self.behavior.char_key == crate::behavior::CharKey::TypeInFilter => self.tab.view.push_filter(c),
+            Action::TypeChar(c) if c == ' ' || self.filter_mode.is_some() || self.behavior.char_key == crate::behavior::CharKey::TypeInFilter => {
+                self.tab.view.push_filter(c);
+            }
             Action::TypeChar(c) if self.behavior.char_key == crate::behavior::CharKey::SelectTypedItem => self.type_to_select(ctx, c),
             // Trigger Hotkey: no single-letter hotkeys exist yet.
             Action::TypeChar(_) => {}
@@ -3735,7 +3755,9 @@ impl LumenApp {
             Action::Cancel => {
                 // Picks the user cannot see are dropped too, but do not use up the press.
                 let seen = self.tab.view.picked_count() > 0;
-                self.hold_absorbed = self.tab.view.clear_filter() || (self.tab.view.drop_picks() && seen);
+                // Leaving the filter mode is softer still: it uses up the press too.
+                let left_mode = self.filter_mode.take().is_some();
+                self.hold_absorbed = self.tab.view.clear_filter() || left_mode || (self.tab.view.drop_picks() && seen);
                 if !self.hold_absorbed && self.cancel_count() {
                     self.notice = Some("Calculation cancelled".into());
                     self.hold_absorbed = true;
@@ -3993,6 +4015,7 @@ impl eframe::App for LumenApp {
             &Status {
                 filter: self.tab.view.filter(),
                 caret: !self.path_popup.is_open() && self.rename.is_none(),
+                filter_mode: self.filter_mode.is_some(),
                 item_count: if self.on_this_pc() {
                     self.drives.len()
                 } else if self.on_recycle_bin() {
@@ -4564,6 +4587,66 @@ mod tests {
         assert_eq!(typed_at(&ctx, &mut app, 4.0, 'z').as_deref(), Some("b.txt"));
         assert_eq!(app.tab.view.scroll, None, "and nothing scrolls");
         assert_eq!(app.tab.view.filter(), "");
+    }
+
+    /// Letters that reach the filter after Ctrl+F, whatever Character Key Action says.
+    #[test]
+    fn ctrl_f_sends_letters_to_the_filter_in_every_mode() {
+        for mode in [crate::behavior::CharKey::SelectTypedItem, crate::behavior::CharKey::TriggerHotkey, crate::behavior::CharKey::TypeInFilter] {
+            let (ctx, mut app) = typing_in("app-ctrl-f-modes", mode);
+            app.handle_action(&ctx, Action::FilterMode);
+            typed_at(&ctx, &mut app, 1.0, 'a');
+            typed_at(&ctx, &mut app, 1.1, 'p');
+            assert_eq!(app.tab.view.filter(), "ap", "{mode:?}");
+            let rows: Vec<_> = app.tab.view.rows.iter().map(|&i| app.tab.view.entry(i).name.clone()).collect();
+            assert_eq!(rows, ["apple", "apricot"], "{mode:?}: the filter narrows the rows");
+            if mode == crate::behavior::CharKey::SelectTypedItem {
+                assert_eq!(app.typed, None, "nothing typed to select");
+            }
+        }
+    }
+
+    #[test]
+    fn escape_ends_the_filter_mode_and_the_letters_select_again() {
+        let (ctx, mut app) = typing_in("app-ctrl-f-escape", crate::behavior::CharKey::SelectTypedItem);
+        app.handle_action(&ctx, Action::FilterMode);
+        typed_at(&ctx, &mut app, 1.0, 'a');
+        app.handle_action(&ctx, Action::Cancel);
+        assert_eq!(app.tab.view.filter(), "", "Esc clears the filter as before");
+        assert_eq!(typed_at(&ctx, &mut app, 5.0, 'c').as_deref(), Some("Cherry"), "Select Typed Item is back");
+        assert_eq!(app.tab.view.filter(), "");
+    }
+
+    #[test]
+    fn escape_ends_the_filter_mode_before_anything_is_typed() {
+        let (ctx, mut app) = typing_in("app-ctrl-f-escape-empty", crate::behavior::CharKey::SelectTypedItem);
+        app.handle_action(&ctx, Action::FilterMode);
+        app.handle_action(&ctx, Action::Cancel);
+        assert_eq!(typed_at(&ctx, &mut app, 5.0, 'c').as_deref(), Some("Cherry"));
+        assert_eq!(app.tab.view.filter(), "");
+    }
+
+    #[test]
+    fn erasing_the_filter_ends_the_filter_mode_without_going_up() {
+        let (ctx, mut app) = typing_in("app-ctrl-f-backspace", crate::behavior::CharKey::SelectTypedItem);
+        let here = app.tab.view.current.clone();
+        app.handle_action(&ctx, Action::FilterMode);
+        typed_at(&ctx, &mut app, 1.0, 'a');
+        app.handle_action(&ctx, Action::GoParent);
+        assert_eq!(app.tab.view.filter(), "");
+        assert_eq!(app.tab.view.current, here, "the press only erased");
+        assert_eq!(typed_at(&ctx, &mut app, 5.0, 'c').as_deref(), Some("Cherry"), "Select Typed Item is back");
+        assert_eq!(app.tab.view.filter(), "");
+    }
+
+    #[test]
+    fn space_still_toggles_the_preview_in_the_filter_mode() {
+        let (ctx, mut app) = typing_in("app-ctrl-f-space", crate::behavior::CharKey::SelectTypedItem);
+        app.handle_action(&ctx, Action::FilterMode);
+        app.handle_action(&ctx, Action::TypeChar(' '));
+        assert!(app.preview_open, "a leading Space is the preview key");
+        typed_at(&ctx, &mut app, 1.0, 'a');
+        assert_eq!(app.tab.view.filter(), "a", "the mode is still on");
     }
 
     #[test]
