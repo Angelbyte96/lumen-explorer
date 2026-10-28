@@ -2,6 +2,20 @@
 
 A fast, lightweight, keyboard-first file explorer written in Rust with eframe/egui.
 
+## Download
+
+Lumen is free and open source (MIT). Download it from
+[GitHub Releases](https://github.com/Angelbyte96/lumen-explorer/releases):
+
+- `lumen-<version>-windows-x86_64.exe`: Windows 10/11, installs itself for your
+  user (see [Lumen Setup](#lumen-setup)).
+- `lumen_<version>_amd64.deb`: Ubuntu 24.04 or later, Debian 13.
+- `lumen-<version>-linux-x86_64.tar.gz`: any x86_64 Linux.
+
+Every release file is built from this repository by the public "Release"
+workflow in GitHub Actions ([`.github/workflows/release.yml`](.github/workflows/release.yml)).
+See the [Code signing policy](#code-signing-policy).
+
 ## Build and run
 
 ```sh
@@ -134,10 +148,43 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The "Release" workflow tests on Windows, builds `lumen-v0.1.0-windows-x86_64.exe`
-and creates the GitHub Release with it and notes generated from the commits.
+The "Release" workflow tests on Windows and Ubuntu, builds
+`lumen-v0.1.0-windows-x86_64.exe`, `lumen_0.1.0_amd64.deb` and
+`lumen-v0.1.0-linux-x86_64.tar.gz`, and creates the GitHub Release with them,
+a link to the code signing policy and notes generated from the commits.
 A tag that does not match `Cargo.toml` fails without publishing anything
 (`scripts/check-release-tag.sh`, tested by `scripts/test-release-tag.sh`).
+
+## Code signing policy
+
+Windows releases will be signed through the SignPath Foundation program
+(application pending; until then the `.exe` is unsigned and Windows may warn
+before running it). Once approved:
+
+Free code signing provided by [SignPath.io](https://about.signpath.io),
+certificate by [SignPath Foundation](https://signpath.org).
+
+- What is signed: the Windows `.exe` published on GitHub Releases. Only files
+  built by the "Release" workflow from this repository are submitted for
+  signing; nothing built on a personal machine is signed. The private key is
+  held by SignPath, never by this project.
+- Linux files (`.deb`, `.tar.gz`) are not signed; get them only from
+  [GitHub Releases](https://github.com/Angelbyte96/lumen-explorer/releases).
+
+Team roles (single-maintainer project):
+
+- Committers and reviewers: [Angelbyte96](https://github.com/Angelbyte96).
+  Every change reaches `main` through a pull request that must pass the
+  Windows tests; pull requests from other people are reviewed by the
+  maintainer before merging.
+- Approvers: [Angelbyte96](https://github.com/Angelbyte96). Each signing
+  request is approved by hand.
+
+Privacy policy: this program will not transfer any information to other
+networked systems unless specifically requested by the user or the person
+installing or operating it. Lumen has no telemetry and no update check. Video
+thumbnails use `ffmpeg`/`ffprobe` when installed on Linux, run locally on the
+file shown.
 
 ## Keyboard shortcuts
 
