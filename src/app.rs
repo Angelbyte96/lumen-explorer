@@ -22,6 +22,7 @@ use crate::fs::ops::Renamed;
 use crate::fs::preview::Previewer;
 use crate::fs::transfer::{self, Job, Mode, Outcome, Plan};
 use crate::recycle_bin::{self, Recycled};
+use crate::behavior::{NewTab, Startup};
 use crate::ui::drives_view::{self, DriveRow, DriveSort, DrivesEvent};
 use crate::ui::recycle_view::{self, Picks, RecycleEvent, RecycleSort};
 use crate::ui::sidebar::{Sidebar, SidebarEvent};
@@ -1709,12 +1710,17 @@ impl LumenApp {
         app
     }
 
-    /// Opens what `start` says with the saved settings: one folder, or the
-    /// last session's tabs (`home` stands in for folders that are gone).
+    /// Opens what `start` says with the saved settings: one folder, or what
+    /// Load On Startup says (the last session's tabs, home, or a chosen
+    /// folder); `home` stands in for folders that are gone.
     pub fn start(ctx: &egui::Context, start: Start, home: &Path, log: bool, settings: Settings) -> Self {
         let (tabs, active) = match start {
             Start::Folder(path) => (vec![path], 0),
-            Start::Restore => restore_tabs(&settings.config.tabs, settings.config.active_tab, home),
+            Start::Restore => match &settings.config.behavior.startup {
+                Startup::LastSession => restore_tabs(&settings.config.tabs, settings.config.active_tab, home),
+                Startup::Home => (vec![home.to_path_buf()], 0),
+                Startup::Folder(path) => restore_tabs(std::slice::from_ref(path), 0, home),
+            },
         };
         // Read before anything saves: the file is not there on the very first start.
         let first_start = settings.path.as_deref().is_some_and(|path| !path.exists());
@@ -2927,15 +2933,26 @@ impl LumenApp {
         self.tabs.iter().map(|slot| slot.as_ref().unwrap_or(&self.tab).view.current.clone()).collect()
     }
 
-    /// Ctrl+T or +: opens the current folder in a new tab after this one.
+    /// Ctrl+T or +: opens the folder New Tab Show says in a new tab after this one.
+    fn new_tab_shown(&mut self, ctx: &egui::Context) {
+        let folder = new_tab_folder(self.behavior.new_tab, &self.tab.view.current, fs::home_dir(), cfg!(windows));
+        self.new_tab_at(ctx, folder);
+    }
+
+    /// Opens the current folder in a new tab after this one.
     fn new_tab(&mut self, ctx: &egui::Context) {
-        let tab = Tab::new(self.tab.view.current.clone(), Some(&self.tab), self.log);
+        self.new_tab_at(ctx, self.tab.view.current.clone());
+    }
+
+    /// Opens `folder` in a new tab after this one.
+    fn new_tab_at(&mut self, ctx: &egui::Context, folder: PathBuf) {
+        let tab = Tab::new(folder.clone(), Some(&self.tab), self.log);
         self.leave_tab();
         let old = std::mem::replace(&mut self.tab, tab);
         self.tabs[self.active] = Some(old);
         self.active += 1;
         self.tabs.insert(self.active, None);
-        self.navigate(ctx, self.tab.view.current.clone(), None);
+        self.navigate(ctx, folder, None);
     }
 
     /// Ctrl+W or ×: closes tab `index`; the last tab stays open.
@@ -3707,7 +3724,7 @@ impl LumenApp {
             Action::Paste => self.paste(ctx),
             Action::Count => self.count_selected(ctx),
             Action::ToggleBookmark => self.toggle_bookmark(self.tab.view.current.clone()),
-            Action::NewTab => self.new_tab(ctx),
+            Action::NewTab => self.new_tab_shown(ctx),
             Action::CloseTab => self.close_tab(ctx, self.active),
             Action::NextTab => self.select_tab(ctx, (self.active + 1) % self.tabs.len()),
             Action::PrevTab => {
@@ -4179,6 +4196,17 @@ pub fn restore_tabs(tabs: &[PathBuf], active: usize, home: &Path) -> (Vec<PathBu
     (tabs.iter().map(usable).collect(), active.min(tabs.len() - 1))
 }
 
+/// The folder Ctrl+T opens, by New Tab Show: `/` on Linux and the This PC
+/// view of the drives on Windows for Root; no home folder is the current one.
+fn new_tab_folder(show: NewTab, current: &Path, home: Option<PathBuf>, windows: bool) -> PathBuf {
+    match show {
+        NewTab::Current => current.to_path_buf(),
+        NewTab::Home => home.unwrap_or_else(|| current.to_path_buf()),
+        NewTab::Root if windows => places::this_pc(),
+        NewTab::Root => PathBuf::from("/"),
+    }
+}
+
 fn start_dir_from(arg: Option<String>, cwd: Option<PathBuf>, home: Option<PathBuf>, use_cwd: bool) -> PathBuf {
     let root = || PathBuf::from("/");
     match arg {
@@ -4267,6 +4295,93 @@ mod tests {
         let app = LumenApp::start(&ctx, Start::Folder(dir.clone()), &dir, false, Settings { config, path: None, error: None });
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.tab.lister.last_requested(), Some(dir));
+    }
+
+    /// Starts from the saved session `a`, `b` (the second active) with `startup` chosen, `home` being `dir/home`.
+    fn started_with(name: &str, startup: Startup, start: impl FnOnce(&Path) -> Start) -> (LumenApp, PathBuf) {
+        let dir = crate::fs::ops::tests::fresh_fixture(name);
+        for sub in ["a", "b", "home"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        let ctx = egui::Context::default();
+        let behavior = crate::behavior::Behavior { startup, ..Default::default() };
+        let config = Config { tabs: vec![dir.join("a"), dir.join("b")], active_tab: 1, behavior, ..Config::default() };
+        let settings = Settings { config, path: None, error: None };
+        let app = LumenApp::start(&ctx, start(&dir), &dir.join("home"), false, settings);
+        (app, dir)
+    }
+
+    #[test]
+    fn load_on_startup_home_opens_one_tab_on_the_home_folder() {
+        let (app, dir) = started_with("app-startup-home", Startup::Home, |_| Start::Restore);
+        assert_eq!(app.session(), (vec![dir.join("home")], 0));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("home")));
+    }
+
+    #[test]
+    fn load_on_startup_folder_opens_one_tab_on_that_folder_or_its_nearest_parent() {
+        let dir = crate::fs::ops::tests::fresh_fixture("app-startup-folder");
+        for sub in ["a", "b", "home"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::fs::write(dir.join("file"), "x").unwrap();
+        let ctx = egui::Context::default();
+        let started = |folder: PathBuf| {
+            let behavior = crate::behavior::Behavior { startup: Startup::Folder(folder), ..Default::default() };
+            let config = Config { tabs: vec![dir.join("a")], behavior, ..Config::default() };
+            LumenApp::start(&ctx, Start::Restore, &dir.join("home"), false, Settings { config, path: None, error: None })
+        };
+        let app = started(dir.join("b"));
+        assert_eq!(app.session(), (vec![dir.join("b")], 0));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("b")));
+        assert_eq!(started(dir.join("b/gone/deeper")).session().0, vec![dir.join("b")], "a folder that is gone: its nearest parent");
+        assert_eq!(started(dir.join("file")).session().0, vec![dir.clone()], "a file is no folder: the one it is in");
+        assert_eq!(started(PathBuf::from("relative/nowhere")).session().0, vec![dir.join("home")], "nothing there: home");
+    }
+
+    #[test]
+    fn load_on_startup_last_session_is_the_default_and_a_folder_start_ignores_every_mode() {
+        let (app, dir) = started_with("app-startup-last", Startup::LastSession, |_| Start::Restore);
+        assert_eq!(app.session(), (vec![dir.join("a"), dir.join("b")], 1));
+        for startup in [Startup::LastSession, Startup::Home, Startup::Folder(PathBuf::from("/"))] {
+            let (app, dir) = started_with("app-startup-arg", startup, |dir| Start::Folder(dir.join("a")));
+            assert_eq!(app.session(), (vec![dir.join("a")], 0));
+        }
+    }
+
+    #[test]
+    fn new_tab_show_home_and_root_open_there_and_current_is_today() {
+        let (ctx, mut app, dir) = app_in("app-newtab-show");
+        app.behavior.new_tab = NewTab::Home;
+        app.handle_action(&ctx, Action::NewTab);
+        assert_eq!(app.tab.lister.last_requested(), Some(fs::home_dir().unwrap_or_else(|| dir.clone())));
+        app.behavior.new_tab = NewTab::Root;
+        app.handle_action(&ctx, Action::NewTab);
+        assert_eq!((app.tabs.len(), app.active), (3, 2));
+        assert_eq!(app.tab.lister.last_requested(), Some(PathBuf::from(if cfg!(windows) { places::THIS_PC } else { "/" })));
+        app.behavior.new_tab = NewTab::Current;
+        app.handle_action(&ctx, Action::NewTab);
+        assert_eq!(app.tab.lister.last_requested(), Some(app.tabs[2].as_ref().unwrap().view.current.clone()), "the folder it was opened from");
+    }
+
+    #[test]
+    fn new_tab_show_leaves_the_commands_that_open_a_given_place_alone() {
+        let (ctx, mut app, dir) = app_in("app-newtab-place");
+        app.behavior.new_tab = NewTab::Root;
+        app.run_command(&ctx, Command::OpenPlaceInNewTab(dir.join("sub")));
+        assert_eq!(app.tab.lister.last_requested(), Some(dir.join("sub")));
+        assert_eq!(app.tabs.len(), 2);
+    }
+
+    #[test]
+    fn new_tab_folder_picks_home_the_root_or_the_drives() {
+        let (current, home) = (Path::new("/srv/work"), Some(PathBuf::from("/home/u")));
+        let show = |show, home: Option<PathBuf>, windows| new_tab_folder(show, current, home, windows);
+        assert_eq!(show(NewTab::Current, home.clone(), false), current);
+        assert_eq!(show(NewTab::Home, home.clone(), false), PathBuf::from("/home/u"));
+        assert_eq!(show(NewTab::Home, None, false), current, "no home: the current folder");
+        assert_eq!(show(NewTab::Root, home.clone(), false), PathBuf::from("/"));
+        assert_eq!(show(NewTab::Root, home, true), places::this_pc(), "the drives on Windows");
     }
 
     #[test]
