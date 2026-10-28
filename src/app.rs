@@ -3715,6 +3715,10 @@ impl eframe::App for LumenApp {
         #[cfg(not(any(windows, target_os = "linux")))]
         let _ = frame;
         let ctx = ui.ctx().clone();
+        if self.behavior.reverse_scroll {
+            // What every scroll area reads; the wheel events stay, so Ctrl+wheel zoom keeps its direction.
+            ctx.input_mut(|i| i.smooth_scroll_delta = -i.smooth_scroll_delta);
+        }
         // Files dragged over the window from another app, if any.
         #[cfg(target_os = "linux")]
         ui::dnd::set_outside(&ctx, self.wayland_dnd.poll(frame, &ctx));
@@ -3899,10 +3903,10 @@ impl eframe::App for LumenApp {
                 // The unfolded folders belong to the Tree view alone.
                 self.tab.view.fold_all();
             }
-            let sizes = ui::file_list::Sizes { widths: self.columns, shown: self.shown_columns, order: self.column_order, tree };
+            let sizes = ui::file_list::Sizes { widths: self.columns, shown: self.shown_columns, order: self.column_order, tree, overscroll: self.behavior.overscroll };
             let lined = match (self.tab.view_size.layout(), self.tab.view_size.growth()) {
-                (_, Some(growth)) => Some(ui::icon_grid::show(ui, &self.tab.view, &cut, growth, scroll, self.rename.as_mut(), ui::icon_grid::Art { file_icons: &self.file_icons, thumbs: &self.thumbnails })),
-                (ui::view_size::Layout::List, _) => Some(ui::list_view::show(ui, &self.tab.view, &cut, scroll, self.rename.as_mut(), &self.file_icons)),
+                (_, Some(growth)) => Some(ui::icon_grid::show(ui, &self.tab.view, &cut, growth, scroll, self.rename.as_mut(), ui::icon_grid::Art { file_icons: &self.file_icons, thumbs: &self.thumbnails }, self.behavior.overscroll)),
+                (ui::view_size::Layout::List, _) => Some(ui::list_view::show(ui, &self.tab.view, &cut, scroll, self.rename.as_mut(), &self.file_icons, self.behavior.overscroll)),
                 _ => None,
             };
             self.grid = lined.as_ref().map(|out| out.shape);
@@ -10149,6 +10153,56 @@ mod tests {
         }
         output.shapes.iter().for_each(|s| collect(&s.shape, &mut texts));
         texts
+    }
+
+    /// `app_in` with a hundred more files in the folder.
+    fn long_app_in(name: &str) -> (egui::Context, LumenApp, PathBuf) {
+        let dir = crate::fs::ops::tests::fresh_fixture(name);
+        for n in 0..100 {
+            std::fs::write(dir.join(format!("file-{n:03}.txt")), "x").unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut app = LumenApp::new(&ctx, dir.clone(), false);
+        let entries = fs::lister::read_entries(&dir).unwrap();
+        let listing = Listing { id: 0, path: dir.clone(), result: Ok(entries), elapsed: Duration::ZERO };
+        app.tab.view.apply_listing(listing, None);
+        app.tab.shown_id = app.tab.lister.latest_id();
+        app.tab.look_for = Some((dir.clone(), Look::default()));
+        (ctx, app, dir)
+    }
+
+    /// A wheel turn of `y` points over the middle of the list, then the frames it takes to settle.
+    fn wheel_over_list(ctx: &egui::Context, app: &mut LumenApp, y: f32) -> Vec<String> {
+        let over = egui::pos2(400.0, 300.0);
+        window_frame(ctx, app, vec![egui::Event::PointerMoved(over)]);
+        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, y), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move };
+        window_frame(ctx, app, vec![wheel]);
+        let mut texts = Vec::new();
+        for _ in 0..30 {
+            texts = window_frame(ctx, app, vec![]);
+        }
+        texts
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_list_down_when_reverse_scroll_is_off() {
+        let (ctx, mut app, _) = long_app_in("app-wheel-normal");
+        window_frame(&ctx, &mut app, vec![]);
+        let texts = wheel_over_list(&ctx, &mut app, -600.0);
+        assert!(!texts.iter().any(|t| t == "file-000.txt"), "scrolled past the first rows: {texts:?}");
+        let texts = wheel_over_list(&ctx, &mut app, 600.0);
+        assert!(texts.iter().any(|t| t == "file-000.txt"), "and back up: {texts:?}");
+    }
+
+    #[test]
+    fn reverse_scroll_makes_the_wheel_scroll_the_list_the_other_way() {
+        let (ctx, mut app, _) = long_app_in("app-wheel-reverse");
+        app.behavior.reverse_scroll = true;
+        window_frame(&ctx, &mut app, vec![]);
+        let texts = wheel_over_list(&ctx, &mut app, -600.0);
+        assert!(texts.iter().any(|t| t == "file-000.txt"), "a turn that scrolled down now scrolls up, and the list is at the top: {texts:?}");
+        let texts = wheel_over_list(&ctx, &mut app, 600.0);
+        assert!(!texts.iter().any(|t| t == "file-000.txt"), "the other turn scrolls down: {texts:?}");
     }
 
     #[test]
