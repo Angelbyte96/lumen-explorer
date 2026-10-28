@@ -18,6 +18,9 @@ const LOGO: f32 = 132.0;
 /// The size of the big text buttons (Modify, Uninstall, Back).
 const BUTTON_TEXT: f32 = 22.0;
 
+/// Under the switches while Install is held ([`crate::setup::INSTALL_HELD`]).
+pub const HELD_NOTE: &str = "Install and Modify return once Lumen is code-signed; Uninstall works.";
+
 /// What the user asked for, read by [`SetupScreen::handle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupEvent {
@@ -66,6 +69,8 @@ pub struct SetupScreen {
     asking_uninstall: bool,
     /// The running copy was uninstalled: only Close is left.
     uninstalled: bool,
+    /// Install is held ([`crate::setup::INSTALL_HELD`]): nothing but Uninstall writes.
+    held: bool,
     logo: Option<egui::TextureHandle>,
 }
 
@@ -88,8 +93,14 @@ impl SetupScreen {
             note: None,
             asking_uninstall: false,
             uninstalled: false,
+            held: false,
             logo: None,
         }
+    }
+
+    /// The screen with Install and Modify held back, or not.
+    pub fn held(self, held: bool) -> Self {
+        Self { held, ..self }
     }
 
     #[cfg(test)]
@@ -107,6 +118,7 @@ impl SetupScreen {
         let note = self.note.take();
         *self = Self {
             note,
+            held: self.held,
             logo: self.logo.take(),
             ..Self::open(system)
         };
@@ -119,6 +131,7 @@ impl SetupScreen {
             SetupEvent::OpenFolder => return Some(Outcome::OpenFolder(PathBuf::from(&self.dir))),
             SetupEvent::AskUninstall => self.asking_uninstall = true,
             SetupEvent::CancelUninstall => self.asking_uninstall = false,
+            SetupEvent::Modify | SetupEvent::Install if self.held => {}
             SetupEvent::Modify => {
                 self.note = Some(match system.apply(self.want) {
                     Ok(()) => Note::Done("Changes applied.".into()),
@@ -301,7 +314,7 @@ impl SetupScreen {
 
     /// The four switches, two by two.
     fn switches(&mut self, ui: &mut egui::Ui) {
-        let off = self.uninstalled;
+        let off = self.uninstalled || self.held;
         let package = matches!(self.origin, Origin::Package { .. });
         // Centred by the width it had last frame: a grid knows its width only once drawn.
         let width_id = egui::Id::new("lumen_setup_switches_width");
@@ -343,6 +356,9 @@ impl SetupScreen {
             return event;
         }
         match &self.origin {
+            _ if self.held => {
+                ui.label(HELD_NOTE);
+            }
             Origin::NotInstalled { .. } => {
                 if big_button(ui, "Install", !self.dir.trim().is_empty()) {
                     event = Some(SetupEvent::Install);
@@ -786,6 +802,38 @@ mod tests {
         );
         assert_eq!(screen.dir, "Apps");
         assert!(screen.want.desktop_shortcut);
+    }
+
+    #[test]
+    fn while_install_is_held_an_installed_lumen_can_only_uninstall() {
+        let fake = installed(false, Switches::INSTALL);
+        let mut screen = SetupScreen::open(&fake).held(true);
+        screen.want.desktop_shortcut = true;
+        let shown = texts(&mut screen);
+        for line in ["Installed version 0.6.0.", "Uninstall", "Back", HELD_NOTE] {
+            assert!(shown.split('|').any(|t| t == line), "{line} missing from {shown}");
+        }
+        assert!(!shown.split('|').any(|t| t == "Modify"), "{shown}");
+        assert!(!shown.contains("Install this copy"), "{shown}");
+        // Neither runs, even if asked: nothing is written.
+        assert_eq!(screen.handle(&fake, SetupEvent::Modify), None);
+        assert_eq!(screen.handle(&fake, SetupEvent::Install), None);
+        assert!(fake.calls.borrow().is_empty(), "{:?}", fake.calls.borrow());
+        // Uninstall still works.
+        screen.handle(&fake, SetupEvent::Uninstall);
+        assert_eq!(*fake.calls.borrow(), ["uninstall"]);
+    }
+
+    #[test]
+    fn a_reload_keeps_install_held() {
+        let fake = installed(false, Switches::INSTALL);
+        let mut screen = SetupScreen::open(&fake).held(true);
+        // Uninstalled from another copy: the screen reloads as not installed.
+        screen.handle(&fake, SetupEvent::Uninstall);
+        let shown = texts(&mut screen);
+        assert!(!shown.split('|').any(|t| t == "Install"), "{shown}");
+        assert_eq!(screen.handle(&fake, SetupEvent::Install), None);
+        assert_eq!(*fake.calls.borrow(), ["uninstall"]);
     }
 
     #[test]
