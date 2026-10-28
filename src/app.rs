@@ -1517,6 +1517,8 @@ pub struct LumenApp {
     previewer: Previewer,
     /// What the panel shows: the selected entry, once its preview loads.
     preview: Option<PreviewPane>,
+    /// The color schemes in use (Options window).
+    schemes: ui::theme::Schemes,
 }
 
 /// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
@@ -1614,6 +1616,7 @@ impl LumenApp {
             hold_absorbed: false,
             previewer: Previewer::new(),
             preview: None,
+            schemes: ui::theme::Schemes::default(),
         };
         if let Some(home) = fs::home_dir() {
             let data_home = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()).map(PathBuf::from);
@@ -1656,6 +1659,8 @@ impl LumenApp {
         app.bookmarks = Bookmarks::from_paths(config.bookmarks);
         app.visits = Visits::from_list(config.visited);
         app.window = config.window;
+        app.schemes = config.schemes;
+        app.schemes.apply(ctx);
         app.saved = app.settings(true);
         app.config_path = path;
         app
@@ -1717,6 +1722,7 @@ impl LumenApp {
             active_tab: if with_window { self.session().1 } else { self.saved.active_tab },
             visited: if with_window { self.visits.list().to_vec() } else { self.saved.visited.clone() },
             folder_views: self.folder_views.clone(),
+            schemes: self.schemes,
         }
     }
 
@@ -6367,6 +6373,22 @@ mod tests {
         app.handle_action(&ctx, Action::ZoomIn);
         app.apply(failed);
         assert_eq!(look_of(&app), (30, Sort::default()), "a folder that could not be read changes nothing");
+    }
+
+    #[test]
+    fn the_saved_color_schemes_show_from_the_start_and_are_saved_back() {
+        use ui::theme::{Scheme, Schemes};
+        let (ctx, _, dir) = app_in("app-color-schemes");
+        let schemes = Schemes { scheme: Scheme::Dracula, follow_system: true, light: Scheme::Altair, dark: Scheme::Gentleman };
+        let config = Config { schemes, ..Config::default() };
+        let app = LumenApp::with_config(&ctx, dir.clone(), false, Settings { config, path: None, error: None });
+        assert_eq!(ctx.style_of(egui::Theme::Light).visuals, Scheme::Altair.visuals(egui::Theme::Light));
+        assert_eq!(ctx.style_of(egui::Theme::Dark).visuals, Scheme::Gentleman.visuals(egui::Theme::Dark));
+        assert_eq!(app.settings(false).schemes, schemes);
+        let plain = egui::Context::default();
+        LumenApp::with_config(&plain, dir, false, Settings { config: Config::default(), path: None, error: None });
+        assert_eq!(plain.style_of(egui::Theme::Dark).visuals, egui::Visuals::dark(), "Lumen's own colors by default");
+        assert_eq!(plain.style_of(egui::Theme::Light).visuals, egui::Visuals::light());
     }
 
     #[test]

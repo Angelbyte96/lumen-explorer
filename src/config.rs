@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::app::{Sort, SortColumn};
 use crate::folder_views::{FolderViews, Look, Rule, Scope};
 use crate::places::{VISIT_LIMIT, Visit};
+use crate::ui::theme::{Scheme, Schemes};
 use crate::ui::file_list::{ALL_SHOWN, DEFAULT_ORDER, DEFAULT_WIDTHS, MIN_WIDTH, Order, Shown, Widths};
 use crate::ui::view_size::ViewSize;
 
@@ -36,6 +37,8 @@ pub struct Config {
     pub visited: Vec<Visit>,
     /// Saved view settings per folder; `view` and `sort` are the default.
     pub folder_views: FolderViews,
+    /// The color schemes chosen in the Options window.
+    pub schemes: Schemes,
 }
 
 impl Default for Config {
@@ -55,6 +58,7 @@ impl Default for Config {
             column_order: DEFAULT_ORDER,
             visited: Vec::new(),
             folder_views: FolderViews::default(),
+            schemes: Schemes::default(),
         }
     }
 }
@@ -87,6 +91,10 @@ impl Config {
                 "column_order" => config.column_order = parse_order(value).unwrap_or(config.column_order),
                 "visited" => config.visited.extend(parse_visit(value)),
                 "folder_view" => rules.extend(parse_folder_view(value)),
+                "color_scheme" => config.schemes.scheme = Scheme::from_name(value).unwrap_or(config.schemes.scheme),
+                "system_scheme" => config.schemes.follow_system = parse_bool(value).unwrap_or(config.schemes.follow_system),
+                "light_scheme" => config.schemes.light = Scheme::from_name(value).unwrap_or(config.schemes.light),
+                "dark_scheme" => config.schemes.dark = Scheme::from_name(value).unwrap_or(config.schemes.dark),
                 _ => {}
             }
         }
@@ -116,6 +124,19 @@ impl Config {
         if self.column_order != DEFAULT_ORDER {
             let order: Vec<&str> = self.column_order.iter().map(|&c| column_name(SORT_COLUMNS[c])).collect();
             text += &format!("column_order = {}\n", order.join(" "));
+        }
+        let (schemes, default) = (self.schemes, Schemes::default());
+        if schemes.scheme != default.scheme {
+            text += &format!("color_scheme = {}\n", schemes.scheme.name());
+        }
+        if schemes.follow_system != default.follow_system {
+            text += &format!("system_scheme = {}\n", schemes.follow_system);
+        }
+        if schemes.light != default.light {
+            text += &format!("light_scheme = {}\n", schemes.light.name());
+        }
+        if schemes.dark != default.dark {
+            text += &format!("dark_scheme = {}\n", schemes.dark.name());
         }
         for path in self.bookmarks.iter().filter_map(|p| one_line(p)) {
             text += &format!("bookmark = {path}\n");
@@ -186,6 +207,19 @@ impl Config {
         }
         if before.column_order != after.column_order {
             merged.column_order = after.column_order;
+        }
+        let (was, now, kept) = (before.schemes, after.schemes, &mut merged.schemes);
+        if was.scheme != now.scheme {
+            kept.scheme = now.scheme;
+        }
+        if was.follow_system != now.follow_system {
+            kept.follow_system = now.follow_system;
+        }
+        if was.light != now.light {
+            kept.light = now.light;
+        }
+        if was.dark != now.dark {
+            kept.dark = now.dark;
         }
         if (&before.tabs, before.active_tab) != (&after.tabs, after.active_tab) {
             (merged.tabs, merged.active_tab) = (after.tabs.clone(), after.active_tab);
@@ -450,7 +484,34 @@ mod tests {
                 Visit { path: PathBuf::from("/srv/my files"), score: 0.1, at: 1 },
             ],
             folder_views: FolderViews::default(),
+            schemes: Schemes::default(),
         }
+    }
+
+    #[test]
+    fn the_color_schemes_are_kept_by_name() {
+        let schemes = Schemes { scheme: Scheme::Dracula, follow_system: true, light: Scheme::Sirius, dark: Scheme::Gentleman };
+        let text = "color_scheme = Dracula\nsystem_scheme = true\nlight_scheme = sirius\ndark_scheme = Gentleman\n";
+        assert_eq!(Config::parse(text).schemes, schemes, "names in any case");
+        let written = Config { schemes, ..Config::default() }.to_text();
+        assert!(written.contains("color_scheme = Dracula\nsystem_scheme = true\nlight_scheme = Sirius\ndark_scheme = Gentleman\n"), "{written}");
+        assert_eq!(Config::parse(&written).schemes, schemes);
+        assert!(!Config::default().to_text().contains("scheme"), "the defaults: no lines");
+        let one = Schemes { scheme: Scheme::Altair, ..Schemes::default() };
+        let written = Config { schemes: one, ..Config::default() }.to_text();
+        assert!(written.contains("color_scheme = Altair\n") && written.matches("scheme").count() == 1, "only what differs: {written}");
+        let broken = Config::parse("color_scheme = Voidstar\nsystem_scheme = maybe\nlight_scheme =\ndark_scheme = 3\n");
+        assert_eq!(broken.schemes, Schemes::default(), "unknown names and a broken switch keep the defaults");
+    }
+
+    #[test]
+    fn a_scheme_changed_here_does_not_undo_one_changed_in_another_window() {
+        let before = Config::default();
+        let here = Config { schemes: Schemes { scheme: Scheme::Dracula, ..Schemes::default() }, ..before.clone() };
+        let disk = Config { schemes: Schemes { follow_system: true, dark: Scheme::Gentleman, ..Schemes::default() }, ..before.clone() };
+        let merged = Config::merge(&disk, &before, &here).schemes;
+        assert_eq!(merged, Schemes { scheme: Scheme::Dracula, follow_system: true, light: Scheme::Lumen, dark: Scheme::Gentleman });
+        assert_eq!(Config::merge(&disk, &before, &before).schemes, disk.schemes, "nothing changed here: the other window's stays");
     }
 
     #[test]
