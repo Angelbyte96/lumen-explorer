@@ -1405,6 +1405,11 @@ pub struct LumenApp {
     setup: Option<ui::setup_view::SetupScreen>,
     /// What Setup reads and changes on this machine; `None` under test unless one is injected.
     system: Option<Box<dyn crate::setup::System>>,
+    /// Install is held back ([`crate::setup::INSTALL_HELD`]).
+    install_held: bool,
+    /// Whether the menu's Lumen Setup row opens the screen: [`Self::setup_opens`],
+    /// read when Setup may have changed it, not every frame.
+    setup_row: bool,
     /// The shell's menu behind the open one, loading or loaded, whose items it runs.
     #[cfg(windows)]
     shell_menu: Option<crate::shell_menu::native::Loader>,
@@ -1544,6 +1549,8 @@ impl LumenApp {
             context_on_entry: false,
             setup: None,
             system: None,
+            install_held: crate::setup::INSTALL_HELD,
+            setup_row: false,
             #[cfg(windows)]
             shell_menu: None,
             #[cfg(windows)]
@@ -1670,6 +1677,7 @@ impl LumenApp {
         if !cfg!(test) {
             app.path_popup = PathPopup::with_crawler(start_index(ctx), Box::new(start_index));
             app.system = real_system(record_file);
+            app.setup_row = app.setup_opens();
             let origin = app.system.as_deref().map(|system| system.origin());
             if origin.is_some_and(|origin| opens_setup_at_start(first_start, &origin, !cfg!(debug_assertions))) {
                 app.open_setup();
@@ -2955,11 +2963,19 @@ impl LumenApp {
         }
     }
 
-    /// Shows the Setup screen, when this machine has a system to set up.
+    /// Shows the Setup screen, when this machine has a system to set up and
+    /// Setup opens for it (see [`crate::setup::opens`]).
     pub fn open_setup(&mut self) {
-        if let Some(system) = self.system.as_deref() {
-            self.setup = Some(ui::setup_view::SetupScreen::open(system));
+        if let Some(system) = self.system.as_deref()
+            && crate::setup::opens(&system.origin(), self.install_held)
+        {
+            self.setup = Some(ui::setup_view::SetupScreen::open(system).held(self.install_held));
         }
+    }
+
+    /// Whether [`Self::open_setup`] would show the screen now.
+    fn setup_opens(&self) -> bool {
+        self.system.as_deref().is_some_and(|system| crate::setup::opens(&system.origin(), self.install_held))
     }
 
     /// The Setup screen alone in the window, and what it asks for.
@@ -2978,6 +2994,8 @@ impl LumenApp {
 
     fn finish_setup(&mut self, ctx: &egui::Context, outcome: ui::setup_view::Outcome) {
         use ui::setup_view::Outcome;
+        // Uninstalling another copy greys the menu's row while Install is held.
+        self.setup_row = self.setup_opens();
         match outcome {
             Outcome::Back => self.setup = None,
             Outcome::OpenFolder(path) => {
@@ -3735,7 +3753,7 @@ impl eframe::App for LumenApp {
         egui::Panel::top("tabs").show(ui, |ui| {
             ui.add_space(3.0);
             let labels = self.tab_labels();
-            let (menu, tab) = ui.horizontal(|ui| (ui::app_menu::show(ui), ui::tabs::show(ui, &labels, self.active))).inner;
+            let (menu, tab) = ui.horizontal(|ui| (ui::app_menu::show(ui, self.setup_row), ui::tabs::show(ui, &labels, self.active))).inner;
             if let Some(event) = menu {
                 self.handle_menu(&ctx, event);
             }
@@ -9986,9 +10004,50 @@ mod tests {
     /// An app with the Setup screen open over the fixture folder.
     fn app_with_setup(name: &str) -> (egui::Context, LumenApp, PathBuf) {
         let (ctx, mut app, dir) = app_in(name);
+        app.install_held = false;
         app.system = Some(Box::new(FakeSystem(installed_in(&dir))));
         app.handle_menu(&ctx, AppMenuEvent::Setup);
         (ctx, app, dir)
+    }
+
+    fn not_installed_in(dir: &Path) -> crate::setup::Origin {
+        crate::setup::Origin::NotInstalled { default_dir: dir.to_path_buf() }
+    }
+
+    #[test]
+    fn while_install_is_held_a_lumen_not_installed_never_opens_setup() {
+        let (ctx, mut app, dir) = app_in("app-setup-held");
+        app.install_held = true;
+        app.system = Some(Box::new(FakeSystem(not_installed_in(&dir))));
+        // The menu row, then `--setup` and the first start (both call open_setup).
+        app.handle_menu(&ctx, AppMenuEvent::Setup);
+        assert!(app.setup.is_none(), "the menu row opens nothing");
+        app.open_setup();
+        assert!(app.setup.is_none(), "--setup and the first start open nothing");
+        assert!(!app.setup_opens(), "the menu greys the row");
+    }
+
+    #[test]
+    fn while_install_is_held_an_installed_lumen_opens_setup_to_uninstall() {
+        let (ctx, mut app, dir) = app_in("app-setup-held-installed");
+        app.install_held = true;
+        app.system = Some(Box::new(FakeSystem(installed_in(&dir))));
+        assert!(app.setup_opens());
+        app.open_setup();
+        window_frame(&ctx, &mut app, vec![]);
+        let texts = window_frame(&ctx, &mut app, vec![]);
+        assert!(texts.iter().any(|t| t == "Uninstall"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t == "Modify"), "{texts:?}");
+    }
+
+    #[test]
+    fn not_held_a_lumen_not_installed_opens_setup_as_before() {
+        let (ctx, mut app, dir) = app_in("app-setup-not-held");
+        app.install_held = false;
+        app.system = Some(Box::new(FakeSystem(not_installed_in(&dir))));
+        assert!(app.setup_opens());
+        app.handle_menu(&ctx, AppMenuEvent::Setup);
+        assert!(app.setup.is_some());
     }
 
     #[test]
