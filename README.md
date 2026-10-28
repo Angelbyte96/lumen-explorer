@@ -244,14 +244,22 @@ file shown.
 | Ctrl+Shift+F | Size every list column to fit the list's width, no sideways scroll (also in the header's right-click menu) |
 | Esc | Clear the filter; with an empty filter, drop a multiple selection, then stop the Alt+R count, then stop listing the subfolders (Ctrl+E) and list the folder alone, then cancel the copy or move in progress with the entries still waiting, then forget a cut waiting to be pasted, then unselect as a click on the empty space does (holding it stops at the first thing it undid) |
 
-### Options and color schemes
+### Options
 
-Ctrl+, (or ☰ ▸ Options) opens the Options window, laid out like File Pilot's: a search box on top ("Select an option…"), then one row per option with its name, what it does in grey under it and its control on the right, and a footer with the keys ("Up Down to navigate · Enter to use · Escape to dismiss"). Typing narrows the rows by their name and by words that point to them (`theme`, `color`, `palette`, `dark`, `light`, `system`); a search that matches nothing shows no rows. ↑/↓ pick a row, Enter (or a click) uses it, Escape closes the window. A row that differs from its default shows a reset icon (↺, "Restore default setting.") that puts the default back. Only the color options are there for now; more are added later as rows of the same window.
+Ctrl+, (or ☰ ▸ Options) opens the Options window, laid out like File Pilot's: a search box on top ("Select an option…"), then one row per option with its name, what it does in grey under it and its control on the right, and a footer with the keys ("Up Down to navigate · Enter to use · Escape to dismiss"). Typing narrows the rows by their name and by words that point to them (`theme`, `color`, `palette`, `dark`, `light`, `system`, `scroll`, `wheel`, `letter`, `startup`, `tab`…); a search that matches nothing shows no rows; when the window is short the rows scroll. ↑/↓ pick a row, Enter (or a click) uses it, Escape closes the window. A row that differs from its default shows a reset icon (↺, "Restore default setting.") that puts the default back.
 
 - **Color Scheme** opens the list of color schemes in the same window: the one in use is marked (•), choosing one applies it to the whole window at once, and Escape (or the back button ‹) returns to the rows. **Lumen** is the default and follows the system's light or dark appearance, as Lumen always has; every other scheme is a fixed light or dark palette: Sirius (light), Pollux, Eridanus, Regulus, Altair (light), **Dracula** (the official palette, as in VS Code) and **Gentleman** (the pink-on-dark palette of gentle-shell's Gentleman-Sexy theme). Sirius, Pollux, Eridanus, Regulus and Altair are Lumen's own palettes, named after File Pilot's schemes (File Pilot's own colors are not published).
 - **System Light / Dark Scheme** is a switch ("Automatically adapt between light and dark color schemes based on system settings."). With it on, the Color Scheme row becomes two: **Light Color Scheme** (used while the system uses bright colors) and **Dark Color Scheme** (while it uses dark colors), each with its own list. Keep Lumen in both to get the default back.
 
-The choices are saved as soon as they change in the settings file (`color_scheme`, `system_scheme`, `light_scheme`, `dark_scheme`; only what differs from the default).
+After the color options come the behavior options, in File Pilot's order:
+
+- **Scroll Beyond Last Item** (off): lets the Details, List and Icons views scroll about one view past the last item.
+- **Reverse Scroll Direction** (off): turns the wheel and touchpad scroll around in every view; Ctrl+wheel zoom keeps its direction.
+- **Character Key Action**: what a letter typed without Ctrl or Alt does. **Type In Filter** (the default) types it into the filter; **Select Typed Item** selects the first entry whose name starts with what you type quickly (a pause of 1 s starts over; pressing the same letter again goes to the next entry starting with it); **Trigger Hotkey** leaves letters to hotkeys, and Lumen has no single-key hotkeys yet, so they do nothing. Space works as before in every mode.
+- **Load On Startup**: what a window opens when no folder is given to it. **Last Session** (the default) reopens the tabs of the last window closed, **Home** your home folder, and **Folder: …** the folder of the current tab when you chose it (a folder that is gone gives its nearest parent). A folder passed to Lumen, or Lumen started in a terminal on Linux, still opens that folder.
+- **New Tab Show**: where Ctrl+T's new tab opens. **Current** (the default) the folder you are in, **Home** your home folder, **Root** `/` on Linux and This PC on Windows. Open In New Tab from a menu still opens what it names.
+
+The choices are saved as soon as they change in the settings file (`color_scheme`, `system_scheme`, `light_scheme`, `dark_scheme`, `overscroll`, `reverse_scroll`, `character_key_action`, `load_on_startup`, `new_tab_show`; only what differs from the default).
 
 Each tab keeps its own folder, history, filter and selection; a tab is reloaded when you come back to it.
 
