@@ -211,9 +211,12 @@ fn read_keys(ctx: &Context, typing: bool, list: bool) -> Vec<Action> {
             actions.push(Action::ToggleSidebar);
         }
         // Matching ignores an extra Shift, and Shift+F10 is the selection's menu.
+        // A held F10 repeats: only the first press toggles the menu.
         i.events.retain(|event| match event {
-            Event::Key { key: Key::F10, pressed: true, modifiers, .. } if modifiers.is_none() => {
-                actions.push(Action::AppMenu);
+            Event::Key { key: Key::F10, pressed: true, repeat, modifiers, .. } if modifiers.is_none() => {
+                if !repeat {
+                    actions.push(Action::AppMenu);
+                }
                 false
             }
             _ => true,
@@ -684,6 +687,12 @@ mod tests {
         assert_eq!(actions_for(held), [Action::GoParent, Action::GoParentHeld, Action::GoParentHeld]);
         let held = vec![key(Key::Escape, Modifiers::NONE), repeat(Key::Escape)];
         assert_eq!(actions_for(held), [Action::Cancel, Action::CancelHeld]);
+    }
+
+    #[test]
+    fn a_held_f10_opens_the_app_menu_once() {
+        let held = vec![key(Key::F10, Modifiers::NONE), repeat(Key::F10), repeat(Key::F10)];
+        assert_eq!(actions_for(held), [Action::AppMenu], "the key repeat neither closes nor reopens it");
     }
 
     #[test]

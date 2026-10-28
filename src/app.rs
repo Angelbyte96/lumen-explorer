@@ -1525,6 +1525,17 @@ pub struct LumenApp {
 
 /// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
 /// keyboard feels instant; list-wide changes skip them entirely (see [`Scroll`]).
+/// A box or window a focused button opens must not read the key that pressed
+/// the button too: Enter would use its first row or close it, Space would type " ".
+fn use_up_activation(ctx: &egui::Context) {
+    ctx.input_mut(|i| {
+        i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Space) {
+            i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t == " "));
+        }
+    });
+}
+
 fn apply_style(ctx: &egui::Context) {
     // Ctrl+Plus / Ctrl+Minus move the view slider (Action::ZoomIn), they do
     // not zoom the whole window as egui would.
@@ -2955,16 +2966,6 @@ impl LumenApp {
     }
 
     fn handle_menu(&mut self, ctx: &egui::Context, event: AppMenuEvent) {
-        // A window the row opens must not read the key that ran the row too:
-        // Enter would use its first row, Space would type " ".
-        fn use_up_activation(ctx: &egui::Context) {
-            ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
-                if i.consume_key(egui::Modifiers::NONE, egui::Key::Space) {
-                    i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t == " "));
-                }
-            });
-        }
         match event {
             AppMenuEvent::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
             AppMenuEvent::Setup => self.open_setup(),
@@ -3043,9 +3044,7 @@ impl LumenApp {
             ToolbarEvent::ToggleBookmark => self.toggle_bookmark(self.tab.view.current.clone()),
             ToolbarEvent::Go(path) => self.navigate(ctx, path, None),
             ToolbarEvent::EditPath => {
-                // Pressed with Enter (the bar had the focus): the box drawn
-                // below must not read that Enter too and close at once.
-                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                use_up_activation(ctx);
                 self.path_popup.open();
             }
             ToolbarEvent::SaveView(Some(scope)) => {
@@ -8094,6 +8093,20 @@ mod tests {
     }
 
     #[test]
+    fn space_on_the_focused_path_bar_opens_the_path_box_and_types_nothing() {
+        let (ctx, mut app, _) = app_in("app-path-bar-space");
+        let space = egui::Event::Key { key: egui::Key::Space, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let mut left = Vec::new();
+        ctx.run_ui(egui::RawInput { events: vec![space, egui::Event::Text(" ".into())], ..Default::default() }, |ui| {
+            app.handle_toolbar(ui.ctx(), ToolbarEvent::EditPath);
+            left = ui.ctx().input(|i| i.events.clone());
+        })
+        .drop_without_applying_deltas();
+        assert!(app.path_popup.is_open());
+        assert!(left.is_empty(), "Space pressed the bar and reaches nothing else: {left:?}");
+    }
+
+    #[test]
     fn enter_on_the_focused_path_bar_opens_the_path_box_and_leaves_it_open() {
         let (ctx, mut app, dir) = app_in("app-path-bar-enter");
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
@@ -10126,6 +10139,34 @@ mod tests {
         }
         output.shapes.iter().for_each(|s| collect(&s.shape, &mut texts));
         texts
+    }
+
+    #[test]
+    fn tab_walks_the_window_in_the_order_the_readme_gives() {
+        let (ctx, mut app, _) = app_in("app-tab-order");
+        window_frame(&ctx, &mut app, vec![]);
+        let mut stops = Vec::new();
+        for _ in 0..16 {
+            window_frame(&ctx, &mut app, key_press(egui::Key::Tab, egui::Modifiers::NONE));
+            window_frame(&ctx, &mut app, vec![]);
+            let id = ctx.memory(|m| m.focused()).expect("Tab always lands somewhere");
+            stops.push((id, ctx.read_response(id).expect("a drawn widget").rect));
+        }
+        let ids: Vec<egui::Id> = stops.iter().map(|&(id, _)| id).collect();
+        assert_eq!(ids[..3], [ui::app_menu::button_id(), ui::app_menu::panel_button_id(), ui::tabs::tab_id(0)], "☰, the panel button, the tab");
+        let (tab, plus) = (stops[2].1, stops[3].1);
+        assert!(plus.left() > tab.right() && plus.top() < tab.bottom(), "then + after the tabs");
+        // With no history ← and → are greyed, so no stops: ↑, the lock, ☆, the path bar.
+        let bar = &stops[4..8];
+        assert!(bar.iter().all(|(_, r)| r.top() >= tab.bottom()), "the toolbar, under the tabs");
+        assert!(bar.windows(2).all(|w| w[0].1.right() <= w[1].1.left()), "left to right: {bar:?}");
+        assert_eq!(bar[1].0, ui::toolbar::lock_id(), "the lock between ↑ and ☆");
+        assert!(bar[3].1.width() > 100.0, "the path bar last: {bar:?}");
+        assert_eq!(ids[8..10], [ui::sidebar::focus_id(), ui::file_list::focus_id()], "then the side panel, then the list");
+        // The view button's parts at the bottom, then round again.
+        let again = ids[10..].iter().position(|&id| id == ui::app_menu::button_id()).expect("back to ☰") + 10;
+        assert!(stops[10..again].iter().all(|(_, r)| r.top() > stops[9].1.center().y), "the bottom bar: {:?}", &stops[10..again]);
+        assert_eq!(ids[again..again + 3], ids[..3], "the same ring again");
     }
 
     /// An app with the Setup screen open over the fixture folder.
