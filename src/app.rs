@@ -3623,6 +3623,13 @@ impl LumenApp {
         };
     }
 
+    /// Whether the filter bar shows the filter mode's cursor this frame;
+    /// settles first, so a folder change that emptied the filter shows none.
+    fn filter_mode_shown(&mut self) -> bool {
+        self.settle_filter_mode();
+        self.filter_mode.is_some()
+    }
+
     fn handle_action(&mut self, ctx: &egui::Context, action: Action) {
         self.settle_filter_mode();
         match action {
@@ -3727,6 +3734,7 @@ impl LumenApp {
             }
             Action::TypeChar(c) if c == ' ' || self.filter_mode.is_some() || self.behavior.char_key == crate::behavior::CharKey::TypeInFilter => {
                 self.tab.view.push_filter(c);
+                self.settle_filter_mode();
             }
             Action::TypeChar(c) if self.behavior.char_key == crate::behavior::CharKey::SelectTypedItem => self.type_to_select(ctx, c),
             // Trigger Hotkey: no single-letter hotkeys exist yet.
@@ -4008,6 +4016,7 @@ impl eframe::App for LumenApp {
             });
         });
 
+        let filter_mode = self.filter_mode_shown();
         // Floating over the list's bottom, in the room left for them there.
         let picked = ui::status_bar::show(
             &ctx,
@@ -4015,7 +4024,7 @@ impl eframe::App for LumenApp {
             &Status {
                 filter: self.tab.view.filter(),
                 caret: !self.path_popup.is_open() && self.rename.is_none(),
-                filter_mode: self.filter_mode.is_some(),
+                filter_mode,
                 item_count: if self.on_this_pc() {
                     self.drives.len()
                 } else if self.on_recycle_bin() {
@@ -4637,6 +4646,17 @@ mod tests {
         assert_eq!(app.tab.view.current, here, "the press only erased");
         assert_eq!(typed_at(&ctx, &mut app, 5.0, 'c').as_deref(), Some("Cherry"), "Select Typed Item is back");
         assert_eq!(app.tab.view.filter(), "");
+    }
+
+    #[test]
+    fn a_folder_change_that_clears_the_filter_hides_the_filter_mode_cursor_at_once() {
+        let (ctx, mut app) = typing_in("app-ctrl-f-navigate", crate::behavior::CharKey::SelectTypedItem);
+        app.handle_action(&ctx, Action::FilterMode);
+        assert!(app.filter_mode_shown(), "armed: the cursor shows before anything is typed");
+        typed_at(&ctx, &mut app, 1.0, 'a');
+        app.tab.view.clear_filter(); // as entering another folder does
+        assert!(!app.filter_mode_shown(), "the mode ended with the filter, no stale cursor");
+        assert_eq!(typed_at(&ctx, &mut app, 5.0, 'c').as_deref(), Some("Cherry"));
     }
 
     #[test]
