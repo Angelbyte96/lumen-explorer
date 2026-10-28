@@ -16,6 +16,8 @@ pub enum AppMenuEvent {
     GoTo,
     /// Lumen Setup: the install and integrations screen.
     Setup,
+    /// Options: the window with the color schemes (Ctrl+,).
+    Options,
 }
 
 /// One row of the menu: its icon, name and shortcut, and what it does once
@@ -31,7 +33,7 @@ const GROUPS: [&[Item]; 3] = [
     &[
         (MenuIcon::LoadLayout, "Load Layout", "", None),
         (MenuIcon::SaveLayout, "Save Layout", "", None),
-        (MenuIcon::Options, "Options", "Ctrl+,", None),
+        (MenuIcon::Options, "Options", "Ctrl+,", Some(AppMenuEvent::Options)),
     ],
     &[(MenuIcon::Setup, "Lumen Setup", "", Some(AppMenuEvent::Setup))],
 ];
@@ -71,6 +73,11 @@ pub fn toggle(ctx: &egui::Context) {
         ctx.memory_mut(|m| m.request_focus(button_id()));
         ctx.data_mut(|d| d.insert_temp(focus_first_id(), true));
     }
+}
+
+/// Closes the menu, if open.
+pub fn close(ctx: &egui::Context) {
+    egui::Popup::close_id(ctx, menu_id());
 }
 
 /// Closes the menu on Escape and uses that Escape up; false when the menu was
@@ -321,8 +328,8 @@ mod tests {
             corner(&ctx, vec![]);
             assert!(is_open(&ctx), "{arrow:?} leaves the menu open");
         }
-        // Down, Down, Up from Go To (wrapping over the two rows Lumen has) ends on Setup.
-        assert_eq!(corner(&ctx, key(egui::Key::Enter)).0, Some(AppMenuEvent::Setup), "the rows kept the focus");
+        // Down, Down, Up from Go To (over the three rows Lumen has: Go To, Options, Lumen Setup) ends on Options.
+        assert_eq!(corner(&ctx, key(egui::Key::Enter)).0, Some(AppMenuEvent::Options), "the rows kept the focus");
     }
 
     #[test]
@@ -331,10 +338,12 @@ mod tests {
         corner(&ctx, vec![]);
         toggle(&ctx);
         corner(&ctx, vec![]);
-        // The first Tab goes to the next row, Lumen Setup, still in the menu.
-        corner(&ctx, key(egui::Key::Tab));
-        corner(&ctx, vec![]);
-        assert!(is_open(&ctx), "the next row is in the menu");
+        // The first two Tabs go to the next rows, Options and Lumen Setup, still in the menu.
+        for _ in 0..2 {
+            corner(&ctx, key(egui::Key::Tab));
+            corner(&ctx, vec![]);
+            assert!(is_open(&ctx), "the next row is in the menu");
+        }
         corner(&ctx, key(egui::Key::Tab));
         corner(&ctx, vec![]);
         assert!(!is_open(&ctx), "the focus left the menu, so it closed");
@@ -371,10 +380,11 @@ mod tests {
     }
 
     #[test]
-    fn go_to_and_setup_are_events_and_the_rows_lumen_lacks_are_greyed() {
+    fn go_to_options_and_setup_are_events_and_the_rows_lumen_lacks_are_greyed() {
         assert_eq!(choose("Go To").0, Some(AppMenuEvent::GoTo));
+        assert_eq!(choose("Options").0, Some(AppMenuEvent::Options));
         assert_eq!(choose("Lumen Setup").0, Some(AppMenuEvent::Setup));
-        for row in ["Commands", "Load Layout", "Save Layout", "Options"] {
+        for row in ["Commands", "Load Layout", "Save Layout"] {
             assert_eq!(choose(row).0, None, "{row} does nothing yet");
         }
     }
