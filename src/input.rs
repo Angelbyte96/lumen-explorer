@@ -33,6 +33,8 @@ pub enum Action {
     ToggleSidebar,
     /// F10: open or close the app menu (the ☰ in the corner).
     AppMenu,
+    /// Ctrl+,: the Options window.
+    Options,
     ToggleHidden,
     /// Ctrl+E: also list what the subfolders hold, all the way down.
     ToggleFlat,
@@ -111,7 +113,7 @@ const PAGE: isize = 20;
 /// letters, the clipboard...) reach it only while it holds the keys: with
 /// another part of the window focused they stay there, so moving through the
 /// side panel never moves the selection. Window shortcuts work anywhere but in
-/// a text field, which keeps all but Ctrl+L.
+/// a text field, which keeps all but Ctrl+L and Ctrl+,.
 pub fn read_actions(ctx: &Context) -> Vec<Action> {
     let typing = ctx.text_edit_focused();
     let list = list_has_keys(ctx);
@@ -176,6 +178,9 @@ fn read_keys(ctx: &Context, typing: bool, list: bool) -> Vec<Action> {
         let mut actions = Vec::new();
         if i.consume_key(Modifiers::COMMAND, Key::L) {
             actions.push(Action::FocusPathBar);
+        }
+        if i.consume_key(Modifiers::COMMAND, Key::Comma) {
+            actions.push(Action::Options);
         }
         if typing {
             return actions;
@@ -639,6 +644,12 @@ mod tests {
         assert_eq!(frames(&ctx, vec![release(Key::V, Modifiers::COMMAND)]), []);
         // The next Ctrl+V with an empty system clipboard works again.
         assert_eq!(frames(&ctx, vec![release(Key::V, Modifiers::COMMAND)]), [Action::Paste]);
+    }
+
+    #[test]
+    fn ctrl_comma_opens_the_options_window() {
+        assert_eq!(actions_for(vec![key(Key::Comma, Modifiers::COMMAND)]), [Action::Options]);
+        assert_eq!(actions_for(vec![key(Key::Comma, Modifiers::NONE)]), [], "a plain comma is no shortcut");
     }
 
     #[test]

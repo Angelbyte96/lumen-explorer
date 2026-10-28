@@ -9,6 +9,7 @@ pub mod grid;
 pub mod icon_grid;
 pub mod icons;
 pub mod list_view;
+pub mod options;
 pub mod path_popup;
 pub mod preview;
 pub mod recycle_view;
@@ -212,6 +213,7 @@ mod tests {
             ("ui/drives_view.rs", include_str!("drives_view.rs")),
             ("ui/theme.rs", include_str!("theme.rs")),
             ("ui/file_list.rs", include_str!("file_list.rs")),
+            ("ui/options.rs", include_str!("options.rs")),
             ("ui/path_popup.rs", include_str!("path_popup.rs")),
             ("ui/preview.rs", include_str!("preview.rs")),
             ("ui/recycle_view.rs", include_str!("recycle_view.rs")),
