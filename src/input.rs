@@ -656,6 +656,27 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_comma_and_ctrl_l_work_while_typing_and_the_other_shortcuts_do_not() {
+        let ctx = Context::default();
+        let field = egui::Id::new("a text field");
+        let mut text = String::new();
+        let mut frame = |events: Vec<Event>| {
+            let mut actions = Vec::new();
+            ctx.run_ui(RawInput { events, ..RawInput::default() }, |ui| {
+                actions = read_actions(ui.ctx());
+                ui.add(egui::TextEdit::singleline(&mut text).id(field));
+                ui.memory_mut(|m| m.request_focus(field));
+            })
+            .drop_without_applying_deltas();
+            actions
+        };
+        frame(vec![]);
+        frame(vec![]);
+        let events = vec![key(Key::Comma, Modifiers::COMMAND), key(Key::L, Modifiers::COMMAND), key(Key::H, Modifiers::COMMAND)];
+        assert_eq!(frame(events), [Action::FocusPathBar, Action::Options], "Ctrl+H stays with the field");
+    }
+
+    #[test]
     fn escape_cancels() {
         assert_eq!(actions_for(vec![key(Key::Escape, Modifiers::NONE)]), [Action::Cancel]);
     }
