@@ -21,7 +21,8 @@ pub enum AppMenuEvent {
 }
 
 /// One row of the menu: its icon, name and shortcut, and what it does once
-/// Lumen has it. File Pilot's other rows are kept, greyed, until then.
+/// Lumen has it. File Pilot's other rows are kept, greyed and without their
+/// shortcut, until then.
 type Item = (MenuIcon, &'static str, &'static str, Option<AppMenuEvent>);
 
 /// The menu's rows top to bottom, in groups split by a line.
@@ -43,8 +44,13 @@ pub fn version() -> String {
     format!("LUMEN v{}", env!("CARGO_PKG_VERSION"))
 }
 
-fn button_id() -> egui::Id {
+pub(crate) fn button_id() -> egui::Id {
     egui::Id::new("lumen_app_menu")
+}
+
+/// The panel button beside ☰.
+pub(crate) fn panel_button_id() -> egui::Id {
+    button_id().with("side_panel")
 }
 
 /// The menu, as `Popup::menu` names it.
@@ -187,6 +193,8 @@ pub fn show(ui: &mut egui::Ui, setup: bool) -> Option<AppMenuEvent> {
             for &(icon, name, shortcut, on_click) in *group {
                 let held = on_click == Some(AppMenuEvent::Setup) && !setup;
                 let on_click = if held { None } else { on_click };
+                // A greyed row's shortcut would do nothing yet: it shows once the command exists.
+                let shortcut = if on_click.is_some() { shortcut } else { "" };
                 let mut row = ui.add_enabled_ui(on_click.is_some(), |ui| row(ui, icon, name, shortcut)).inner;
                 if held {
                     row = row.on_disabled_hover_text(SETUP_HELD);
@@ -209,7 +217,7 @@ pub fn show(ui: &mut egui::Ui, setup: bool) -> Option<AppMenuEvent> {
         ui.weak(version());
         step_through(&ctx, &enabled);
     });
-    let panel = square(ui, button_id().with("side_panel"), false, crate::ui::icons::paint_side_panel);
+    let panel = square(ui, panel_button_id(), false, crate::ui::icons::paint_side_panel);
     if command_hint(panel, "Toggle Side Panel", "Ctrl+B").clicked() {
         event = Some(AppMenuEvent::ToggleSidebar);
     }
@@ -282,10 +290,12 @@ mod tests {
         let rows = ["Go To", "Commands", "Load Layout", "Save Layout", "Options", "Lumen Setup", &version()];
         let tops: Vec<f32> = rows.iter().map(|row| at(&menu, row).top()).collect();
         assert!(tops.windows(2).all(|w| w[0] < w[1]), "top to bottom in this order: {tops:?}");
-        for (row, shortcut) in [("Go To", "Ctrl+L"), ("Commands", "Ctrl+Shift+P"), ("Options", "Ctrl+,")] {
+        for (row, shortcut) in [("Go To", "Ctrl+L"), ("Options", "Ctrl+,")] {
             let (row, shortcut) = (at(&menu, row), at(&menu, shortcut));
             assert!(shortcut.left() > row.right() && (shortcut.center().y - row.center().y).abs() < 1.0, "{shortcut:?} on its row's right");
         }
+        // A greyed row's shortcut would do nothing yet: it shows once the command exists.
+        assert!(!menu.iter().any(|(text, _)| text == "Ctrl+Shift+P"), "Commands is greyed: no shortcut");
         assert_eq!(version(), format!("LUMEN v{}", env!("CARGO_PKG_VERSION")));
     }
 
@@ -404,7 +414,7 @@ mod tests {
         let ctx = egui::Context::default();
         let (_, texts) = corner(&ctx, vec![]);
         let menu = ctx.read_response(button_id()).expect("☰ drawn").rect;
-        let panel = ctx.read_response(button_id().with("side_panel")).expect("panel button drawn").rect;
+        let panel = ctx.read_response(panel_button_id()).expect("panel button drawn").rect;
         assert!(panel.left() >= menu.right(), "beside ☰, on its right");
         assert!(at(&texts, MENU).center().x < panel.left());
         assert_eq!(corner(&ctx, pointer_click(panel.center())).0, Some(AppMenuEvent::ToggleSidebar));
