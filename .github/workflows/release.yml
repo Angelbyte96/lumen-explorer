@@ -104,5 +104,6 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "Lumen $GITHUB_REF_NAME" \
+            --notes "Built by the Release workflow from this repository. [Code signing policy](https://github.com/Angelbyte96/lumen-explorer#code-signing-policy)" \
             --generate-notes \
             --verify-tag
