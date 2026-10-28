@@ -1523,8 +1523,6 @@ pub struct LumenApp {
     options: ui::options::Options,
 }
 
-/// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
-/// keyboard feels instant; list-wide changes skip them entirely (see [`Scroll`]).
 /// A box or window a focused button opens must not read the key that pressed
 /// the button too: Enter would use its first row or close it, Space would type " ".
 fn use_up_activation(ctx: &egui::Context) {
@@ -1536,6 +1534,8 @@ fn use_up_activation(ctx: &egui::Context) {
     });
 }
 
+/// Global look and feel. Scroll animations are kept subtle (50-90 ms) so the
+/// keyboard feels instant; list-wide changes skip them entirely (see [`Scroll`]).
 fn apply_style(ctx: &egui::Context) {
     // Ctrl+Plus / Ctrl+Minus move the view slider (Action::ZoomIn), they do
     // not zoom the whole window as egui would.
