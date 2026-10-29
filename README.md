@@ -222,6 +222,8 @@ file shown.
 | Ctrl+T | Open the current folder in a new tab (also the + in the tab bar) |
 | Ctrl+W | Close the tab (also its ×); the last tab stays open |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next / previous tab |
+| Alt+M | Minimize the window (also the first window button at the right end of the tab row) |
+| F11 | Maximize the window, or restore it when it is maximized (also the second window button) |
 | Tab / Shift+Tab | Move the keyboard focus through the window, a ring around the part that has it: ☰, the side panel button, each tab, +, ←, → (while they can go somewhere), ↑, the lock (saved view), ☆ and the path bar, then the side panel, then the list, then the view button at the bottom, and round again (the list's ring goes away with the first key or click on it, the list keeping the keys; after a click on a row, Tab goes to the first tab and Shift+Tab to the side panel). Enter or Space presses a focused button (Enter on the path bar opens the path box). The side panel works like a tree: ↑/↓ and Home/End move through the section titles and the items of the open sections, → opens a closed section (on an open title: goes to its first item), ← goes from an item to its title or closes the section, Enter opens the folder or opens / closes the section. The list's keys (arrows, Enter, Delete, typing…) act on the list only while it has the focus; Esc or a click on the list gives it the keys back. Ctrl, Alt and F-key shortcuts work wherever the focus is |
 | Ctrl+D | Bookmark the current folder, or remove its bookmark (same as the ☆ button) |
 | Ctrl+H | Show / hide hidden files |
@@ -264,7 +266,7 @@ The choices are saved as soon as they change in the settings file (`color_scheme
 
 Each tab keeps its own folder, history, filter and selection; a tab is reloaded when you come back to it.
 
-Lumen draws its own title bar, the same on Windows and Linux: the tab row is it. Drag the empty space after the tabs to move the window, double-click it to maximize or restore the window, and drag the window's edges and corners to resize it (not while it is maximized).
+Lumen draws its own title bar, the same on Windows and Linux: the tab row is it. Drag the empty space after the tabs to move the window, double-click it to maximize or restore the window, and drag the window's edges and corners to resize it (not while it is maximized). The tab row ends with three thin window buttons, as in File Pilot: minimize (Alt+M), maximize or restore (F11) and close (Alt+F4, the system's own shortcut; the button turns red under the pointer). Hovering one names its command and shortcut ("Cmd: Minimize Window [Alt+M]"). They are not Tab stops, they work on the Setup screen's bar too, and Alt+M and F11 work wherever the focus is. With many tabs the tabs scroll and the buttons stay.
 
 The side panel on the left (the panel button beside ☰, or Ctrl+B, shows or hides it) lists your **Bookmarks** (right-click one for its menu, where "Remove from Bookmarks" removes it), **Places** (on Windows **This PC** first, then home, Desktop, Downloads, Documents, Music, Pictures and Videos as named on your system, and the **Recycle Bin** last; on Linux the Trash instead), **Storage** (mounted disks with a bar showing how full they are; hover a disk for its free space) and **Recents** (the last 10 folders you visited in Lumen). Right-click any row of the panel for its menu (open it, open it in a new tab, copy its path, bookmark it; on Windows also the shell's own items, such as Eject for a USB drive). Nothing inside the Trash can be trashed again.
 

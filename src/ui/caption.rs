@@ -13,25 +13,132 @@ pub fn bar_id() -> egui::Id {
     egui::Id::new("lumen_caption_bar")
 }
 
+/// The window buttons at the right end of the bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+impl Button {
+    pub const ALL: [Button; 3] = [Button::Minimize, Button::Maximize, Button::Close];
+
+    pub fn id(self) -> egui::Id {
+        egui::Id::new(("lumen_window_button", self as u8))
+    }
+
+    /// The command's name and shortcut, as the hover hint shows them.
+    pub fn hint(self) -> (&'static str, &'static str) {
+        match self {
+            Button::Minimize => ("Minimize Window", "Alt+M"),
+            Button::Maximize => ("Toggle Fullscreen", "F11"),
+            Button::Close => ("Close Window", "Alt+F4"),
+        }
+    }
+}
+
+/// The panel frame of a caption bar: no margin, so the window buttons reach
+/// the window's edges; `show` pads the contents itself.
+pub fn frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::side_top_panel(style).inner_margin(egui::Margin::ZERO)
+}
+
+/// Room around the bar's contents (the margin an ordinary top panel has).
+const PADDING: egui::Margin = egui::Margin::symmetric(8, 2);
+
+/// Width of each window button.
+const BUTTON_WIDTH: f32 = 42.0;
+
+/// The close button's fill under the pointer, and when pressed.
+const CLOSE_HOVER: egui::Color32 = egui::Color32::from_rgb(0xC4, 0x2B, 0x1C);
+const CLOSE_PRESSED: egui::Color32 = egui::Color32::from_rgb(0x9E, 0x22, 0x16);
+
 /// Whether the window fills the screen's work area now.
 pub fn maximized(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.viewport().maximized.unwrap_or(false))
 }
 
+/// Minimizes the window (Alt+M, and the first window button).
+pub fn minimize(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+}
+
+/// Maximizes the window, or restores it when it is maximized (F11, the second
+/// window button, a double click on the bar).
+pub fn toggle_maximized(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized(ctx)));
+}
+
+/// Closes the window the way the app always does: eframe then runs `on_exit`,
+/// which saves the settings.
+pub fn close(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(ViewportCommand::Close);
+}
+
+/// One window button in `rect`: the hover fill (red for close), then its glyph
+/// painted. Not a Tab stop: each has its shortcut. True when clicked.
+fn window_button(ui: &mut egui::Ui, button: Button, rect: egui::Rect) -> bool {
+    // Drag too, so a press that wanders off the button is not the bar's drag.
+    let response = ui.interact(rect, button.id(), egui::Sense::CLICK | egui::Sense::DRAG);
+    let close = button == Button::Close;
+    let fill = match (response.is_pointer_button_down_on(), response.hovered()) {
+        (true, _) if close => Some(CLOSE_PRESSED),
+        (_, true) if close => Some(CLOSE_HOVER),
+        (true, _) => Some(ui.visuals().widgets.active.weak_bg_fill),
+        (_, true) => Some(ui.visuals().widgets.hovered.weak_bg_fill),
+        _ => None,
+    };
+    if let Some(fill) = fill {
+        ui.painter().rect_filled(rect, 0, fill);
+    }
+    let color = match (response.hovered(), close) {
+        (true, true) => egui::Color32::WHITE,
+        (true, false) => ui.visuals().strong_text_color(),
+        _ => ui.visuals().text_color(),
+    };
+    let glyph = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(24.0));
+    match button {
+        Button::Minimize => crate::ui::icons::paint_minimize(ui.painter(), glyph, color),
+        Button::Maximize if maximized(ui.ctx()) => crate::ui::icons::paint_restore(ui.painter(), glyph, color),
+        Button::Maximize => crate::ui::icons::paint_maximize(ui.painter(), glyph, color),
+        Button::Close => crate::ui::icons::paint_close(ui.painter(), glyph, color),
+    }
+    let (name, shortcut) = button.hint();
+    crate::ui::app_menu::command_hint(response, name, shortcut).clicked()
+}
+
 /// Draws `contents` in the caption bar, whose empty space moves the window
 /// (a press and a short drag) and maximizes or restores it on a double click.
+/// The window buttons end the bar; the contents never reach under them.
 pub fn show<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let bar_rect = ui.max_rect();
     // Sensed before the contents, so every control drawn on top keeps its own clicks;
     // not focusable, so the bar is no Tab stop.
-    let bar = ui.interact(ui.max_rect(), bar_id(), egui::Sense::CLICK | egui::Sense::DRAG);
-    let inner = contents(ui);
+    let bar = ui.interact(bar_rect, bar_id(), egui::Sense::CLICK | egui::Sense::DRAG);
+    let buttons_left = bar_rect.right() - BUTTON_WIDTH * Button::ALL.len() as f32;
+    let room = egui::Rect::from_min_max(bar_rect.min, egui::pos2(buttons_left, bar_rect.bottom()));
+    let inside = ui.scope_builder(egui::UiBuilder::new().max_rect(room), |ui| egui::Frame::new().inner_margin(PADDING).show(ui, contents).inner);
+    let mut x = buttons_left;
+    for button in Button::ALL {
+        let rect = egui::Rect::from_min_size(egui::pos2(x, bar_rect.top()), egui::vec2(BUTTON_WIDTH, inside.response.rect.height()));
+        if window_button(ui, button, rect) {
+            let ctx = ui.ctx();
+            match button {
+                Button::Minimize => minimize(ctx),
+                Button::Maximize => toggle_maximized(ctx),
+                Button::Close => close(ctx),
+            }
+        }
+        x += BUTTON_WIDTH;
+    }
     let ctx = ui.ctx();
     if bar.double_clicked() {
-        ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized(ctx)));
+        toggle_maximized(ctx);
     } else if bar.drag_started_by(egui::PointerButton::Primary) {
         ctx.send_viewport_cmd(ViewportCommand::StartDrag);
     }
-    inner
+    inside.inner
 }
 
 /// Which way the window's border at `pos` resizes it, if `pos` is on it.
@@ -120,18 +227,30 @@ mod tests {
     fn window_and_cursor(ctx: &egui::Context, maximized: bool, events: Vec<Event>) -> (Vec<ViewportCommand>, bool, CursorIcon) {
         let mut input = RawInput { events, screen_rect: Some(SCREEN), ..RawInput::default() };
         input.viewports.entry(egui::ViewportId::ROOT).or_default().maximized = Some(maximized);
+        let (output, clicked) = draw(ctx, input);
+        let commands = output.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.commands.clone()).unwrap_or_default();
+        (commands, clicked, output.platform_output.cursor_icon)
+    }
+
+    /// Runs `input` through the caption bar and the edges, as the app does.
+    fn draw(ctx: &egui::Context, input: RawInput) -> (egui::FullOutput, bool) {
         let mut clicked = false;
         let mut output = ctx.run_ui(input, |root| {
-            egui::Panel::top("caption").show(root, |ui| {
+            egui::Panel::top("caption").frame(frame(root.style())).show(root, |ui| {
                 show(ui, |ui| {
+                    // Where the contents may reach, for the tests that check the buttons' room.
+                    ui.ctx().data_mut(|d| d.insert_temp(content_right_id(), ui.max_rect().right()));
                     ui.horizontal(|ui| clicked = ui.button("tab").clicked());
                 })
             });
             resize_edges(root.ctx());
         });
         output.textures_delta.clear();
-        let commands = output.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.commands.clone()).unwrap_or_default();
-        (commands, clicked, output.platform_output.cursor_icon)
+        (output, clicked)
+    }
+
+    fn content_right_id() -> egui::Id {
+        egui::Id::new("caption_test_content_right")
     }
 
     fn press(at: Pos2, pressed: bool) -> Event {
@@ -234,5 +353,98 @@ mod tests {
         window(&ctx, true, vec![Event::PointerMoved(at)]);
         let (commands, _) = window(&ctx, true, vec![press(at, true)]);
         assert!(!commands.iter().any(|c| matches!(c, ViewportCommand::BeginResize(_))), "{commands:?}");
+    }
+
+    /// The middle of `button`, once the bar was drawn.
+    fn center(ctx: &egui::Context, button: Button) -> Pos2 {
+        ctx.read_response(button.id()).expect("the button was drawn").rect.center()
+    }
+
+    #[test]
+    fn each_window_button_sends_its_command_and_starts_no_drag() {
+        let cases = [
+            (Button::Minimize, false, ViewportCommand::Minimized(true)),
+            (Button::Maximize, false, ViewportCommand::Maximized(true)),
+            (Button::Maximize, true, ViewportCommand::Maximized(false)),
+            (Button::Close, false, ViewportCommand::Close),
+        ];
+        for (button, maximized, wanted) in cases {
+            let ctx = egui::Context::default();
+            window(&ctx, maximized, vec![]);
+            let at = center(&ctx, button);
+            window(&ctx, maximized, vec![Event::PointerMoved(at)]);
+            let mut commands = window(&ctx, maximized, vec![press(at, true)]).0;
+            assert!(commands.is_empty(), "{button:?} acts on the release, not the press: {commands:?}");
+            commands.extend(window(&ctx, maximized, vec![press(at, false)]).0);
+            assert_eq!(commands.iter().filter(|c| **c == wanted).count(), 1, "{button:?} maximized {maximized}: {commands:?}");
+            assert_eq!(commands.len(), 1, "{button:?} asks for that and nothing else: {commands:?}");
+        }
+    }
+
+    #[test]
+    fn dragging_from_a_window_button_moves_nothing() {
+        for button in Button::ALL {
+            let ctx = egui::Context::default();
+            window(&ctx, false, vec![]);
+            let at = center(&ctx, button);
+            window(&ctx, false, vec![Event::PointerMoved(at)]);
+            let mut commands = window(&ctx, false, vec![press(at, true)]).0;
+            commands.extend(window(&ctx, false, vec![Event::PointerMoved(at - egui::vec2(25.0, 0.0))]).0);
+            assert!(commands.is_empty(), "{button:?}: {commands:?}");
+        }
+    }
+
+    #[test]
+    fn the_buttons_end_the_bar_and_the_contents_stop_before_them() {
+        let ctx = egui::Context::default();
+        window(&ctx, false, vec![]);
+        let [min, max, close] = Button::ALL.map(|b| ctx.read_response(b.id()).expect("the button was drawn").rect);
+        assert_eq!(close.right(), SCREEN.right(), "the close button is flush with the window's edge");
+        assert_eq!((min.right(), max.right()), (max.left(), close.left()), "side by side, minimize first");
+        assert!(min.width() > 20.0 && min.height() > 20.0, "big enough to hit: {min:?}");
+        assert_eq!((min.top(), max.top(), close.top()), (SCREEN.top(), SCREEN.top(), SCREEN.top()), "from the window's top");
+        let content_right = ctx.data(|d| d.get_temp::<f32>(content_right_id())).expect("the contents were drawn");
+        assert!(content_right <= min.left(), "the contents end at {content_right}, the buttons start at {}", min.left());
+    }
+
+    #[test]
+    fn the_window_buttons_are_no_tab_stops() {
+        let ctx = egui::Context::default();
+        window(&ctx, false, vec![]);
+        for button in Button::ALL {
+            let sense = ctx.read_response(button.id()).expect("the button was drawn").sense;
+            assert!(!sense.is_focusable(), "{button:?} has its shortcut instead of a Tab stop");
+        }
+    }
+
+    #[test]
+    fn hovering_a_window_button_names_its_command_and_shortcut() {
+        assert_eq!(Button::Minimize.hint(), ("Minimize Window", "Alt+M"));
+        assert_eq!(Button::Maximize.hint(), ("Toggle Fullscreen", "F11"));
+        assert_eq!(Button::Close.hint(), ("Close Window", "Alt+F4"));
+        for button in Button::ALL {
+            let ctx = egui::Context::default();
+            ctx.all_styles_mut(|s| s.interaction.tooltip_delay = 0.0);
+            window(&ctx, false, vec![]);
+            let at = center(&ctx, button);
+            let mut texts = Vec::new();
+            for time in 1..6 {
+                let events = if time == 1 { vec![Event::PointerMoved(at)] } else { vec![] };
+                let input = RawInput { events, screen_rect: Some(SCREEN), time: Some(f64::from(time)), ..RawInput::default() };
+                let (output, _) = draw(&ctx, input);
+                texts = output
+                    .shapes
+                    .iter()
+                    .filter_map(|s| match &s.shape {
+                        egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                        _ => None,
+                    })
+                    .collect();
+            }
+            let (name, shortcut) = button.hint();
+            for wanted in ["Cmd:", name, shortcut] {
+                assert!(texts.iter().any(|t| t == wanted), "{button:?}: {wanted:?} in {texts:?}");
+            }
+        }
     }
 }
