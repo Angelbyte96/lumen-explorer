@@ -8,8 +8,8 @@ Lumen is free and open source (MIT). Download it from
 [GitHub Releases](https://github.com/Angelbyte96/lumen-explorer/releases):
 
 - `lumen-<version>-windows-x86_64.exe`: Windows 10/11, portable: run it from
-  any folder (Install is held back until the `.exe` is signed, see
-  [Lumen Setup](#lumen-setup)).
+  any folder (until the `.exe` is signed, Install is a PowerShell script Setup
+  copies for you, see [Lumen Setup](#lumen-setup)).
 - `lumen_<version>_amd64.deb`: Ubuntu 24.04 or later, Debian 13.
 - `lumen-<version>-linux-x86_64.tar.gz`: any x86_64 Linux.
 
@@ -44,21 +44,27 @@ Uninstall removes Lumen, its menu entry and every switch; your settings
 (bookmarks, tabs) stay. Turning Set as default off gives folders back to the
 desktop's own file manager.
 
-On Windows, Install and Modify are held back until the release `.exe` is
-code-signed: Microsoft Defender flags an unsigned program that copies itself
-into `%LOCALAPPDATA%` and adds shortcuts (`Trojan:Win32/Bearfoos.A!ml`), and
-quarantines it. Until then the `.exe` runs portable, ☰ ▸ Lumen Setup is
-greyed, and Lumen does not open Setup by itself. A Lumen installed by an
-earlier release still opens Setup, from the menu or from Settings ▸ Apps, to
-uninstall it. Windows SmartScreen may warn before the first run: More info ▸
-Run anyway.
+On Windows, until the release `.exe` is code-signed, Setup does not install or
+change anything itself: Microsoft Defender flags an unsigned program that
+copies itself into `%LOCALAPPDATA%` and adds shortcuts
+(`Trojan:Win32/Bearfoos.A!ml`), and quarantines it. Instead, **Copy install
+script** (Lumen not installed) and **Copy script** (Lumen installed, in
+Modify's place; it holds only the switches you changed, on or off) put a
+PowerShell script on the clipboard. Paste it into PowerShell: it needs no admin
+rights and touches only your user's registry (HKCU) and folders. It does what
+Install or Modify would do, with the same keys and files, and Add to PATH keeps
+the `%VARIABLES%` already in your `Path` (it never uses `setx`). Reopen Setup
+afterwards to see the switches as the machine has them. Uninstall still works
+from Lumen itself, and the first start opens Setup. Windows SmartScreen may
+warn before the first run: More info ▸ Run anyway.
 
 To install a release:
 
 - Windows: double-click `lumen-<version>-windows-x86_64.exe`; it runs from
-  where it is (see above). Once signed, the first start opens Setup again:
-  Install copies it to `%LOCALAPPDATA%\Lumen` and adds it to the Start menu
-  and to Settings ▸ Apps, where Uninstall opens Setup again.
+  where it is, and the first start opens Setup. Copy install script and paste
+  it into PowerShell: it copies the `.exe` to `%LOCALAPPDATA%\Lumen` and adds
+  it to the Start menu and to Settings ▸ Apps, where Uninstall opens Setup
+  again.
 - Linux: a downloaded program cannot be started with a double click, so the
   first start is from a terminal, once:
 

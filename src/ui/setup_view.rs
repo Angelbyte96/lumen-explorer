@@ -2,6 +2,7 @@
 //! version, where Lumen is installed, four switches, then Modify (or
 //! Install), Uninstall and Back. What the switches do is the platform's
 //! [`System`]; this only shows the machine's state and asks for changes.
+//! While Install is held, Modify and Install copy a script instead.
 
 use std::path::PathBuf;
 
@@ -18,8 +19,11 @@ const LOGO: f32 = 132.0;
 /// The size of the big text buttons (Modify, Uninstall, Back).
 const BUTTON_TEXT: f32 = 22.0;
 
-/// Under the switches while Install is held ([`crate::setup::INSTALL_HELD`]).
-pub const HELD_NOTE: &str = "Install and Modify return once Lumen is code-signed; Uninstall works.";
+/// Above the buttons while Install is held ([`crate::setup::INSTALL_HELD`]).
+pub const HELD_NOTE: &str = "Lumen is not code-signed yet, so Setup copies a PowerShell script instead of changing Windows itself.";
+
+/// The note after a script went to the clipboard.
+pub const SCRIPT_COPIED: &str = "Script copied. Paste it into PowerShell (no admin rights needed), then reopen Lumen Setup.";
 
 /// What the user asked for, read by [`SetupScreen::handle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,8 +73,11 @@ pub struct SetupScreen {
     asking_uninstall: bool,
     /// The running copy was uninstalled: only Close is left.
     uninstalled: bool,
-    /// Install is held ([`crate::setup::INSTALL_HELD`]): nothing but Uninstall writes.
+    /// Install is held ([`crate::setup::INSTALL_HELD`]): only Uninstall writes;
+    /// Modify and Install copy a script for the user to run.
     held: bool,
+    /// A script waiting to go to the clipboard: the next frame copies it.
+    copy: Option<String>,
     logo: Option<egui::TextureHandle>,
 }
 
@@ -94,6 +101,7 @@ impl SetupScreen {
             asking_uninstall: false,
             uninstalled: false,
             held: false,
+            copy: None,
             logo: None,
         }
     }
@@ -109,6 +117,11 @@ impl SetupScreen {
     }
 
     #[cfg(test)]
+    pub fn copy(&self) -> Option<&str> {
+        self.copy.as_deref()
+    }
+
+    #[cfg(test)]
     pub fn note(&self) -> Option<&Note> {
         self.note.as_ref()
     }
@@ -119,9 +132,18 @@ impl SetupScreen {
         *self = Self {
             note,
             held: self.held,
+            copy: self.copy.take(),
             logo: self.logo.take(),
             ..Self::open(system)
         };
+    }
+
+    /// The folder Install copies Lumen to: the installed one, else as typed.
+    fn install_dir(&self) -> PathBuf {
+        match &self.origin {
+            Origin::Installed { record, .. } => record.dir.clone(),
+            _ => PathBuf::from(self.dir.trim()),
+        }
     }
 
     pub fn handle(&mut self, system: &dyn System, event: SetupEvent) -> Option<Outcome> {
@@ -131,7 +153,20 @@ impl SetupScreen {
             SetupEvent::OpenFolder => return Some(Outcome::OpenFolder(PathBuf::from(&self.dir))),
             SetupEvent::AskUninstall => self.asking_uninstall = true,
             SetupEvent::CancelUninstall => self.asking_uninstall = false,
-            SetupEvent::Modify | SetupEvent::Install if self.held => {}
+            SetupEvent::Modify | SetupEvent::Install if self.held => {
+                let script = if event == SetupEvent::Modify {
+                    system.apply_script(self.want)
+                } else {
+                    system.install_script(&self.install_dir(), self.want)
+                };
+                self.note = Some(match script {
+                    Ok(script) => {
+                        self.copy = Some(script);
+                        Note::Done(SCRIPT_COPIED.into())
+                    }
+                    Err(err) => Note::Failed(err),
+                });
+            }
             SetupEvent::Modify => {
                 self.note = Some(match system.apply(self.want) {
                     Ok(()) => Note::Done("Changes applied.".into()),
@@ -141,10 +176,7 @@ impl SetupScreen {
                 self.reload(system);
             }
             SetupEvent::Install => {
-                let dir = match &self.origin {
-                    Origin::Installed { record, .. } => record.dir.clone(),
-                    _ => PathBuf::from(self.dir.trim()),
-                };
+                let dir = self.install_dir();
                 let want = self.want;
                 self.note = Some(match system.install(&dir, want) {
                     Ok(()) => Note::Done(format!(
@@ -197,6 +229,9 @@ impl SetupScreen {
     /// Draws the screen; Escape is Back.
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<SetupEvent> {
         let mut event = None;
+        if let Some(script) = self.copy.take() {
+            ui.ctx().copy_text(script);
+        }
         let escape = !self.uninstalled
             && ui.ctx().memory(|m| m.focused().is_none())
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
@@ -314,7 +349,7 @@ impl SetupScreen {
 
     /// The four switches, two by two.
     fn switches(&mut self, ui: &mut egui::Ui) {
-        let off = self.uninstalled || self.held;
+        let off = self.uninstalled;
         let package = matches!(self.origin, Origin::Package { .. });
         // Centred by the width it had last frame: a grid knows its width only once drawn.
         let width_id = egui::Id::new("lumen_setup_switches_width");
@@ -355,22 +390,28 @@ impl SetupScreen {
             };
             return event;
         }
+        // Held: the buttons that would write copy a script instead.
+        let held = self.held;
+        if held {
+            ui.label(HELD_NOTE);
+            ui.add_space(6.0);
+        }
         match &self.origin {
-            _ if self.held => {
-                ui.label(HELD_NOTE);
-            }
             Origin::NotInstalled { .. } => {
-                if big_button(ui, "Install", !self.dir.trim().is_empty()) {
+                let text = if held { "Copy install script" } else { "Install" };
+                if big_button(ui, text, !self.dir.trim().is_empty()) {
                     event = Some(SetupEvent::Install);
                 }
             }
             Origin::Installed { record, running_it } => {
-                if big_button(ui, "Modify", self.want != self.now) {
+                let text = if held { "Copy script" } else { "Modify" };
+                if big_button(ui, text, self.want != self.now) {
                     event = Some(SetupEvent::Modify);
                 };
                 if !running_it {
                     let text = format!(
-                        "Install this copy (v{}) over v{}",
+                        "{} this copy (v{}) over v{}",
+                        if held { "Copy script to install" } else { "Install" },
                         env!("CARGO_PKG_VERSION"),
                         record.version
                     );
@@ -539,6 +580,10 @@ mod tests {
         /// What apply leaves on despite being asked (a failing switch).
         stuck: Option<Switches>,
         calls: RefCell<Vec<String>>,
+        /// The scripts asked for, apart from what was really done.
+        scripts: RefCell<Vec<String>>,
+        /// Why a script cannot be made.
+        script_err: Option<String>,
     }
 
     impl Fake {
@@ -548,6 +593,8 @@ mod tests {
                 has: RefCell::new(has),
                 stuck: None,
                 calls: RefCell::new(Vec::new()),
+                scripts: RefCell::new(Vec::new()),
+                script_err: None,
             }
         }
     }
@@ -591,6 +638,20 @@ mod tests {
             };
             *self.has.borrow_mut() = want;
             Ok(())
+        }
+        fn install_script(&self, dir: &Path, want: Switches) -> Result<String, String> {
+            self.scripts.borrow_mut().push(format!("install_script {}", dir.display()));
+            match &self.script_err {
+                Some(err) => Err(err.clone()),
+                None => Ok(format!("install {} {want:?}", dir.display())),
+            }
+        }
+        fn apply_script(&self, want: Switches) -> Result<String, String> {
+            self.scripts.borrow_mut().push("apply_script".into());
+            match &self.script_err {
+                Some(err) => Err(err.clone()),
+                None => Ok(format!("apply {want:?}")),
+            }
         }
         fn uninstall(&self) -> Result<(), String> {
             self.calls.borrow_mut().push("uninstall".into());
@@ -804,21 +865,51 @@ mod tests {
         assert!(screen.want.desktop_shortcut);
     }
 
+    fn not_installed_fake() -> Fake {
+        Fake::new(
+            Origin::NotInstalled {
+                default_dir: PathBuf::from("/home/me/.local/share/lumen"),
+            },
+            Switches::default(),
+        )
+    }
+
+    /// The texts one frame of the screen sent to the clipboard.
+    fn copied_in_a_frame(screen: &mut SetupScreen) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        let mut output = ctx.run_ui(input, |root| {
+            egui::CentralPanel::default().show(root, |ui| screen.show(ui));
+        });
+        output.textures_delta.clear();
+        output
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn while_install_is_held_an_installed_lumen_can_only_uninstall() {
+    fn while_install_is_held_an_installed_lumen_copies_scripts_and_can_uninstall() {
         let fake = installed(false, Switches::INSTALL);
         let mut screen = SetupScreen::open(&fake).held(true);
         screen.want.desktop_shortcut = true;
         let shown = texts(&mut screen);
-        for line in ["Installed version 0.6.0.", "Uninstall", "Back", HELD_NOTE] {
+        let over = format!("Copy script to install this copy (v{}) over v0.6.0", env!("CARGO_PKG_VERSION"));
+        for line in ["Installed version 0.6.0.", "Copy script", over.as_str(), "Uninstall", "Back", HELD_NOTE] {
             assert!(shown.split('|').any(|t| t == line), "{line} missing from {shown}");
         }
         assert!(!shown.split('|').any(|t| t == "Modify"), "{shown}");
         assert!(!shown.contains("Install this copy"), "{shown}");
-        // Neither runs, even if asked: nothing is written.
-        assert_eq!(screen.handle(&fake, SetupEvent::Modify), None);
-        assert_eq!(screen.handle(&fake, SetupEvent::Install), None);
+        // Nothing is written to the machine, whatever is asked.
+        screen.handle(&fake, SetupEvent::Modify);
+        screen.handle(&fake, SetupEvent::Install);
         assert!(fake.calls.borrow().is_empty(), "{:?}", fake.calls.borrow());
+        assert_eq!(*fake.scripts.borrow(), ["apply_script", "install_script /home/me/.local/share/lumen"]);
         // Uninstall still works.
         screen.handle(&fake, SetupEvent::Uninstall);
         assert_eq!(*fake.calls.borrow(), ["uninstall"]);
@@ -831,9 +922,79 @@ mod tests {
         // Uninstalled from another copy: the screen reloads as not installed.
         screen.handle(&fake, SetupEvent::Uninstall);
         let shown = texts(&mut screen);
+        assert!(shown.split('|').any(|t| t == "Copy install script"), "{shown}");
         assert!(!shown.split('|').any(|t| t == "Install"), "{shown}");
+        screen.handle(&fake, SetupEvent::Install);
+        assert_eq!(*fake.calls.borrow(), ["uninstall"], "a script, not an install");
+        assert_eq!(fake.scripts.borrow().len(), 1);
+    }
+
+    #[test]
+    fn held_not_installed_offers_to_copy_the_install_script() {
+        let mut screen = SetupScreen::open(&not_installed_fake()).held(true);
+        let shown = texts(&mut screen);
+        for line in ["Install Path:", "Copy install script", "Back", HELD_NOTE] {
+            assert!(shown.split('|').any(|t| t == line), "{line} missing from {shown}");
+        }
+        assert!(!shown.split('|').any(|t| t == "Install" || t == "Modify" || t == "Uninstall"), "{shown}");
+    }
+
+    #[test]
+    fn held_copy_script_copies_what_apply_script_made_and_applies_nothing() {
+        let fake = installed(true, Switches::default());
+        let mut screen = SetupScreen::open(&fake).held(true);
+        screen.want.default = true;
+        let want = screen.want;
+        assert_eq!(screen.handle(&fake, SetupEvent::Modify), None);
+        assert_eq!(screen.copy(), Some(format!("apply {want:?}").as_str()));
+        assert_eq!(screen.note(), Some(&Note::Done(SCRIPT_COPIED.into())));
+        assert!(fake.calls.borrow().is_empty(), "apply never ran: {:?}", fake.calls.borrow());
+        assert_eq!(fake.read(), Switches::default(), "the machine is as it was");
+        assert_eq!(screen.want, want, "the switches stay as chosen, no reload");
+        // The next frame copies it, once.
+        assert_eq!(copied_in_a_frame(&mut screen), [format!("apply {want:?}")]);
+        assert_eq!(screen.copy(), None);
+        assert!(copied_in_a_frame(&mut screen).is_empty(), "only once");
+    }
+
+    #[test]
+    fn held_copy_install_script_uses_the_typed_folder_and_the_chosen_switches() {
+        let fake = not_installed_fake();
+        let mut screen = SetupScreen::open(&fake).held(true);
+        let typed = format!(" {} ", apps_dir().display());
+        screen.dir = typed.clone();
+        screen.want.desktop_shortcut = true;
+        let want = screen.want;
         assert_eq!(screen.handle(&fake, SetupEvent::Install), None);
-        assert_eq!(*fake.calls.borrow(), ["uninstall"]);
+        assert_eq!(screen.copy(), Some(format!("install {} {want:?}", apps_dir().display()).as_str()));
+        assert_eq!(screen.note(), Some(&Note::Done(SCRIPT_COPIED.into())));
+        assert_eq!(*fake.scripts.borrow(), [format!("install_script {}", apps_dir().display())]);
+        assert!(fake.calls.borrow().is_empty(), "install never ran: {:?}", fake.calls.borrow());
+        assert!(matches!(screen.origin(), Origin::NotInstalled { .. }), "nothing was installed");
+        assert_eq!((screen.dir, screen.want), (typed, want), "what was typed and chosen stays");
+    }
+
+    #[test]
+    fn a_script_that_cannot_be_made_shows_why_and_copies_nothing() {
+        let mut fake = installed(true, Switches::default());
+        fake.script_err = Some("Cannot read the registry".into());
+        let mut screen = SetupScreen::open(&fake).held(true);
+        screen.want.default = true;
+        screen.handle(&fake, SetupEvent::Modify);
+        assert_eq!(screen.note(), Some(&Note::Failed("Cannot read the registry".into())));
+        assert_eq!(screen.copy(), None);
+        assert!(copied_in_a_frame(&mut screen).is_empty());
+        assert!(screen.want.default, "the switches stay as chosen");
+    }
+
+    #[test]
+    fn the_switches_work_while_install_is_held() {
+        let mut screen = SetupScreen::open(&installed(true, Switches::default())).held(true);
+        let ctx = egui::Context::default();
+        settle(&ctx, &mut screen);
+        let rect = ctx.read_response(toggle_id("Desktop shortcut:")).expect("the switch was drawn").rect;
+        crate::ui::testing::click(&ctx, rect.center(), |ui| screen.show(ui));
+        assert!(screen.want.desktop_shortcut);
     }
 
     #[test]

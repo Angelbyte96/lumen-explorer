@@ -43,15 +43,10 @@ pub enum Origin {
 
 /// Windows holds Install back until its releases are code-signed: Defender's
 /// machine learning flags an unsigned exe that copies itself into AppData
-/// and adds shortcuts (Trojan:Win32/Bearfoos.A!ml), and quarantines it. A copy
-/// installed before keeps Setup, to uninstall. Set to false once signed.
+/// and adds shortcuts (Trojan:Win32/Bearfoos.A!ml), and quarantines it. Setup
+/// still opens: it copies a script for the user to run instead, and Uninstall
+/// works. Set to false once signed.
 pub const INSTALL_HELD: bool = cfg!(windows);
-
-/// Whether Setup opens for `origin`: while Install is `held`, only for a
-/// Lumen already installed.
-pub fn opens(origin: &Origin, held: bool) -> bool {
-    !held || matches!(origin, Origin::Installed { .. })
-}
 
 /// What Install remembers, in the file `install` next to the settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +123,15 @@ pub trait System {
     /// Removes the installed copy, its menu entry and every switch. The
     /// settings (bookmarks, tabs) stay.
     fn uninstall(&self) -> Result<(), String>;
+    /// A script for the user to run that does what [`Self::install`] would:
+    /// what Setup offers while Install is held ([`INSTALL_HELD`]).
+    fn install_script(&self, _dir: &Path, _want: Switches) -> Result<String, String> {
+        Err("Lumen installs itself here".into())
+    }
+    /// A script for the user to run that does what [`Self::apply`] would.
+    fn apply_script(&self, _want: Switches) -> Result<String, String> {
+        Err("Lumen changes the switches itself here".into())
+    }
 }
 
 /// Writes `bytes` to `path` through a temporary file beside it, so a failed
@@ -175,19 +179,6 @@ pub fn copy_binary(exe: &Path, dir: &Path, name: &str) -> std::io::Result<PathBu
 mod tests {
     use super::*;
     use crate::fs::ops::tests::fresh_fixture;
-
-    #[test]
-    fn while_install_is_held_only_an_installed_lumen_opens_setup() {
-        let record = Record { dir: PathBuf::from("/home/me/.local/share/lumen"), version: "0.7.0".into() };
-        let installed = Origin::Installed { record, running_it: false };
-        let not_installed = Origin::NotInstalled { default_dir: PathBuf::from("/home/me/.local/share/lumen") };
-        let package = Origin::Package { exe: PathBuf::from("/usr/bin/lumen") };
-        assert!(opens(&installed, true), "an installed copy keeps Setup, to uninstall");
-        assert!(!opens(&not_installed, true), "nothing to install while held");
-        for origin in [&installed, &not_installed, &package] {
-            assert!(opens(origin, false), "not held: Setup opens as before for {origin:?}");
-        }
-    }
 
     #[test]
     fn a_record_reads_back_what_it_wrote() {
