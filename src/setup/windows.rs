@@ -41,6 +41,56 @@ const PUBLISHER: &str = "Lumen";
 const SETUP_FLAG: &str = "--setup";
 /// How long each window may take to answer the PATH change broadcast.
 const BROADCAST_TIMEOUT_MS: u32 = 1000;
+/// What a Setup script prints when it ran to the end.
+const SCRIPT_DONE: &str = "Lumen: done. Reopen Lumen Setup to see the switches.";
+/// The functions a Setup script's steps call. Through .NET's registry, as
+/// `write_value` and the rest: PowerShell's `New-Item -Force` would empty a
+/// key that exists. PATH keeps its value's type and its %VARIABLES%, which
+/// `[Environment]::SetEnvironmentVariable` expands and turns into REG_SZ.
+const SCRIPT_HELPERS: &str = r#"    $ErrorActionPreference = 'Stop'
+    $hkcu = [Microsoft.Win32.Registry]::CurrentUser
+    function Set-Text([string]$key, [string]$name, [string]$value) { $k = $hkcu.CreateSubKey($key); $k.SetValue($name, $value, 'String'); $k.Close() }
+    function Set-Dword([string]$key, [string]$name, [int]$value) { $k = $hkcu.CreateSubKey($key); $k.SetValue($name, $value, 'DWord'); $k.Close() }
+    function Remove-Key([string]$key) { $hkcu.DeleteSubKeyTree($key, $false) }
+    function Remove-Default([string]$key, [string]$verb) {
+        $k = $hkcu.OpenSubKey($key, $true)
+        if ($k) { if ($k.GetValue('') -eq $verb) { $k.DeleteValue('') }; $k.Close() }
+    }
+    function Remove-File([string]$file) { if ([IO.File]::Exists($file)) { [IO.File]::Delete($file) } }
+    function Set-Shortcut([string]$link, [string]$target) {
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($link)) | Out-Null
+        $s = (New-Object -ComObject WScript.Shell).CreateShortcut($link)
+        $s.TargetPath = $target; $s.WorkingDirectory = [IO.Path]::GetDirectoryName($target)
+        $s.IconLocation = "$target,0"; $s.Description = 'Lumen'; $s.Save()
+    }
+    function Write-Record([string]$file, [string]$text) {
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($file)) | Out-Null
+        [IO.File]::WriteAllText($file, $text)
+    }
+    function Set-PathEntry([string]$key, [string]$dir, [bool]$on) {
+        $k = $hkcu.CreateSubKey($key)
+        $kind = 'ExpandString'; $old = ''
+        if ($k.GetValueNames() -contains 'Path') {
+            $kind = $k.GetValueKind('Path')
+            if ($kind -ne 'String' -and $kind -ne 'ExpandString') { throw "HKCU\$key Path is not text" }
+            $old = [string]$k.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+        }
+        $plain = { param($e) $e.Trim().TrimEnd('\', '/').ToLowerInvariant() }
+        $entries = New-Object 'Collections.Generic.List[string]'
+        if ($old -ne '') { $entries.AddRange([string[]]($old -split ';')) }
+        $has = @($entries | Where-Object { (& $plain $_) -eq (& $plain $dir) }).Count -gt 0
+        if ($on -and -not $has) {
+            if ($entries.Count -gt 0 -and $entries[$entries.Count - 1] -eq '') { $entries.RemoveAt($entries.Count - 1) }
+            $entries.Add($dir)
+        } elseif (-not $on -and $has) {
+            $kept = New-Object 'Collections.Generic.List[string]'
+            foreach ($e in $entries) { if ((& $plain $e) -ne (& $plain $dir)) { $kept.Add($e) } }
+            $entries = $kept
+        } else { $k.Close(); return }
+        $k.SetValue('Path', ($entries -join ';'), $kind)
+        $k.Close()
+    }
+"#;
 
 pub struct Windows {
     /// The running binary.
@@ -226,15 +276,51 @@ impl System for Windows {
     }
 
     fn read(&self) -> Switches {
-        let Some(dir) = self.installed_dir() else { return Switches::default() };
-        let default = read_value(&self.classes(r"Directory\shell"), "");
-        let path = read_value(&self.environment, "Path");
-        Switches {
-            desktop_shortcut: self.desktop_link().is_some_and(|file| file.is_file()),
-            default: matches!(default, Ok(Some((verb, _))) if verb == DEFAULT_VERB),
-            right_click: key_exists(&self.right_click_keys()[0].0),
-            path: matches!(path, Ok(Some((value, _))) if path_has(&value, &dir.to_string_lossy())),
+        match self.installed_dir() {
+            Some(dir) => self.read_at(&dir),
+            None => Switches::default(),
         }
+    }
+
+    fn install_script(&self, dir: &Path, want: Switches) -> Result<String, String> {
+        if !dir.is_absolute() {
+            return Err(format!("Choose a full path, not {}", dir.display()));
+        }
+        let record_file = self.record_file.as_deref().ok_or("Lumen has no settings folder to remember the install in")?;
+        let shown = quotable(&dir.join(BINARY))?;
+        let binary = dir.join(BINARY);
+        let kb = std::fs::metadata(&self.exe).map(|meta| meta.len().div_ceil(1024)).unwrap_or(0);
+        let mut body = vec!["# Copy Lumen, add it to the Start menu and to Settings > Apps".to_owned()];
+        if !super::same_file(&self.exe, &binary) {
+            body.push(format!("[IO.Directory]::CreateDirectory({}) | Out-Null", ps(&text(dir)?)));
+            body.push(format!("[IO.File]::Copy({}, {}, $true)", ps(&text(&self.exe)?), ps(&shown)));
+        }
+        body.push(format!("Set-Shortcut {} {}", ps(&text(&self.start_menu_link())?), ps(&shown)));
+        let key = ps(&self.uninstall_key());
+        for (name, value) in [
+            ("DisplayName", "Lumen".to_owned()),
+            ("DisplayVersion", env!("CARGO_PKG_VERSION").to_owned()),
+            ("Publisher", PUBLISHER.to_owned()),
+            ("DisplayIcon", shown.clone()),
+            ("InstallLocation", text(dir)?),
+            ("UninstallString", format!("\"{shown}\" {SETUP_FLAG}")),
+        ] {
+            body.push(format!("Set-Text {key} '{name}' {}", ps(&value)));
+        }
+        for (name, value) in [("NoModify", 1), ("NoRepair", 1), ("EstimatedSize", u32::try_from(kb).unwrap_or(u32::MAX))] {
+            body.push(format!("Set-Dword {key} '{name}' {value}"));
+        }
+        let record = Record { dir: dir.to_path_buf(), version: env!("CARGO_PKG_VERSION").into() }.to_text();
+        body.push(format!("Write-Record {} {}", ps(&text(record_file)?), ps(&record)));
+        // As install's apply: from what the machine has for that folder.
+        body.extend(self.switch_steps(self.read_at(dir), want, dir)?);
+        Ok(self.script("install Lumen", &body))
+    }
+
+    fn apply_script(&self, want: Switches) -> Result<String, String> {
+        let dir = self.installed_dir().ok_or("Lumen is not installed")?;
+        let body = self.switch_steps(self.read(), want, &dir)?;
+        Ok(self.script("change the switches", &body))
     }
 
     fn apply(&self, want: Switches) -> Result<(), String> {
@@ -308,6 +394,113 @@ impl System for Windows {
 }
 
 impl Windows {
+    /// The switches as the machine has them for a Lumen in `dir`.
+    fn read_at(&self, dir: &Path) -> Switches {
+        let default = read_value(&self.classes(r"Directory\shell"), "");
+        let path = read_value(&self.environment, "Path");
+        Switches {
+            desktop_shortcut: self.desktop_link().is_some_and(|file| file.is_file()),
+            default: matches!(default, Ok(Some((verb, _))) if verb == DEFAULT_VERB),
+            right_click: key_exists(&self.right_click_keys()[0].0),
+            path: matches!(path, Ok(Some((value, _))) if path_has(&value, &dir.to_string_lossy())),
+        }
+    }
+
+    /// The script lines that turn each switch from `now` to `want`, writing
+    /// what `apply` writes, for a Lumen in `dir`.
+    fn switch_steps(&self, now: Switches, want: Switches, dir: &Path) -> Result<Vec<String>, String> {
+        let target = quotable(&dir.join(BINARY))?;
+        let exe = ps(&target);
+        let mut body = Vec::new();
+        let mut step = |name: &str, on: bool| body.push(format!("# {name}: {}", if on { "on" } else { "off" }));
+        let mut lines = Vec::new();
+        if want.desktop_shortcut != now.desktop_shortcut {
+            step("Desktop shortcut", want.desktop_shortcut);
+            match (self.desktop_link(), want.desktop_shortcut) {
+                (None, true) => return Err("This PC has no Desktop folder".into()),
+                (None, false) => {}
+                (Some(link), true) => lines.push(vec![format!("Set-Shortcut {} {exe}", ps(&text(&link)?))]),
+                (Some(link), false) => lines.push(vec![format!("Remove-File {}", ps(&text(&link)?))]),
+            }
+        }
+        if want.default != now.default {
+            step("Set as default", want.default);
+            let mut part = Vec::new();
+            for kind in ["Directory", "Drive"] {
+                let shell = self.classes(&format!(r"{kind}\shell"));
+                if want.default {
+                    part.push(format!("Set-Text {} '' '{DEFAULT_VERB}'", ps(&shell)));
+                    part.push(format!("Set-Text {} 'ProgrammaticAccessOnly' ''", ps(&format!(r"{shell}\{DEFAULT_VERB}"))));
+                    part.push(format!("Set-Text {} '' {}", ps(&format!(r"{shell}\{DEFAULT_VERB}\command")), ps(&format!("\"{target}\" \"%1\""))));
+                } else {
+                    // Only a default that is Lumen's: another app's stays.
+                    part.push(format!("Remove-Default {} '{DEFAULT_VERB}'", ps(&shell)));
+                    part.push(format!("Remove-Key {}", ps(&format!(r"{shell}\{DEFAULT_VERB}"))));
+                }
+            }
+            if want.default {
+                // Win+E opens a new window through this class's verb.
+                let verb = ps(&self.classes(&format!(r"CLSID\{EXPLORER_CLSID}\shell\opennewwindow\command")));
+                part.push(format!("Set-Text {verb} '' {}", ps(&format!("\"{target}\""))));
+                part.push(format!("Set-Text {verb} 'DelegateExecute' ''"));
+            } else {
+                part.push(format!("Remove-Key {}", ps(&self.classes(&format!(r"CLSID\{EXPLORER_CLSID}")))));
+            }
+            lines.push(part);
+        }
+        if want.right_click != now.right_click {
+            step("Right-click entries", want.right_click);
+            let mut part = Vec::new();
+            for (key, argument) in self.right_click_keys() {
+                if want.right_click {
+                    part.push(format!("Set-Text {} 'MUIVerb' {}", ps(&key), ps(RIGHT_CLICK_LABEL)));
+                    part.push(format!("Set-Text {} 'Icon' {exe}", ps(&key)));
+                    part.push(format!("Set-Text {} '' {}", ps(&format!(r"{key}\command")), ps(&format!("\"{target}\" \"{argument}\""))));
+                } else {
+                    part.push(format!("Remove-Key {}", ps(&key)));
+                }
+            }
+            lines.push(part);
+        }
+        if want.path != now.path {
+            step("Add to PATH", want.path);
+            let dir = text(dir)?;
+            if dir.contains(';') {
+                return Err(format!("A folder with a ; in its name cannot be on the PATH: {dir}"));
+            }
+            let mut part = vec![format!("Set-PathEntry {} {} ${}", ps(&self.environment), ps(&dir), want.path)];
+            if self.run_tools {
+                // Setting no variable still tells the running programs that the environment changed.
+                part.push("[Environment]::SetEnvironmentVariable('LumenSetupRefresh', $null, 'User')".into());
+            }
+            lines.push(part);
+        }
+        // Each step's comment, then its lines.
+        let comments = std::mem::take(&mut body);
+        for (comment, part) in comments.into_iter().zip(lines) {
+            body.push(comment);
+            body.extend(part);
+        }
+        Ok(body)
+    }
+
+    /// The whole script around `body`: one block, so a step that fails stops the rest.
+    fn script(&self, what: &str, body: &[String]) -> String {
+        let mut out = format!("# Lumen {} Setup: {what}. Paste it into PowerShell; it needs no admin rights.\n& {{\n", env!("CARGO_PKG_VERSION"));
+        out.push_str(SCRIPT_HELPERS);
+        out.push_str("    try {\n");
+        for line in body {
+            out.push_str("    ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str(&format!("    Write-Host {}\n", ps(SCRIPT_DONE)));
+        out.push_str("    } catch { Write-Host \"Lumen: stopped: $_\" -ForegroundColor Red }\n}\n");
+        out
+    }
+}
+
+impl Windows {
     /// The Apps & features entry. Its Uninstall button runs Lumen's Setup.
     fn register_uninstall(&self, dir: &Path, exe: &str, binary: &Path) -> Result<(), String> {
         let key = self.uninstall_key();
@@ -366,6 +559,32 @@ fn path_with(value: &str, dir: &str, on: bool) -> String {
         _ => return value.to_owned(),
     }
     entries.join(";")
+}
+
+/// `text` as a PowerShell string that takes it literally: in single quotes,
+/// its own quotes (and the typographic ones PowerShell also takes for
+/// quotes) doubled. A line break is written "`n" between the lines: pasted
+/// into the console, a string over several lines gets extra line breaks.
+fn ps(text: &str) -> String {
+    let quoted: Vec<String> = text
+        .split('\n')
+        .map(|line| {
+            let mut out = String::from("'");
+            for c in line.chars() {
+                if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+                    out.push(c);
+                }
+                out.push(c);
+            }
+            out.push('\'');
+            out
+        })
+        .collect();
+    match quoted.as_slice() {
+        [one] => one.clone(),
+        // In parentheses: a command's argument, not three.
+        lines => format!("({})", lines.join(" + \"`n\" + ")),
+    }
 }
 
 fn wide(text: impl AsRef<OsStr>) -> Vec<u16> {
@@ -896,6 +1115,123 @@ mod tests {
         assert!(!fixture.default_dir.exists(), "the install folder is gone at once");
         assert!(!exists(&win, r"Microsoft\Windows\CurrentVersion\Uninstall\Lumen"));
         assert_eq!(win.origin(), Origin::NotInstalled { default_dir: fixture.default_dir.clone() });
+    }
+
+    /// Runs `script` in Windows PowerShell 5.1, the one every Windows has;
+    /// its output, after checking it ran to the end.
+    fn run_script(name: &str, script: &str) -> String {
+        let file = fresh_fixture(name).join("pasted.ps1");
+        // With a BOM, or PowerShell 5.1 reads the file as ANSI.
+        std::fs::write(&file, ["\u{feff}", script].concat()).unwrap();
+        let out = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "{text}");
+        text
+    }
+
+    /// Runs a script Setup made: it says it is done, and nothing failed.
+    fn run_setup_script(name: &str, script: &str) {
+        let text = run_script(name, script);
+        assert!(text.contains(SCRIPT_DONE) && !text.contains("Lumen: stopped"), "{text}\n--- script:\n{script}");
+    }
+
+    /// Everything under the fixture's registry subkey, values and types.
+    fn registry(win: &Windows) -> String {
+        let out = std::process::Command::new("reg").args(["query", &format!(r"HKCU\{}", win.software), "/s"]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// The fixture's files under its home, but the scripts run from it.
+    fn files(fixture: &Fixture) -> Vec<String> {
+        fn walk(dir: &Path, home: &Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, home, out);
+                } else if path.extension().is_none_or(|ext| ext != "ps1") {
+                    let shown = path.strip_prefix(home).unwrap().display().to_string();
+                    // The record is text: what it says counts too.
+                    out.push(if path.file_name() == Some(OsStr::new("install")) { format!("{shown}: {}", std::fs::read_to_string(&path).unwrap()) } else { shown });
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&fixture.home, &fixture.home, &mut out);
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_script_string_keeps_every_quote_and_sign() {
+        let dir = fresh_fixture("setup-windows-script-quotes");
+        let out = dir.join("it's [here]").join("out.txt");
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let text = "it's \u{2018}a\u{2019} \"b\" $c `d %1 \u{201a}e\u{201b}\nnext line\n";
+        // Pasted into the console, a string over several lines gets extra line breaks.
+        assert!(!ps(text).contains('\n'), "{}", ps(text));
+        run_script("setup-windows-script-quotes-run", &format!("[IO.File]::WriteAllText({}, {})", ps(&out.to_string_lossy()), ps(text)));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), text);
+    }
+
+    #[test]
+    fn the_switch_script_writes_what_modify_writes_and_only_what_changes() {
+        let win = installed("setup-windows-script-switches");
+        write_value(&win.environment, "Path", REG_EXPAND_SZ, r"%USERPROFILE%\bin;;C:\Tools\;").unwrap();
+        let some = Switches { default: true, desktop_shortcut: true, ..Switches::default() };
+        let other = Switches { right_click: true, path: true, ..Switches::default() };
+        for (from, to) in [(Switches::default(), all()), (all(), Switches::default()), (some, other), (other, some)] {
+            win.apply(from).unwrap();
+            win.apply(to).unwrap();
+            let modified = (registry(&win), files(&win));
+            win.apply(from).unwrap();
+            let script = win.apply_script(to).unwrap();
+            assert_eq!(win.read(), from, "making the script changes nothing");
+            run_setup_script("setup-windows-script-switches-run", &script);
+            assert_eq!(win.read(), to, "{from:?} -> {to:?}");
+            assert_eq!((registry(&win), files(&win)), modified, "{from:?} -> {to:?}\n{script}");
+        }
+        // One switch changed: the script names it alone.
+        win.apply(Switches::default()).unwrap();
+        let script = win.apply_script(Switches { path: true, ..Switches::default() }).unwrap();
+        let steps: Vec<&str> = script.lines().filter(|line| line.starts_with("    # ")).collect();
+        assert_eq!(steps, ["    # Add to PATH: on"], "{script}");
+    }
+
+    #[test]
+    fn the_install_script_installs_as_install_does() {
+        let win = system("setup-windows-script-install", r"Downloads\lumen.exe");
+        // A quote PowerShell must keep, in the folder's name.
+        let dir = win.home.join(r"Lumen's apps\Lumen");
+        let script = win.install_script(&dir, all()).unwrap();
+        assert!(script.lines().any(|line| line.contains("Write-Record") && line.contains("version=")), "the record on one line, to paste: {script}");
+        assert_eq!(win.origin(), Origin::NotInstalled { default_dir: win.default_dir.clone() }, "making the script installs nothing");
+        run_setup_script("setup-windows-script-install-run", &script);
+        let record = Record { dir: dir.clone(), version: env!("CARGO_PKG_VERSION").into() };
+        assert_eq!(win.origin(), Origin::Installed { record, running_it: false });
+        assert_eq!(win.read(), all(), "Setup reads the machine as installed");
+        let scripted = (registry(&win), files(&win));
+        win.uninstall().unwrap();
+        win.install(&dir, all()).unwrap();
+        assert_eq!((registry(&win), files(&win)), scripted, "{script}");
+    }
+
+    #[test]
+    fn scripts_refuse_what_install_and_modify_refuse() {
+        let win = system("setup-windows-script-refuse", r"Downloads\lumen.exe");
+        assert_eq!(win.apply_script(all()), Err("Lumen is not installed".into()));
+        assert_eq!(win.install_script(Path::new(r"Apps\Lumen"), all()), Err(r"Choose a full path, not Apps\Lumen".into()));
+        let quoted = win.home.join("say \"hi\"");
+        assert_eq!(win.install_script(&quoted, all()), Err(format!("Lumen cannot start from a path holding \": {}", quoted.join("lumen.exe").display())));
+        let semicolon = win.home.join("a;b");
+        assert_eq!(
+            win.install_script(&semicolon, Switches { path: true, ..Switches::default() }),
+            Err(format!("A folder with a ; in its name cannot be on the PATH: {}", semicolon.display()))
+        );
+        assert!(win.install_script(&semicolon, Switches::default()).is_ok(), "off the PATH it may");
     }
 
     #[test]
