@@ -1557,6 +1557,8 @@ pub struct LumenApp {
     options: ui::options::Options,
     /// The Search Tabs box (Ctrl+Shift+A, the ▾).
     tab_search: ui::tab_search::TabSearch,
+    /// The language the places and disks were last named in.
+    named_in: crate::i18n::Lang,
 }
 
 /// A box or window a focused button opens must not read the key that pressed
@@ -1672,6 +1674,7 @@ impl LumenApp {
             behavior: crate::behavior::Behavior::default(),
             options: ui::options::Options::default(),
             tab_search: ui::tab_search::TabSearch::default(),
+            named_in: crate::i18n::current(),
         };
         if let Some(home) = fs::home_dir() {
             let data_home = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()).map(PathBuf::from);
@@ -1718,10 +1721,8 @@ impl LumenApp {
         app.schemes = config.schemes;
         app.schemes.apply(ctx);
         app.behavior = config.behavior;
-        // Tests run in English, whatever language the machine is in.
-        if cfg!(not(test)) || app.behavior.language != crate::i18n::Language::System {
-            app.behavior.language.apply();
-        }
+        // The places were named in English above: the first frame names them again.
+        app.behavior.language.apply();
         app.saved = app.settings(true);
         app.config_path = path;
         app
@@ -3233,6 +3234,26 @@ impl LumenApp {
         }
     }
 
+    /// Names again what was named once in another language: the side
+    /// panel's places, the disks (read again) and the preview (loaded again).
+    /// The rest is drawn each frame in the language of the moment.
+    fn rename_for_language(&mut self) {
+        let now = crate::i18n::current();
+        if now == self.named_in {
+            return;
+        }
+        self.named_in = now;
+        for place in &mut self.places {
+            if let Some(label) = places::marker_label(&place.path) {
+                place.label = label.to_owned();
+            } else if place.trash {
+                place.label = tr!("Trash").to_owned();
+            }
+        }
+        self.disks.0 = None;
+        self.preview = None;
+    }
+
     /// Keeps the open panel on the selected entry, loading it again when the
     /// selection moves or the entry changes on disk.
     fn sync_preview(&mut self, ctx: &egui::Context) {
@@ -4136,6 +4157,7 @@ impl eframe::App for LumenApp {
         }
         // A scheme or a language chosen shows from now on; end_frame saves it with the other settings.
         self.options.show(&ctx, &mut self.schemes, &mut self.behavior, &current);
+        self.rename_for_language();
         if let Some(i) = self.tab_search.show(&ctx, &self.tab_entries(Instant::now())) {
             self.select_tab(&ctx, i);
         }
@@ -10621,6 +10643,30 @@ mod tests {
     }
 
     /// One frame of the whole window, as eframe runs it; the texts it painted.
+    #[test]
+    fn a_language_chosen_names_the_places_again_and_reads_the_disks_again() {
+        let (ctx, mut app, _dir) = app_in("app-language-places");
+        let trash = PathBuf::from("/home/u/.local/share/Trash");
+        app.places = vec![
+            Place { label: "This PC".into(), path: places::this_pc(), trash: false, icon: "computer" },
+            Place { label: "Music".into(), path: "/home/u/Music".into(), trash: false, icon: "folder-music" },
+            Place { label: "Trash".into(), path: trash, trash: true, icon: "user-trash" },
+            Place { label: "Recycle Bin".into(), path: places::recycle_bin(), trash: false, icon: "user-trash" },
+        ];
+        window_frame(&ctx, &mut app, vec![]);
+        app.disks.0 = Some(Instant::now());
+        crate::i18n::set(crate::i18n::Lang::Es);
+        window_frame(&ctx, &mut app, vec![]);
+        let spanish: Vec<String> = app.places.iter().map(|p| p.label.clone()).collect();
+        let reread = app.disks.0.is_none() || app.disk_reader.is_running();
+        crate::i18n::set(crate::i18n::Lang::En);
+        assert_eq!(spanish, ["Este equipo", "Music", "Papelera", "Papelera de reciclaje"], "a folder keeps its own name");
+        assert!(reread, "the disks are read again, named in Spanish");
+        window_frame(&ctx, &mut app, vec![]);
+        let english: Vec<String> = app.places.iter().map(|p| p.label.clone()).collect();
+        assert_eq!(english, ["This PC", "Music", "Trash", "Recycle Bin"], "and back in English");
+    }
+
     fn window_frame(ctx: &egui::Context, app: &mut LumenApp, events: Vec<egui::Event>) -> Vec<String> {
         let mut frame = eframe::Frame::_new_kittest();
         let input = egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
