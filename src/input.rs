@@ -35,6 +35,8 @@ pub enum Action {
     AppMenu,
     /// Ctrl+,: the Options window.
     Options,
+    /// Ctrl+Shift+A: the Search Tabs box.
+    SearchTabs,
     /// Alt+M: minimize the window.
     Minimize,
     /// F11: maximize the window, or restore it when it is maximized.
@@ -213,6 +215,10 @@ fn read_keys(ctx: &Context, typing: bool, list: bool) -> Vec<Action> {
         }
         if i.consume_key(Modifiers::COMMAND, Key::Comma) {
             actions.push(Action::Options);
+        }
+        // Read before Ctrl+A: matching ignores an extra Shift.
+        if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::A) {
+            actions.push(Action::SearchTabs);
         }
         if typing {
             return actions;
@@ -715,6 +721,14 @@ mod tests {
         frame(vec![]);
         let events = vec![key(Key::Comma, Modifiers::COMMAND), key(Key::L, Modifiers::COMMAND), key(Key::H, Modifiers::COMMAND)];
         assert_eq!(frame(events), [Action::FocusPathBar, Action::Options], "Ctrl+H stays with the field");
+        let events = vec![key(Key::A, Modifiers::COMMAND | Modifiers::SHIFT), key(Key::A, Modifiers::COMMAND)];
+        assert_eq!(frame(events), [Action::SearchTabs], "Ctrl+A stays with the field");
+    }
+
+    #[test]
+    fn ctrl_shift_a_searches_the_tabs_and_ctrl_a_still_selects_every_row() {
+        assert_eq!(actions_for(vec![key(Key::A, Modifiers::COMMAND | Modifiers::SHIFT)]), [Action::SearchTabs], "not Select All as well");
+        assert_eq!(actions_for(vec![key(Key::A, Modifiers::COMMAND)]), [Action::SelectAll]);
     }
 
     #[test]
