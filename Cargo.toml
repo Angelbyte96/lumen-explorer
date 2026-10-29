@@ -57,6 +57,7 @@ windows = { version = "0.62", features = [
 raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_NetworkManagement_WNet",
     "Win32_Security",
     "Win32_Security_Authorization",

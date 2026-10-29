@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::behavior::{Behavior, CharKey, NewTab, Startup};
+use crate::i18n::Language;
 use crate::app::{Sort, SortColumn};
 use crate::folder_views::{FolderViews, Look, Rule, Scope};
 use crate::places::{VISIT_LIMIT, Visit};
@@ -108,6 +109,7 @@ impl Config {
                 "character_key_action" => config.behavior.char_key = CharKey::from_key(value).unwrap_or(config.behavior.char_key),
                 "load_on_startup" => config.behavior.startup = Startup::parse(value).unwrap_or(config.behavior.startup),
                 "new_tab_show" => config.behavior.new_tab = NewTab::from_key(value).unwrap_or(config.behavior.new_tab),
+                "language" => config.behavior.language = Language::from_key(value).unwrap_or(config.behavior.language),
                 _ => {}
             }
         }
@@ -173,6 +175,9 @@ impl Config {
         }
         if behavior.new_tab != default.new_tab {
             text += &format!("new_tab_show = {}\n", behavior.new_tab.key());
+        }
+        if behavior.language != default.language {
+            text += &format!("language = {}\n", behavior.language.key());
         }
         for path in self.bookmarks.iter().filter_map(|p| one_line(p)) {
             text += &format!("bookmark = {path}\n");
@@ -275,6 +280,9 @@ impl Config {
         }
         if was.new_tab != now.new_tab {
             kept.new_tab = now.new_tab;
+        }
+        if was.language != now.language {
+            kept.language = now.language;
         }
         if (&before.tabs, before.active_tab) != (&after.tabs, after.active_tab) {
             (merged.tabs, merged.active_tab) = (after.tabs.clone(), after.active_tab);
@@ -553,14 +561,15 @@ mod tests {
             char_key: CharKey::SelectTypedItem,
             startup: Startup::Folder(PathBuf::from("/srv/my files")),
             new_tab: NewTab::Root,
+            language: Language::Spanish,
         };
-        let lines = "overscroll = true\nreverse_scroll = true\ncharacter_key_action = select_typed_item\nload_on_startup = folder /srv/my files\nnew_tab_show = root\n";
+        let lines = "overscroll = true\nreverse_scroll = true\ncharacter_key_action = select_typed_item\nload_on_startup = folder /srv/my files\nnew_tab_show = root\nlanguage = spanish\n";
         assert_eq!(Config::parse(lines).behavior, behavior);
         let written = Config { behavior: behavior.clone(), ..Config::default() }.to_text();
         assert!(written.contains(lines), "{written}");
         assert_eq!(Config::parse(&written).behavior, behavior);
         let defaults = Config::default().to_text();
-        for key in ["overscroll", "reverse_scroll", "character_key_action", "load_on_startup", "new_tab_show"] {
+        for key in ["overscroll", "reverse_scroll", "character_key_action", "load_on_startup", "new_tab_show", "language"] {
             assert!(!defaults.contains(key), "the defaults: no {key} line");
         }
         let others = Behavior { char_key: CharKey::TriggerHotkey, startup: Startup::Home, new_tab: NewTab::Home, ..Behavior::default() };
@@ -575,10 +584,10 @@ mod tests {
     #[test]
     fn a_behavior_option_changed_here_does_not_undo_one_changed_in_another_window() {
         let before = Config::default();
-        let here = Config { behavior: Behavior { reverse_scroll: true, new_tab: NewTab::Home, ..Behavior::default() }, ..before.clone() };
+        let here = Config { behavior: Behavior { reverse_scroll: true, new_tab: NewTab::Home, language: Language::English, ..Behavior::default() }, ..before.clone() };
         let disk = Config { behavior: Behavior { overscroll: true, startup: Startup::Home, char_key: CharKey::TriggerHotkey, ..Behavior::default() }, ..before.clone() };
         let merged = Config::merge(&disk, &before, &here).behavior;
-        assert_eq!(merged, Behavior { overscroll: true, reverse_scroll: true, char_key: CharKey::TriggerHotkey, startup: Startup::Home, new_tab: NewTab::Home });
+        assert_eq!(merged, Behavior { overscroll: true, reverse_scroll: true, char_key: CharKey::TriggerHotkey, startup: Startup::Home, new_tab: NewTab::Home, language: Language::English });
         assert_eq!(Config::merge(&disk, &before, &before).behavior, disk.behavior, "nothing changed here: the other window's stays");
     }
 
