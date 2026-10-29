@@ -1,13 +1,4 @@
-//! The Spanish catalog: each English string the interface shows and its
-//! translation. Neutral Spanish, as Windows and GNOME word it in Spanish.
-
-use std::collections::HashMap;
-use std::sync::OnceLock;
-
-pub fn get(english: &str) -> Option<&'static str> {
-    static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-    MAP.get_or_init(|| ENTRIES.iter().copied().collect()).get(english).copied()
-}
+//! The Options window and the Language option.
 
 pub const ENTRIES: &[(&str, &str)] = &[
     // The Language option.

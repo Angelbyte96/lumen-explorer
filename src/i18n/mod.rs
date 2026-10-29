@@ -312,12 +312,18 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_holds_no_unused_or_repeated_entries() {
+    fn the_catalog_holds_no_unused_entries_and_one_translation_per_string() {
         let used: std::collections::HashSet<String> = wrapped().into_iter().map(|(_, e)| e).collect();
-        let mut seen = std::collections::HashSet::new();
-        for (english, _) in es::ENTRIES {
-            assert!(seen.insert(*english), "{english:?} twice in the catalog");
-            assert!(used.contains(*english), "{english:?} is in the catalog but no tr() uses it");
+        let mut seen = std::collections::HashMap::new();
+        for (area, entries) in es::AREAS.iter().enumerate() {
+            let mut here = std::collections::HashSet::new();
+            for (english, spanish) in entries.iter() {
+                assert!(here.insert(*english), "{english:?} twice in area {area}");
+                assert!(used.contains(*english), "{english:?} is in the catalog but no tr!() uses it");
+                if let Some(other) = seen.insert(*english, *spanish) {
+                    assert_eq!(other, *spanish, "{english:?} is translated two ways");
+                }
+            }
         }
     }
 }
