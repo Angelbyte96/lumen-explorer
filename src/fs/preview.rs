@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
+use crate::i18n::tr;
+
 use super::entry::Entry;
 use super::lister::read_entries;
 
@@ -49,14 +51,14 @@ pub fn load(path: &Path) -> Content {
     // Follows links, so a link to a folder previews the folder.
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
-        Err(err) => return Content::Info(format!("Cannot read: {err}")),
+        Err(err) => return Content::Info(tr!("Cannot read: {0}", err)),
     };
     if meta.is_dir() {
         return Content::Folder(read_entries(path).map_err(|e| e.to_string()));
     }
     // FIFOs and devices block or never end when read.
     if !meta.is_file() {
-        return Content::Info("Special file: no preview".into());
+        return Content::Info(tr!("Special file: no preview").into());
     }
     if has_extension(path, &["pdf"]) {
         return pdf_page(path);
@@ -66,18 +68,18 @@ pub fn load(path: &Path) -> Content {
     }
     if is_image(path) {
         if meta.len() > IMAGE_LIMIT {
-            return Content::Info("Image larger than 50 MB: no preview".into());
+            return Content::Info(tr!("Image larger than 50 MB: no preview").into());
         }
         return match decode_image(path) {
             Ok(picture) => Content::Image(picture),
-            Err(image::ImageError::Limits(_)) => Content::Info("Image too large to preview".into()),
-            Err(err) => Content::Info(format!("Cannot read image: {err}")),
+            Err(image::ImageError::Limits(_)) => Content::Info(tr!("Image too large to preview").into()),
+            Err(err) => Content::Info(tr!("Cannot read image: {0}", err)),
         };
     }
     match read_text(path) {
         Ok(Some((text, truncated))) => Content::Text { text, truncated },
-        Ok(None) => Content::Info("Binary file: no preview".into()),
-        Err(err) => Content::Info(format!("Cannot read: {err}")),
+        Ok(None) => Content::Info(tr!("Binary file: no preview").into()),
+        Err(err) => Content::Info(tr!("Cannot read: {0}", err)),
     }
 }
 
@@ -108,11 +110,11 @@ fn pdf_page_with(program: &str, path: &Path) -> Content {
     match run_for(command, PDF_TIMEOUT) {
         Ok(png) => match decode_reader(image::ImageReader::new(std::io::Cursor::new(png))) {
             Ok(picture) => Content::Image(picture),
-            Err(_) => Content::Info("Cannot preview this PDF".into()),
+            Err(_) => Content::Info(tr!("Cannot preview this PDF").into()),
         },
-        Err(RunError::Missing) => Content::Info("Install poppler-utils to preview PDFs".into()),
-        Err(RunError::TimedOut) => Content::Info("This PDF takes too long to preview".into()),
-        Err(RunError::Failed) => Content::Info("Cannot preview this PDF".into()),
+        Err(RunError::Missing) => Content::Info(tr!("Install poppler-utils to preview PDFs").into()),
+        Err(RunError::TimedOut) => Content::Info(tr!("This PDF takes too long to preview").into()),
+        Err(RunError::Failed) => Content::Info(tr!("Cannot preview this PDF").into()),
     }
 }
 
@@ -124,7 +126,7 @@ fn pdf_page(path: &Path) -> Content {
         .and_then(|png| decode_reader(image::ImageReader::new(std::io::Cursor::new(png))).ok());
     match picture {
         Some(picture) => Content::Image(picture),
-        None => Content::Info("Cannot preview this PDF".into()),
+        None => Content::Info(tr!("Cannot preview this PDF").into()),
     }
 }
 
@@ -134,10 +136,10 @@ fn video_content(frame: Result<Picture, super::video::Failure>) -> Content {
     match frame {
         Ok(picture) => Content::Image(picture),
         #[cfg(not(windows))]
-        Err(Failure::Missing) => Content::Info("Install ffmpeg to preview videos".into()),
+        Err(Failure::Missing) => Content::Info(tr!("Install ffmpeg to preview videos").into()),
         #[cfg(not(windows))]
-        Err(Failure::TimedOut) => Content::Info("This video takes too long to preview".into()),
-        Err(Failure::Failed) => Content::Info("Cannot preview this video".into()),
+        Err(Failure::TimedOut) => Content::Info(tr!("This video takes too long to preview").into()),
+        Err(Failure::Failed) => Content::Info(tr!("Cannot preview this video").into()),
     }
 }
 

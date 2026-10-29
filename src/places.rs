@@ -4,6 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::i18n::tr;
+
 /// Bookmarked folders, in the order they were added.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Bookmarks {
@@ -191,7 +193,7 @@ pub fn places(home: &Path, user_dirs: Option<&str>, trash: Option<&Path>) -> Vec
         }
     }
     if let Some(trash) = trash {
-        places.push(Place { label: "Trash".into(), path: trash.to_path_buf(), trash: true, icon: "user-trash" });
+        places.push(Place { label: tr!("Trash").into(), path: trash.to_path_buf(), trash: true, icon: "user-trash" });
     }
     places
 }
@@ -333,7 +335,7 @@ pub fn named_marker(text: &str) -> Option<PathBuf> {
 /// `places` with the Recycle Bin last when `windows`: after the user folders.
 pub fn with_recycle_bin(mut places: Vec<Place>, windows: bool) -> Vec<Place> {
     if windows {
-        places.push(Place { label: RECYCLE_BIN.into(), path: recycle_bin(), trash: false, icon: "user-trash" });
+        places.push(Place { label: tr!("Recycle Bin").into(), path: recycle_bin(), trash: false, icon: "user-trash" });
     }
     places
 }
@@ -341,7 +343,7 @@ pub fn with_recycle_bin(mut places: Vec<Place>, windows: bool) -> Vec<Place> {
 /// `places` with This PC first when `windows`: the only system that has it.
 pub fn with_this_pc(mut places: Vec<Place>, windows: bool) -> Vec<Place> {
     if windows {
-        places.insert(0, Place { label: THIS_PC.into(), path: this_pc(), trash: false, icon: "computer" });
+        places.insert(0, Place { label: tr!("This PC").into(), path: this_pc(), trash: false, icon: "computer" });
     }
     places
 }
@@ -372,11 +374,11 @@ impl DriveKind {
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::Local => "Local Disk",
-            Self::Removable => "Removable Disk",
-            Self::Network => "Network Drive",
-            Self::Cd => "CD Drive",
-            Self::Other => "Drive",
+            Self::Local => tr!("Local Disk"),
+            Self::Removable => tr!("Removable Disk"),
+            Self::Network => tr!("Network Drive"),
+            Self::Cd => tr!("CD Drive"),
+            Self::Other => tr!("Drive"),
         }
     }
 }
@@ -415,7 +417,7 @@ pub fn network_label(letter: char, volume: &str, remote: Option<&str>) -> String
     }
     match remote.and_then(share_parts) {
         Some((share, server)) => format!("{share} ({server}) ({letter}:)"),
-        None => format!("Network Drive ({letter}:)"),
+        None => tr!("Network Drive ({0}:)", letter),
     }
 }
 
@@ -530,7 +532,7 @@ pub fn parse_mounts(text: &str) -> Vec<Mount> {
         seen.push(device);
         let label = match path.file_name() {
             Some(name) => name.to_string_lossy().into_owned(),
-            None => "File System".into(),
+            None => tr!("File System").into(),
         };
         mounts.push(Mount { label, path });
     }
@@ -730,7 +732,7 @@ pub fn drive_mask() -> Option<u32> {
 /// "Windows (C:)"; without a volume name, "Local Disk (D:)" or "USB Drive (F:)"
 /// as File Explorer says.
 pub fn drive_label(letter: char, volume: &str, removable: bool) -> String {
-    let unnamed = if removable { "USB Drive" } else { "Local Disk" };
+    let unnamed = if removable { tr!("USB Drive") } else { tr!("Local Disk") };
     let name = if volume.trim().is_empty() { unnamed } else { volume.trim() };
     format!("{name} ({letter}:)")
 }

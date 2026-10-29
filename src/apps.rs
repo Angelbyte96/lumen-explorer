@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::i18n::tr;
+
 pub use crate::menu::App;
 
 /// Where freedesktop files live, most important first, and the user's language.
@@ -105,10 +107,10 @@ pub fn open_terminal(folder: &Path) -> Result<(), String> {
                 return Ok(());
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("Cannot open {terminal}: {e}")),
+            Err(e) => return Err(tr!("Cannot open {0}: {1}", terminal, e)),
         }
     }
-    Err("No terminal found: set $TERMINAL or install one".into())
+    Err(tr!("No terminal found: set $TERMINAL or install one").into())
 }
 
 /// Opens `file` with `app`, without waiting for it.
@@ -118,7 +120,7 @@ pub fn open_with(app: &App, file: &Path) -> Result<(), String> {
         .arg(&app.desktop)
         .arg(file)
         .spawn()
-        .map_err(|e| format!("Cannot open with {}: gio: {e}", app.name))?;
+        .map_err(|e| tr!("Cannot open with {0}: gio: {1}", app.name, e))?;
     // Reaped in the background so no zombie is left behind.
     std::thread::spawn(move || child.wait());
     Ok(())
