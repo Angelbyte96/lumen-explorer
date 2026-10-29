@@ -16,6 +16,8 @@ pub fn bar_id() -> egui::Id {
 /// The window buttons at the right end of the bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
+    /// The ▾ left of minimize, on the main bar only.
+    SearchTabs,
     Minimize,
     Maximize,
     Close,
@@ -31,6 +33,7 @@ impl Button {
     /// The command's name and shortcut, as the hover hint shows them.
     pub fn hint(self) -> (&'static str, &'static str) {
         match self {
+            Button::SearchTabs => ("Search Tabs", "Ctrl+Shift+A"),
             Button::Minimize => ("Minimize Window", "Alt+M"),
             Button::Maximize => ("Toggle Fullscreen", "F11"),
             Button::Close => ("Close Window", "Alt+F4"),
@@ -99,6 +102,7 @@ fn window_button(ui: &mut egui::Ui, button: Button, rect: egui::Rect) -> bool {
     };
     let glyph = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(24.0));
     match button {
+        Button::SearchTabs => crate::ui::icons::paint_search_tabs(ui.painter(), glyph, color),
         Button::Minimize => crate::ui::icons::paint_minimize(ui.painter(), glyph, color),
         Button::Maximize if maximized(ui.ctx()) => crate::ui::icons::paint_restore(ui.painter(), glyph, color),
         Button::Maximize => crate::ui::icons::paint_maximize(ui.painter(), glyph, color),
@@ -112,19 +116,32 @@ fn window_button(ui: &mut egui::Ui, button: Button, rect: egui::Rect) -> bool {
 /// (a press and a short drag) and maximizes or restores it on a double click.
 /// The window buttons end the bar; the contents never reach under them.
 pub fn show<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    show_buttons(ui, false, contents).0
+}
+
+/// `show` for the main bar: a ▾ right before minimize (Search Tabs) takes one
+/// more button's room. True when it was clicked.
+pub fn show_with_search_tabs<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> (R, bool) {
+    show_buttons(ui, true, contents)
+}
+
+fn show_buttons<R>(ui: &mut egui::Ui, search_tabs: bool, contents: impl FnOnce(&mut egui::Ui) -> R) -> (R, bool) {
+    let buttons: Vec<Button> = search_tabs.then_some(Button::SearchTabs).into_iter().chain(Button::ALL).collect();
     let bar_rect = ui.max_rect();
     // Sensed before the contents, so every control drawn on top keeps its own clicks;
     // not focusable, so the bar is no Tab stop.
     let bar = ui.interact(bar_rect, bar_id(), egui::Sense::CLICK | egui::Sense::DRAG);
-    let buttons_left = bar_rect.right() - BUTTON_WIDTH * Button::ALL.len() as f32;
+    let buttons_left = bar_rect.right() - BUTTON_WIDTH * buttons.len() as f32;
     let room = egui::Rect::from_min_max(bar_rect.min, egui::pos2(buttons_left, bar_rect.bottom()));
     let inside = ui.scope_builder(egui::UiBuilder::new().max_rect(room), |ui| egui::Frame::new().inner_margin(PADDING).show(ui, contents).inner);
     let mut x = buttons_left;
-    for button in Button::ALL {
+    let mut searched = false;
+    for button in buttons {
         let rect = egui::Rect::from_min_size(egui::pos2(x, bar_rect.top()), egui::vec2(BUTTON_WIDTH, inside.response.rect.height()));
         if window_button(ui, button, rect) {
             let ctx = ui.ctx();
             match button {
+                Button::SearchTabs => searched = true,
                 Button::Minimize => minimize(ctx),
                 Button::Maximize => toggle_maximized(ctx),
                 Button::Close => close(ctx),
@@ -138,7 +155,7 @@ pub fn show<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> 
     } else if bar.drag_started_by(egui::PointerButton::Primary) {
         ctx.send_viewport_cmd(ViewportCommand::StartDrag);
     }
-    inside.inner
+    (inside.inner, searched)
 }
 
 /// Which way the window's border at `pos` resizes it, if `pos` is on it.
@@ -405,6 +422,47 @@ mod tests {
         assert_eq!((min.top(), max.top(), close.top()), (SCREEN.top(), SCREEN.top(), SCREEN.top()), "from the window's top");
         let content_right = ctx.data(|d| d.get_temp::<f32>(content_right_id())).expect("the contents were drawn");
         assert!(content_right <= min.left(), "the contents end at {content_right}, the buttons start at {}", min.left());
+    }
+
+    /// One frame of the main bar, with the Search Tabs button; whether it was clicked.
+    fn main_bar(ctx: &egui::Context, events: Vec<Event>) -> bool {
+        let input = RawInput { events, screen_rect: Some(SCREEN), ..RawInput::default() };
+        let mut clicked = false;
+        ctx.run_ui(input, |root| {
+            egui::Panel::top("caption").frame(frame(root.style())).show(root, |ui| {
+                clicked = show_with_search_tabs(ui, |ui| {
+                    ui.ctx().data_mut(|d| d.insert_temp(content_right_id(), ui.max_rect().right()));
+                })
+                .1;
+            });
+        })
+        .drop_without_applying_deltas();
+        clicked
+    }
+
+    #[test]
+    fn the_search_tabs_button_sits_left_of_minimize_and_reports_its_click() {
+        let ctx = egui::Context::default();
+        main_bar(&ctx, vec![]);
+        let search = ctx.read_response(Button::SearchTabs.id()).expect("the button was drawn").rect;
+        let min = ctx.read_response(Button::Minimize.id()).expect("minimize was drawn").rect;
+        assert_eq!(search.right(), min.left(), "right before minimize");
+        assert_eq!(search.size(), min.size(), "as big as the window buttons");
+        let content_right = ctx.data(|d| d.get_temp::<f32>(content_right_id())).expect("the contents were drawn");
+        assert!(content_right <= search.left(), "the contents stop before it");
+        assert!(!ctx.read_response(Button::SearchTabs.id()).unwrap().sense.is_focusable(), "Ctrl+Shift+A instead of a Tab stop");
+        let at = search.center();
+        main_bar(&ctx, vec![Event::PointerMoved(at)]);
+        assert!(!main_bar(&ctx, vec![press(at, true)]), "on the release");
+        assert!(main_bar(&ctx, vec![press(at, false)]));
+        assert_eq!(Button::SearchTabs.hint(), ("Search Tabs", "Ctrl+Shift+A"));
+    }
+
+    #[test]
+    fn the_setup_strip_has_no_search_tabs_button() {
+        let ctx = egui::Context::default();
+        window(&ctx, false, vec![]);
+        assert!(ctx.read_response(Button::SearchTabs.id()).is_none());
     }
 
     #[test]

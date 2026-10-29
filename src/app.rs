@@ -1362,6 +1362,8 @@ pub struct Tab {
     drive: Option<PathBuf>,
     /// The entries picked in the Recycle Bin view.
     recycle: Picks,
+    /// When the tab was last on screen (Search Tabs says how long ago); not saved.
+    used: Instant,
 }
 
 impl Tab {
@@ -1395,6 +1397,7 @@ impl Tab {
             error_after_load: None,
             drive: None,
             recycle: Picks::default(),
+            used: Instant::now(),
         }
     }
 }
@@ -1555,6 +1558,8 @@ pub struct LumenApp {
     behavior: crate::behavior::Behavior,
     /// The Options window (Ctrl+,).
     options: ui::options::Options,
+    /// The Search Tabs box (Ctrl+Shift+A, the ▾).
+    tab_search: ui::tab_search::TabSearch,
 }
 
 /// A box or window a focused button opens must not read the key that pressed
@@ -1669,6 +1674,7 @@ impl LumenApp {
             schemes: ui::theme::Schemes::default(),
             behavior: crate::behavior::Behavior::default(),
             options: ui::options::Options::default(),
+            tab_search: ui::tab_search::TabSearch::default(),
         };
         if let Some(home) = fs::home_dir() {
             let data_home = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()).map(PathBuf::from);
@@ -2817,9 +2823,9 @@ impl LumenApp {
         self.dialog.is_some() || self.overlay_open() || self.rename.is_some()
     }
 
-    /// The path box, the Options window or the menu: each reads its own keys when drawn.
+    /// The path box, the Options window, Search Tabs or the menu: each reads its own keys when drawn.
     fn overlay_open(&self) -> bool {
-        self.path_popup.is_open() || self.options.is_open() || self.context_menu.is_some()
+        self.path_popup.is_open() || self.options.is_open() || self.tab_search.is_open() || self.context_menu.is_some()
     }
 
     /// Asks the paste's parked question once nothing else has the keyboard.
@@ -2939,6 +2945,20 @@ impl LumenApp {
         self.tab_folders().iter().map(label).collect()
     }
 
+    /// The rows of the Search Tabs box: each tab with its shortened folder
+    /// and how long before `now` it was last on screen.
+    fn tab_entries(&self, now: Instant) -> Vec<ui::tab_search::Entry> {
+        let home = fs::home_dir();
+        let rows = self.tabs.iter().enumerate().zip(self.tab_labels()).map(|((i, slot), label)| {
+            let tab = slot.as_ref().unwrap_or(&self.tab);
+            let folder = &tab.view.current;
+            let path = if places::is_marker(folder) { String::new() } else { ui::tab_search::compact(folder, home.as_deref()) };
+            let idle = (i != self.active).then(|| now.saturating_duration_since(tab.used));
+            ui::tab_search::Entry { label, path, idle }
+        });
+        rows.collect()
+    }
+
     /// The folder each tab shows (the active tab's is in `self.tab`).
     fn tab_folders(&self) -> Vec<PathBuf> {
         self.tabs.iter().map(|slot| slot.as_ref().unwrap_or(&self.tab).view.current.clone()).collect()
@@ -3009,6 +3029,7 @@ impl LumenApp {
 
     /// What belongs to the tab on screen and must not follow it into the background.
     fn leave_tab(&mut self) {
+        self.tab.used = Instant::now();
         self.cancel_count();
         self.rename = None;
         self.hold_absorbed = false;
@@ -3676,6 +3697,7 @@ impl LumenApp {
             Action::ToggleSidebar => self.handle_menu(ctx, AppMenuEvent::ToggleSidebar),
             Action::AppMenu => ui::app_menu::toggle(ctx),
             Action::Options => self.handle_menu(ctx, AppMenuEvent::Options),
+            Action::SearchTabs => self.tab_search.toggle(self.active),
             Action::Minimize => ui::caption::minimize(ctx),
             Action::ToggleMaximize => ui::caption::toggle_maximized(ctx),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
@@ -3873,7 +3895,7 @@ impl eframe::App for LumenApp {
                 self.answer_dialog(&ctx, answer);
             }
         } else if self.overlay_open() {
-            // The path box, the Options window and the menu read their own keys when drawn.
+            // The path box, the Options window, Search Tabs and the menu read their own keys when drawn.
         } else if ui::toolbar::close_lock_menu_on_escape(&ctx) || ui::app_menu::close_on_escape(&ctx) {
             // That Escape closed the lock's menu or the app menu and did nothing else.
         } else {
@@ -3900,7 +3922,7 @@ impl eframe::App for LumenApp {
 
         egui::Panel::top("tabs").frame(ui::caption::frame(ui.style())).show(ui, |ui| {
             // The tab row is the window's title bar: its empty space moves the window.
-            ui::caption::show(ui, |ui| {
+            let (_, search_tabs) = ui::caption::show_with_search_tabs(ui, |ui| {
                 ui.add_space(3.0);
                 let labels = self.tab_labels();
                 let (menu, tab) = ui.horizontal(|ui| (ui::app_menu::show(ui, self.setup_row), ui::tabs::show(ui, &labels, self.active))).inner;
@@ -3915,6 +3937,9 @@ impl eframe::App for LumenApp {
                 }
                 ui::tabs::drop_targets(ui, &self.tab_folders());
             });
+            if search_tabs {
+                self.tab_search.toggle(self.active);
+            }
         });
 
         egui::Panel::top("toolbar").show(ui, |ui| {
@@ -4110,6 +4135,9 @@ impl eframe::App for LumenApp {
         }
         // A scheme chosen shows from now on; end_frame saves it with the other settings.
         self.options.show(&ctx, &mut self.schemes, &mut self.behavior, &current);
+        if let Some(i) = self.tab_search.show(&ctx, &self.tab_entries(Instant::now())) {
+            self.select_tab(&ctx, i);
+        }
 
         // A click on another row or a scroll can take focus without ending the
         // edit above (one event per frame); an unfocused field is a cancel.
@@ -10834,6 +10862,55 @@ mod tests {
             }
             let commands = drag_from(&ctx, &mut app, egui::pos2(1.0, 300.0));
             assert!(commands.contains(&egui::ViewportCommand::BeginResize(egui::viewport::ResizeDirection::West)), "setup {setup}: {commands:?}");
+        }
+    }
+
+    #[test]
+    fn search_tabs_lists_each_tab_with_its_path_and_how_long_ago_it_was_used() {
+        let (ctx, mut app, dir) = app_in("app-search-tabs-entries");
+        app.handle_action(&ctx, Action::NewTab);
+        land(&mut app);
+        let now = Instant::now();
+        app.tabs[0].as_mut().expect("in the background").used = now - Duration::from_secs(10 * 60);
+        let entries = app.tab_entries(now);
+        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let path = ui::tab_search::compact(&dir, fs::home_dir().as_deref());
+        assert_eq!(entries.iter().map(|e| (e.label.clone(), e.path.clone())).collect::<Vec<_>>(), [(name.clone(), path.clone()), (name, path)]);
+        assert_eq!(entries.iter().map(|e| ui::tab_search::ago(e.idle)).collect::<Vec<_>>(), ["10 min ago", "Now"], "the active tab is in use now");
+        app.handle_action(&ctx, Action::PrevTab);
+        let later = Instant::now() + Duration::from_secs(3 * 60);
+        assert_eq!(app.tab_entries(later).iter().map(|e| ui::tab_search::ago(e.idle)).collect::<Vec<_>>(), ["Now", "3 min ago"], "the tab left was in use until the switch");
+    }
+
+    #[test]
+    fn ctrl_shift_a_and_the_caption_button_open_search_tabs_and_enter_switches_tab() {
+        let key = |key| {
+            let event = |pressed| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+            vec![event(true), event(false)]
+        };
+        for by_button in [false, true] {
+            let (ctx, mut app, _) = app_in("app-search-tabs-open");
+            app.handle_action(&ctx, Action::NewTab);
+            land(&mut app);
+            for _ in 0..3 {
+                window_commands(&ctx, &mut app, vec![]);
+            }
+            if by_button {
+                let at = ctx.read_response(ui::caption::Button::SearchTabs.id()).expect("the ▾ was drawn").rect.center();
+                let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+                window_commands(&ctx, &mut app, vec![egui::Event::PointerMoved(at)]);
+                window_commands(&ctx, &mut app, vec![press(true)]);
+                window_commands(&ctx, &mut app, vec![press(false)]);
+            } else {
+                app.handle_action(&ctx, Action::SearchTabs);
+            }
+            assert!(app.tab_search.is_open() && app.overlay_open(), "by button {by_button}");
+            window_commands(&ctx, &mut app, vec![]);
+            window_commands(&ctx, &mut app, key(egui::Key::ArrowUp));
+            assert_eq!(app.active, 1, "the arrows move the pick, not the list underneath");
+            window_commands(&ctx, &mut app, key(egui::Key::Enter));
+            assert_eq!(app.active, 0, "by button {by_button}");
+            assert!(!app.tab_search.is_open());
         }
     }
 

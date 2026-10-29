@@ -17,6 +17,7 @@ pub mod recycle_view;
 pub mod setup_view;
 pub mod sidebar;
 pub mod status_bar;
+pub mod tab_search;
 pub mod tabs;
 pub mod theme;
 pub mod thumbnails;

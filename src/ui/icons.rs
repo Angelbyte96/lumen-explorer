@@ -205,6 +205,14 @@ pub fn paint_minimize(painter: &egui::Painter, rect: Rect, color: Color32) {
     painter.line_segment([pos2(g.left(), y), pos2(g.right(), y)], window_stroke(color));
 }
 
+/// The Search Tabs button: a chevron pointing down.
+pub fn paint_search_tabs(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let g = window_glyph(rect);
+    let half = g.width() * 0.5;
+    let (x, y) = (g.center().x, g.center().y.round() + 0.5);
+    painter.add(Shape::line(vec![pos2(x - half, y - half * 0.5), pos2(x, y + half * 0.5), pos2(x + half, y - half * 0.5)], window_stroke(color)));
+}
+
 /// The maximize button: a square.
 pub fn paint_maximize(painter: &egui::Painter, rect: Rect, color: Color32) {
     let g = window_glyph(rect);
