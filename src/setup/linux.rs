@@ -10,6 +10,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::i18n::tr;
+
 use super::{Origin, Record, Switches, System};
 
 /// The binary's name in the install folder and on the PATH.
@@ -132,10 +134,10 @@ impl Linux {
 
     fn set_desktop_shortcut(&self, on: bool, target: &Path) -> Result<(), String> {
         let Some(file) = self.desktop_shortcut() else {
-            return if on { Err("This desktop has no desktop folder".into()) } else { Ok(()) };
+            return if on { Err(tr!("This desktop has no desktop folder").into()) } else { Ok(()) };
         };
         if !on {
-            return super::remove_file(&file).map_err(|err| format!("Cannot remove {}: {err}", file.display()));
+            return super::remove_file(&file).map_err(|err| tr!("Cannot remove {0}: {1}", file.display(), err));
         }
         write_executable(&file, &desktop_entry(target)?)?;
         // GNOME's desktop runs only shortcuts marked trusted.
@@ -153,13 +155,13 @@ impl Linux {
             (false, true) => with_folder_default(&text, None),
             _ => return Ok(()),
         };
-        super::write_atomic(&file, changed.as_bytes()).map_err(|err| format!("Cannot write {}: {err}", file.display()))
+        super::write_atomic(&file, changed.as_bytes()).map_err(|err| tr!("Cannot write {0}: {1}", file.display(), err))
     }
 
     fn set_right_click(&self, on: bool, target: &Path) -> Result<(), String> {
         let file = self.script();
         if !on {
-            return super::remove_file(&file).map_err(|err| format!("Cannot remove {}: {err}", file.display()));
+            return super::remove_file(&file).map_err(|err| tr!("Cannot remove {0}: {1}", file.display(), err));
         }
         write_executable(&file, &nautilus_script(target))
     }
@@ -169,7 +171,7 @@ impl Linux {
         let ours = self.link_is_ours(target);
         if !on {
             // Only Lumen's own link: a lumen put there some other way stays.
-            return if ours { super::remove_file(&link).map_err(|err| format!("Cannot remove {}: {err}", link.display())) } else { Ok(()) };
+            return if ours { super::remove_file(&link).map_err(|err| tr!("Cannot remove {0}: {1}", link.display(), err)) } else { Ok(()) };
         }
         if ours {
             return Ok(());
@@ -177,11 +179,11 @@ impl Linux {
         // Lumen's own link was handled above, so anything here is someone
         // else's: a copy install-desktop.sh put there, or a link of theirs.
         if link.symlink_metadata().is_ok() {
-            return Err(format!("{} is another file (scripts/install-desktop.sh puts one there): remove it to add Lumen to the PATH", link.display()));
+            return Err(tr!("{0} is another file (scripts/install-desktop.sh puts one there): remove it to add Lumen to the PATH", link.display()));
         }
         let dir = link.parent().expect("the link is in ~/.local/bin");
-        std::fs::create_dir_all(dir).map_err(|err| format!("Cannot create {}: {err}", dir.display()))?;
-        std::os::unix::fs::symlink(target, &link).map_err(|err| format!("Cannot create {}: {err}", link.display()))
+        std::fs::create_dir_all(dir).map_err(|err| tr!("Cannot create {0}: {1}", dir.display(), err))?;
+        std::os::unix::fs::symlink(target, &link).map_err(|err| tr!("Cannot create {0}: {1}", link.display(), err))
     }
 }
 
@@ -203,7 +205,7 @@ impl System for Linux {
     }
 
     fn apply(&self, want: Switches) -> Result<(), String> {
-        let target = self.target().ok_or("Lumen is not installed")?;
+        let target = self.target().ok_or(tr!("Lumen is not installed"))?;
         let now = self.read();
         let mut errors = Vec::new();
         let mut step = |result: Result<(), String>| {
@@ -228,35 +230,35 @@ impl System for Linux {
 
     fn install(&self, dir: &Path, want: Switches) -> Result<(), String> {
         if self.packaged() {
-            return Err("Installed with apt: there is nothing to install".into());
+            return Err(tr!("Installed with apt: there is nothing to install").into());
         }
         if !dir.is_absolute() {
-            return Err(format!("Choose a full path, not {}", dir.display()));
+            return Err(tr!("Choose a full path, not {0}", dir.display()));
         }
-        let record_file = self.record_file.as_deref().ok_or("Lumen has no settings folder to remember the install in")?;
-        let binary = super::copy_binary(&self.exe, dir, BINARY).map_err(|err| format!("Cannot copy Lumen to {}: {err}", dir.display()))?;
+        let record_file = self.record_file.as_deref().ok_or(tr!("Lumen has no settings folder to remember the install in"))?;
+        let binary = super::copy_binary(&self.exe, dir, BINARY).map_err(|err| tr!("Cannot copy Lumen to {0}: {1}", dir.display(), err))?;
         set_executable(&binary)?;
         write_file(&self.menu_entry(), &desktop_entry(&binary)?)?;
         for (path, bytes) in self.icons() {
-            super::write_atomic(&path, bytes).map_err(|err| format!("Cannot write {}: {err}", path.display()))?;
+            super::write_atomic(&path, bytes).map_err(|err| tr!("Cannot write {0}: {1}", path.display(), err))?;
         }
         Record { dir: dir.to_path_buf(), version: env!("CARGO_PKG_VERSION").into() }
             .save(record_file)
-            .map_err(|err| format!("Cannot write {}: {err}", record_file.display()))?;
+            .map_err(|err| tr!("Cannot write {0}: {1}", record_file.display(), err))?;
         self.refresh();
         self.apply(want)
     }
 
     fn uninstall(&self) -> Result<(), String> {
         let Origin::Installed { record, .. } = self.origin() else {
-            return Err(if self.packaged() { "Installed with apt: sudo apt remove lumen".into() } else { "Lumen is not installed".into() });
+            return Err(if self.packaged() { tr!("Installed with apt: sudo apt remove lumen").into() } else { tr!("Lumen is not installed").into() });
         };
         self.apply(Switches::default())?;
         let mut files = vec![self.menu_entry(), record.dir.join(BINARY)];
         files.extend(self.icons().map(|(path, _)| path));
         files.extend(self.record_file.clone());
         for file in files {
-            super::remove_file(&file).map_err(|err| format!("Cannot remove {}: {err}", file.display()))?;
+            super::remove_file(&file).map_err(|err| tr!("Cannot remove {0}: {1}", file.display(), err))?;
         }
         // Only when empty: the folder may hold the user's own files.
         let _ = std::fs::remove_dir(&record.dir);
@@ -270,7 +272,7 @@ impl System for Linux {
 fn desktop_entry(binary: &Path) -> Result<String, String> {
     let shown = binary.to_str().filter(|p| !p.contains(['"', '`', '$', '\\', '%', '\n', '\r']));
     // Inside a quoted Exec argument these would need escaping; refuse them instead.
-    let shown = shown.ok_or_else(|| format!("Lumen cannot start from a path holding \" ` $ \\ or %: {}", binary.display()))?;
+    let shown = shown.ok_or_else(|| tr!("Lumen cannot start from a path holding \" ` $ \\ or %: {0}", binary.display()))?;
     Ok(include_str!("../../assets/lumen.desktop")
         .lines()
         .map(|line| match line.strip_prefix("Exec=lumen ") {
@@ -353,7 +355,7 @@ pub fn with_folder_default(text: &str, app: Option<&str>) -> String {
 }
 
 fn write_file(path: &Path, text: &str) -> Result<(), String> {
-    super::write_atomic(path, text.as_bytes()).map_err(|err| format!("Cannot write {}: {err}", path.display()))
+    super::write_atomic(path, text.as_bytes()).map_err(|err| tr!("Cannot write {0}: {1}", path.display(), err))
 }
 
 fn write_executable(path: &Path, text: &str) -> Result<(), String> {
@@ -363,7 +365,7 @@ fn write_executable(path: &Path, text: &str) -> Result<(), String> {
 
 fn set_executable(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(|err| format!("Cannot make {} runnable: {err}", path.display()))
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(|err| tr!("Cannot make {0} runnable: {1}", path.display(), err))
 }
 
 #[cfg(test)]

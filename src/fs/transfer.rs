@@ -11,6 +11,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::i18n::tr;
+
 use super::ops::{exists, same_entry, trash};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +62,7 @@ impl Progress {
 /// Name for the `n`-th copy in the same folder: "notes (copy).txt",
 /// "notes (copy 2).txt"; folders and dotfiles get the suffix at the end.
 pub fn copy_name(name: &OsStr, n: u32, is_dir: bool) -> OsString {
-    let suffix = if n == 1 { " (copy)".to_owned() } else { format!(" (copy {n})") };
+    let suffix = if n == 1 { tr!(" (copy)").to_owned() } else { tr!(" (copy {0})", n) };
     let bytes = name.as_encoded_bytes();
     // Index 0 is a dotfile's leading dot, not an extension.
     let dot = bytes.iter().rposition(|&b| b == b'.').filter(|&i| i > 0 && !is_dir);
@@ -80,17 +82,17 @@ pub fn copy_name(name: &OsStr, n: u32, is_dir: bool) -> OsString {
 }
 
 fn missing(path: &Path) -> String {
-    format!("No longer exists: {}", path.display())
+    tr!("No longer exists: {0}", path.display())
 }
 
 fn canonical(path: &Path) -> Result<PathBuf, String> {
-    path.canonicalize().map_err(|e| format!("Cannot open {}: {e}", path.display()))
+    path.canonicalize().map_err(|e| tr!("Cannot open {0}: {1}", path.display(), e))
 }
 
 /// Resolves the folder holding `path` but not `path` itself, so a symlink
 /// stays the link (what gets copied or trashed) instead of its target.
 fn canonical_entry(path: &Path) -> Result<PathBuf, String> {
-    let name = path.file_name().ok_or_else(|| format!("Cannot use {}", path.display()))?;
+    let name = path.file_name().ok_or_else(|| tr!("Cannot use {0}", path.display()))?;
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     Ok(canonical(parent)?.join(name))
 }
@@ -102,7 +104,7 @@ pub fn plan(source: &Path, dest_dir: &Path, mode: Mode) -> Result<Plan, String> 
     let name = entry.file_name().expect("canonical_entry keeps the name").to_os_string();
     let dest = canonical(dest_dir)?;
     if meta.is_dir() && dest.starts_with(&entry) {
-        return Err(format!("Cannot paste “{}” into itself", name.to_string_lossy()));
+        return Err(tr!("Cannot paste “{0}” into itself", name.to_string_lossy()));
     }
     // Same inode also catches the folder reached through a bind mount.
     let parent = entry.parent().expect("canonical_entry keeps the parent");
@@ -142,17 +144,14 @@ pub fn run(
             || same_entry(source, target)
         {
             let name = target.file_name().unwrap_or_default().to_string_lossy();
-            return Err(format!("Cannot replace “{name}”: it contains what is being pasted"));
+            return Err(tr!("Cannot replace “{0}”: it contains what is being pasted", name));
         }
         trash(target)?;
     }
     match mode {
         Mode::Copy => copy_all(source, target, cancel, on_progress),
         // `rename` silently replaces a file that appeared after `plan` checked.
-        Mode::Move if !replace && exists(target) => Err(format!(
-            "“{}” already exists",
-            target.file_name().unwrap_or_default().to_string_lossy()
-        )),
+        Mode::Move if !replace && exists(target) => Err(tr!("“{0}” already exists", target.file_name().unwrap_or_default().to_string_lossy())),
         Mode::Move => match rename(source, target, cancel) {
             Ok(()) => {
                 on_progress(&Progress { files_done: 1, files_total: 1, ..Progress::default() });
@@ -161,7 +160,7 @@ pub fn run(
             Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
                 move_by_copy(source, target, cancel, on_progress)
             }
-            Err(e) => Err(format!("Cannot move {}: {e}", source.display())),
+            Err(e) => Err(tr!("Cannot move {0}: {1}", source.display(), e)),
         },
     }
 }
@@ -257,7 +256,7 @@ impl<F: FnMut(&Progress)> Copier<'_, F> {
         if self.cancelled() {
             return Ok(Outcome::Cancelled);
         }
-        let fail = |e: std::io::Error| format!("Cannot copy {}: {e}", from.display());
+        let fail = |e: std::io::Error| tr!("Cannot copy {0}: {1}", from.display(), e);
         let meta = std::fs::symlink_metadata(from).map_err(fail)?;
         let kind = meta.file_type();
         if kind.is_symlink() {
@@ -279,16 +278,13 @@ impl<F: FnMut(&Progress)> Copier<'_, F> {
             return self.copy_file(from, to, &meta);
         } else {
             // Pipes, sockets and devices: opening one can block forever or never end.
-            return Err(format!(
-                "Cannot copy {}: not a regular file, folder or link",
-                from.display()
-            ));
+            return Err(tr!("Cannot copy {0}: not a regular file, folder or link", from.display()));
         }
         Ok(Outcome::Done)
     }
 
     fn copy_children(&mut self, from: &Path, to: &Path) -> Result<Outcome, String> {
-        let fail = |e: std::io::Error| format!("Cannot copy {}: {e}", from.display());
+        let fail = |e: std::io::Error| tr!("Cannot copy {0}: {1}", from.display(), e);
         // Sorted so a cancelled copy leaves a predictable prefix behind.
         let mut names: Vec<_> =
             std::fs::read_dir(from).map_err(fail)?.flatten().map(|i| i.file_name()).collect();
@@ -304,7 +300,7 @@ impl<F: FnMut(&Progress)> Copier<'_, F> {
     /// Chunked so progress moves and cancel is noticed inside big files.
     /// A half-written file is removed on cancel or error.
     fn copy_file(&mut self, from: &Path, to: &Path, meta: &Metadata) -> Result<Outcome, String> {
-        let fail = |e: std::io::Error| format!("Cannot copy {}: {e}", from.display());
+        let fail = |e: std::io::Error| tr!("Cannot copy {0}: {1}", from.display(), e);
         let mut src = File::open(from).map_err(fail)?;
         let mut dst = OpenOptions::new().write(true).create_new(true).open(to).map_err(fail)?;
         let discard = |dst: File| {

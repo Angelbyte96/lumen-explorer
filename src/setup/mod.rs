@@ -10,6 +10,8 @@ pub mod windows;
 
 use std::path::{Path, PathBuf};
 
+use crate::i18n::tr;
+
 /// The switches, as the machine has them or as the user wants them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Switches {
@@ -126,11 +128,11 @@ pub trait System {
     /// A script for the user to run that does what [`Self::install`] would:
     /// what Setup offers while Install is held ([`INSTALL_HELD`]).
     fn install_script(&self, _dir: &Path, _want: Switches) -> Result<String, String> {
-        Err("Lumen installs itself here".into())
+        Err(tr!("Lumen installs itself here").into())
     }
     /// A script for the user to run that does what [`Self::apply`] would.
     fn apply_script(&self, _want: Switches) -> Result<String, String> {
-        Err("Lumen changes the switches itself here".into())
+        Err(tr!("Lumen changes the switches itself here").into())
     }
 }
 

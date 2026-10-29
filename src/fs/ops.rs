@@ -3,27 +3,29 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::i18n::tr;
+
 /// Moves `path` to the trash. Never deletes permanently.
 pub fn trash(path: &Path) -> Result<(), String> {
     // `trash` would report a missing file as a generic error; say it plainly.
     if !exists(path) {
-        return Err(format!("No longer exists: {}", path.display()));
+        return Err(tr!("No longer exists: {0}", path.display()));
     }
-    trash::delete(path).map_err(|e| format!("Cannot move {} to trash: {e}", path.display()))
+    trash::delete(path).map_err(|e| tr!("Cannot move {0} to trash: {1}", path.display(), e))
 }
 
 /// Deletes `path` for good, without the trash. A folder goes with everything
 /// in it; a symlink is removed itself, never what it points to.
 pub fn delete_forever(path: &Path) -> Result<(), String> {
-    let meta = std::fs::symlink_metadata(path).map_err(|_| format!("No longer exists: {}", path.display()))?;
+    let meta = std::fs::symlink_metadata(path).map_err(|_| tr!("No longer exists: {0}", path.display()))?;
     let result = if meta.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
-    result.map_err(|e| format!("Cannot delete {}: {e}", path.display()))
+    result.map_err(|e| tr!("Cannot delete {0}: {1}", path.display(), e))
 }
 
 /// Opens a file with its default app, without waiting for it.
 #[cfg(not(windows))]
 pub fn open_with_default_app(path: &Path) -> Result<(), String> {
-    open::that_detached(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))
+    open::that_detached(path).map_err(|e| tr!("Cannot open {0}: {1}", path.display(), e))
 }
 
 /// Opens a file the way a double-click in File Explorer does. The `open` crate
@@ -64,7 +66,7 @@ pub fn open_with_default_app(path: &Path) -> Result<(), String> {
 fn open_failure(code: i32, path: &Path) -> Option<String> {
     const ERROR_CANCELLED: i32 = 1223;
     (code != ERROR_CANCELLED)
-        .then(|| format!("Cannot open {}: {}", path.display(), std::io::Error::from_raw_os_error(code)))
+        .then(|| tr!("Cannot open {0}: {1}", path.display(), std::io::Error::from_raw_os_error(code)))
 }
 
 /// ".png" for "photo.png": what Windows looks up to judge a file type.
@@ -98,13 +100,13 @@ pub fn allowed_in_name(c: char) -> bool {
 /// Checks a name typed by the user for a new or renamed entry.
 pub fn validate_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
-        Err("Name cannot be empty".into())
+        Err(tr!("Name cannot be empty").into())
     } else if name.contains('\0') {
-        Err("Name cannot contain a NUL character".into())
+        Err(tr!("Name cannot contain a NUL character").into())
     } else if let Some(c) = name.chars().find(|&c| !allowed_in_name(c)) {
-        Err(format!("Name cannot contain “{c}”"))
+        Err(tr!("Name cannot contain “{0}”", c))
     } else if name == "." || name == ".." {
-        Err(format!("“{name}” is not a valid name"))
+        Err(tr!("“{0}” is not a valid name", name))
     } else {
         Ok(())
     }
@@ -198,7 +200,7 @@ pub enum Renamed {
 pub fn rename(from: &Path, new_name: &str, replace: bool) -> Result<Renamed, String> {
     validate_name(new_name)?;
     if !exists(from) {
-        return Err(format!("No longer exists: {}", from.display()));
+        return Err(tr!("No longer exists: {0}", from.display()));
     }
     // The list shows names lossily, so a non-UTF-8 name submitted as shown is unchanged.
     let old = from.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
@@ -213,25 +215,23 @@ pub fn rename(from: &Path, new_name: &str, replace: bool) -> Result<Renamed, Str
         trash(&to)?;
     }
     std::fs::rename(from, &to)
-        .map_err(|e| format!("Cannot rename {}: {e}", from.display()))?;
+        .map_err(|e| tr!("Cannot rename {0}: {1}", from.display(), e))?;
     Ok(Renamed::To(to))
 }
-
-/// Name given to a folder created with Ctrl+Shift+N before the user renames it.
-pub const NEW_FOLDER: &str = "New Folder";
 
 /// Creates "New Folder" inside `parent`, or "New Folder 2", "New Folder 3"...
 /// when the name is taken. Returns the created folder.
 pub fn create_folder(parent: &Path) -> Result<PathBuf, String> {
     for n in 1.. {
-        let name = if n == 1 { NEW_FOLDER.to_owned() } else { format!("{NEW_FOLDER} {n}") };
+        let base = tr!("New Folder");
+        let name = if n == 1 { base.to_owned() } else { format!("{base} {n}") };
         let path = parent.join(name);
         // `create_dir` fails on a taken name, so there is no check-then-create race.
         match std::fs::create_dir(&path) {
             Ok(()) => return Ok(path),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
-                return Err(format!("Cannot create a folder in {}: {e}", parent.display()));
+                return Err(tr!("Cannot create a folder in {0}: {1}", parent.display(), e));
             }
         }
     }
@@ -243,12 +243,12 @@ pub fn create_folder(parent: &Path) -> Result<PathBuf, String> {
 /// nothing existing is ever overwritten. Returns the created file.
 pub fn create_file(parent: &Path, template: Option<&Path>) -> Result<PathBuf, String> {
     use std::io::Write;
-    let fail = |e: std::io::Error| format!("Cannot create a file in {}: {e}", parent.display());
+    let fail = |e: std::io::Error| tr!("Cannot create a file in {0}: {1}", parent.display(), e);
     let contents = match template {
-        Some(t) => std::fs::read(t).map_err(|e| format!("Cannot read the template {}: {e}", t.display()))?,
+        Some(t) => std::fs::read(t).map_err(|e| tr!("Cannot read the template {0}: {1}", t.display(), e))?,
         None => Vec::new(),
     };
-    let name = template.and_then(|t| t.file_name()).map_or_else(|| NEW_FILE.to_owned(), |n| n.to_string_lossy().into_owned());
+    let name = template.and_then(|t| t.file_name()).map_or_else(|| tr!("New File").to_owned(), |n| n.to_string_lossy().into_owned());
     let (stem, ext) = match name.rfind('.').filter(|&dot| dot > 0) {
         Some(dot) => name.split_at(dot),
         None => (name.as_str(), ""),
@@ -271,8 +271,6 @@ pub fn create_file(parent: &Path, template: Option<&Path>) -> Result<PathBuf, St
     }
     unreachable!("the name counter is unbounded")
 }
-
-pub const NEW_FILE: &str = "New File";
 
 #[cfg(test)]
 pub(crate) mod tests {

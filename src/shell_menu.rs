@@ -10,6 +10,7 @@ use std::path::Path;
 
 use crate::app::Sort;
 use crate::fs::Entry;
+use crate::i18n::tr;
 use crate::menu::{self, Command, Item, Kind};
 
 /// A shell label without its accelerator marks ("&Open" -> "Open", "&&" ->
@@ -126,18 +127,18 @@ pub fn entry_menu(shell: Vec<Item>, selection: &[&Entry], bookmarked: bool, can_
     // Without CMF_CANRENAME's answer (or with a shell that leaves it out) Lumen's own.
     if !contains(&items, &Command::Rename) {
         items.push(Item::separator());
-        items.push(Item::run("Rename", Some("F2"), single, Command::Rename));
+        items.push(Item::run(tr!("Rename"), Some("F2"), single, Command::Rename));
     }
     items.push(Item::separator());
     if folder {
-        items.push(Item::run("Open in New Tab", None, true, Command::OpenInNewTab));
+        items.push(Item::run(tr!("Open in New Tab"), None, true, Command::OpenInNewTab));
     }
-    items.push(Item::run("Copy Path", Some("Ctrl+Shift+C"), true, Command::CopyPath));
-    items.push(Item::run("Delete Permanently", Some("Shift+Delete"), true, Command::DeleteForever));
+    items.push(Item::run(tr!("Copy Path"), Some("Ctrl+Shift+C"), true, Command::CopyPath));
+    items.push(Item::run(tr!("Delete Permanently"), Some("Shift+Delete"), true, Command::DeleteForever));
     if folder {
-        let bookmark = if bookmarked { "Remove from Bookmarks" } else { "Add to Bookmarks" };
+        let bookmark = if bookmarked { tr!("Remove from Bookmarks") } else { tr!("Add to Bookmarks") };
         items.push(Item::run(bookmark, None, true, Command::ToggleBookmark));
-        items.push(Item::run("Calculate Size", Some("Alt+R"), true, Command::Count));
+        items.push(Item::run(tr!("Calculate Size"), Some("Alt+R"), true, Command::Count));
     }
     items
 }
@@ -152,7 +153,7 @@ pub fn place_menu(shell: Vec<Item>, path: &Path, bookmarked: bool) -> Vec<Item> 
     }
     let mut items = tidy(for_place(shell, path));
     if !contains(&items, &Command::OpenPlace(path.to_path_buf())) {
-        items.splice(0..0, [Item::run("Open", None, true, Command::OpenPlace(path.to_path_buf())), Item::separator()]);
+        items.splice(0..0, [Item::run(tr!("Open"), None, true, Command::OpenPlace(path.to_path_buf())), Item::separator()]);
         items = tidy(items);
     }
     items.push(Item::separator());
@@ -192,12 +193,12 @@ pub fn background_menu(shell: Vec<Item>, can_paste: bool, sort: Sort) -> Vec<Ite
     }));
     // The shell leaves Paste to File Explorer, which adds its own.
     if !contains(&items, &Command::Paste) {
-        items.insert(0, Item::run("Paste", Some("Ctrl+V"), can_paste, Command::Paste));
+        items.insert(0, Item::run(tr!("Paste"), Some("Ctrl+V"), can_paste, Command::Paste));
     }
     let has_refresh = contains(&items, &Command::Refresh);
     items.extend([Item::separator(), menu::sort_menu(sort)]);
     if !has_refresh {
-        items.push(Item::run("Refresh", None, true, Command::Refresh));
+        items.push(Item::run(tr!("Refresh"), None, true, Command::Refresh));
     }
     items
 }
