@@ -5,6 +5,8 @@
 
 use eframe::egui::{self, viewport::ResizeDirection, CursorIcon, ViewportCommand};
 
+use crate::i18n::tr;
+
 /// How far in from the window's border its edges resize it.
 pub const EDGE: f32 = 5.0;
 
@@ -33,10 +35,10 @@ impl Button {
     /// The command's name and shortcut, as the hover hint shows them.
     pub fn hint(self) -> (&'static str, &'static str) {
         match self {
-            Button::SearchTabs => ("Search Tabs", "Ctrl+Shift+A"),
-            Button::Minimize => ("Minimize Window", "Alt+M"),
-            Button::Maximize => ("Toggle Fullscreen", "F11"),
-            Button::Close => ("Close Window", "Alt+F4"),
+            Button::SearchTabs => (tr!("Search Tabs"), "Ctrl+Shift+A"),
+            Button::Minimize => (tr!("Minimize Window"), "Alt+M"),
+            Button::Maximize => (tr!("Toggle Fullscreen"), "F11"),
+            Button::Close => (tr!("Close Window"), "Alt+F4"),
         }
     }
 }
@@ -455,7 +457,7 @@ mod tests {
         main_bar(&ctx, vec![Event::PointerMoved(at)]);
         assert!(!main_bar(&ctx, vec![press(at, true)]), "on the release");
         assert!(main_bar(&ctx, vec![press(at, false)]));
-        assert_eq!(Button::SearchTabs.hint(), ("Search Tabs", "Ctrl+Shift+A"));
+        assert_eq!(Button::SearchTabs.hint(), (tr!("Search Tabs"), "Ctrl+Shift+A"));
     }
 
     #[test]
@@ -477,9 +479,9 @@ mod tests {
 
     #[test]
     fn hovering_a_window_button_names_its_command_and_shortcut() {
-        assert_eq!(Button::Minimize.hint(), ("Minimize Window", "Alt+M"));
-        assert_eq!(Button::Maximize.hint(), ("Toggle Fullscreen", "F11"));
-        assert_eq!(Button::Close.hint(), ("Close Window", "Alt+F4"));
+        assert_eq!(Button::Minimize.hint(), (tr!("Minimize Window"), "Alt+M"));
+        assert_eq!(Button::Maximize.hint(), (tr!("Toggle Fullscreen"), "F11"));
+        assert_eq!(Button::Close.hint(), (tr!("Close Window"), "Alt+F4"));
         for button in Button::ALL {
             let ctx = egui::Context::default();
             ctx.all_styles_mut(|s| s.interaction.tooltip_delay = 0.0);

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use crate::folder_views::Scope;
+use crate::i18n::tr;
 
 
 pub const BACK: &str = "⏴";
@@ -100,9 +101,9 @@ pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
     let mut event = None;
     ui.horizontal(|ui| {
         let buttons = [
-            (BACK, nav.can_back, "Back (Alt+Left)", ToolbarEvent::Back),
-            (FORWARD, nav.can_forward, "Forward (Alt+Right)", ToolbarEvent::Forward),
-            (UP, can_go_up(nav.current), "Up to the parent folder (Alt+Up)", ToolbarEvent::Up),
+            (BACK, nav.can_back, tr!("Back (Alt+Left)"), ToolbarEvent::Back),
+            (FORWARD, nav.can_forward, tr!("Forward (Alt+Right)"), ToolbarEvent::Forward),
+            (UP, can_go_up(nav.current), tr!("Up to the parent folder (Alt+Up)"), ToolbarEvent::Up),
         ];
         for (glyph, enabled, hint, on_click) in buttons {
             let button = egui::Button::new(egui::RichText::new(glyph).size(16.0)).frame(false);
@@ -117,9 +118,9 @@ pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
         }
         ui.separator();
         let (star, hint) = if nav.bookmarked {
-            (BOOKMARKED, "Remove from bookmarks (Ctrl+D)")
+            (BOOKMARKED, tr!("Remove from bookmarks (Ctrl+D)"))
         } else {
-            (NOT_BOOKMARKED, "Add to bookmarks (Ctrl+D)")
+            (NOT_BOOKMARKED, tr!("Add to bookmarks (Ctrl+D)"))
         };
         let star = egui::Button::new(egui::RichText::new(star).size(16.0)).frame(false);
         let star = ui.add(star);
@@ -171,7 +172,7 @@ fn lock(ui: &mut egui::Ui, saved: &SavedView) -> Option<ToolbarEvent> {
     let color = if saved_here || button.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
     crate::ui::icons::paint_lock(ui.painter(), rect.shrink(side * 0.15), color);
     crate::ui::focus_ring(ui, &button);
-    let button = button.on_hover_text("Saved view settings");
+    let button = button.on_hover_text(tr!("Saved view settings"));
     let mut chosen = None;
     // Tab took the focus out of the lock and its menu: nothing else closes it.
     let ctx = ui.ctx().clone();
@@ -184,20 +185,20 @@ fn lock(ui: &mut egui::Ui, saved: &SavedView) -> Option<ToolbarEvent> {
         egui::Popup::close_id(&ctx, lock_menu_id());
     }
     egui::Popup::menu(&button).show(|ui| {
-        ui.label(egui::RichText::new("Saved view settings").strong());
+        ui.label(egui::RichText::new(tr!("Saved view settings")).strong());
         if let Some(above) = &saved.covered_by {
             let name = above.file_name().map_or_else(|| above.display().to_string(), |n| n.to_string_lossy().into_owned());
-            ui.weak(format!("Saved with {name} and its subfolders"));
+            ui.weak(tr!("Saved with {0} and its subfolders", name));
         }
-        let choices = [(None, "None"), (Some(Scope::Folder), "This folder"), (Some(Scope::Tree), "This folder and subfolders")];
+        let choices = [(None, tr!("None")), (Some(Scope::Folder), tr!("This folder")), (Some(Scope::Tree), tr!("This folder and subfolders"))];
         for (scope, label) in choices {
             if ui.radio(saved.own == scope, label).clicked() {
                 chosen = Some(ToolbarEvent::SaveView(scope));
             }
         }
         ui.separator();
-        let set = ui.add_enabled(!saved.is_default, egui::Button::new("Set as default"));
-        if set.on_disabled_hover_text("The view and order shown are the default").clicked() {
+        let set = ui.add_enabled(!saved.is_default, egui::Button::new(tr!("Set as default")));
+        if set.on_disabled_hover_text(tr!("The view and order shown are the default")).clicked() {
             chosen = Some(ToolbarEvent::SetDefaultView);
         }
     });
@@ -232,7 +233,7 @@ fn crumb_bar(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
                 let rest = egui::vec2(ui.available_width().max(40.0), height);
                 let response = ui.allocate_response(rest, egui::Sense::click());
                 crate::ui::focus_ring(ui, &response);
-                if response.on_hover_text("Edit the path (Ctrl+L)").clicked() {
+                if response.on_hover_text(tr!("Edit the path (Ctrl+L)")).clicked() {
                     event = Some(ToolbarEvent::EditPath);
                 }
             });

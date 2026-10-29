@@ -10,6 +10,7 @@ use std::path::Path;
 use eframe::egui;
 
 use crate::format::{format_size, format_time};
+use crate::i18n::tr;
 use crate::fs::Entry;
 use crate::input::Confirm;
 use crate::recycle_bin::Recycled;
@@ -42,13 +43,13 @@ impl Subject {
     pub fn recycled(items: &[Recycled]) -> Self {
         if let [item] = items {
             let shown = Entry { name: item.name.clone(), path: item.original.clone(), is_dir: item.is_dir, size: None, modified: None, hidden: false };
-            let mut facts = vec![("Original Location", item.location.clone())];
+            let mut facts = vec![(tr!("Original Location"), item.location.clone())];
             if let Some(deleted) = item.deleted {
-                facts.push(("Date Deleted", format_time(deleted)));
+                facts.push((tr!("Date Deleted"), format_time(deleted)));
             }
             // A folder's record may hold no size.
             if !item.is_dir || item.size > 0 {
-                facts.push(("Size", format_size(item.size)));
+                facts.push((tr!("Size"), format_size(item.size)));
             }
             return Self { icon: icons::kind_of(&shown), name: item.name.clone(), facts };
         }
@@ -61,25 +62,25 @@ impl Subject {
         };
         let mut names = items.iter().take(NAMES_SHOWN).map(|item| item.name.as_str()).collect::<Vec<_>>().join(", ");
         if items.len() > NAMES_SHOWN {
-            names += &format!(" and {} more", items.len() - NAMES_SHOWN);
+            names = tr!("{0} and {1} more", names, items.len() - NAMES_SHOWN);
         }
         let icon = if files == 0 { IconKind::Folder } else { IconKind::File };
-        Self { icon, name: plural(items.len() as u64, "item"), facts: vec![("Contains", contains), ("Items", names)] }
+        Self { icon, name: plural(items.len() as u64, "item"), facts: vec![(tr!("Contains"), contains), (tr!("Items"), names)] }
     }
 
     fn one(entry: &Entry) -> Self {
         let icon = icons::kind_of(entry);
-        let mut facts = vec![("Type", entry.kind())];
+        let mut facts = vec![(tr!("Type"), entry.kind())];
         if icon == IconKind::Image
             && let Some((width, height)) = dimensions(&entry.path)
         {
-            facts.push(("Dimensions", format!("{width} × {height}")));
+            facts.push((tr!("Dimensions"), format!("{width} × {height}")));
         }
         if let Some(size) = entry.size.filter(|_| !entry.is_dir) {
-            facts.push(("Size", format_size(size)));
+            facts.push((tr!("Size"), format_size(size)));
         }
         if let Some(modified) = entry.modified {
-            facts.push(("Modified", format_time(modified)));
+            facts.push((tr!("Modified"), format_time(modified)));
         }
         Self { icon, name: entry.name.clone(), facts }
     }
@@ -92,17 +93,17 @@ impl Subject {
             (n, 0) => plural(n, "file"),
             (f, d) => format!("{}, {}", plural(f, "file"), plural(d, "folder")),
         };
-        let mut facts = vec![("Contains", contains)];
+        let mut facts = vec![(tr!("Contains"), contains)];
         // A folder's size is not known without walking it: only files' sizes add up.
         if folders == 0 {
             let total = entries.iter().filter_map(|e| e.size).sum();
-            facts.push(("Size", format_size(total)));
+            facts.push((tr!("Size"), format_size(total)));
         }
         let mut names = entries.iter().take(NAMES_SHOWN).map(|e| e.name.as_str()).collect::<Vec<_>>().join(", ");
         if entries.len() > NAMES_SHOWN {
-            names += &format!(" and {} more", entries.len() - NAMES_SHOWN);
+            names = tr!("{0} and {1} more", names, entries.len() - NAMES_SHOWN);
         }
-        facts.push(("Items", names));
+        facts.push((tr!("Items"), names));
         let icon = if files == 0 { IconKind::Folder } else { IconKind::File };
         Self { icon, name: plural(entries.len() as u64, "item"), facts }
     }
