@@ -161,7 +161,7 @@ fn step_through(ctx: &egui::Context, rows: &[egui::Response]) {
 }
 
 /// Hovering a greyed Lumen Setup says why.
-const SETUP_HELD: &str = "Lumen Setup returns once Lumen is code-signed";
+const NO_SETUP: &str = "Lumen Setup cannot find this user's folders";
 
 /// The ☰ and the panel button, side by side; `setup` is whether the Lumen
 /// Setup row can open its screen (greyed when not).
@@ -197,7 +197,7 @@ pub fn show(ui: &mut egui::Ui, setup: bool) -> Option<AppMenuEvent> {
                 let shortcut = if on_click.is_some() { shortcut } else { "" };
                 let mut row = ui.add_enabled_ui(on_click.is_some(), |ui| row(ui, icon, name, shortcut)).inner;
                 if held {
-                    row = row.on_disabled_hover_text(SETUP_HELD);
+                    row = row.on_disabled_hover_text(NO_SETUP);
                 }
                 if focus_first && n == 0 && name == GROUPS[0][0].1 {
                     row.request_focus();
