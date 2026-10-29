@@ -86,8 +86,8 @@ impl Scheme {
         match self.palette() {
             None => {
                 let mut v = theme.default_visuals();
-                let [r, g, b, _] = v.hyperlink_color.to_srgba_unmultiplied();
-                glass(&mut v, Color32::from_rgba_unmultiplied(r, g, b, GLASS_FRAME_ALPHA));
+                let frame = see_through(v.hyperlink_color);
+                glass(&mut v, frame);
                 v
             }
             Some(palette) => palette.visuals(),
@@ -246,9 +246,13 @@ impl Scheme {
 
 /// How much shows through a glass frame.
 const GLASS_FRAME_ALPHA: u8 = 0x99;
+/// The opaque `color` as a glass frame.
+const fn see_through(color: Color32) -> Color32 {
+    Color32::from_rgba_unmultiplied_const(color.r(), color.g(), color.b(), GLASS_FRAME_ALPHA)
+}
 /// A glass frame in `rgb`.
 const fn glass_frame(rgb: u32) -> Color32 {
-    Color32::from_rgba_unmultiplied_const((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, GLASS_FRAME_ALPHA)
+    see_through(hex(rgb))
 }
 /// Space's frames and separators: its lavender, see-through.
 const SPACE_BORDER: Color32 = glass_frame(0x9060AA);
@@ -257,8 +261,10 @@ const GLASS_CORNERS: u8 = 6;
 /// How round windows and menus are.
 const GLASS_WINDOW_CORNERS: u8 = 10;
 
-/// The glass look on top of a scheme's colors: controls and windows
-/// framed in `frame`, rounder corners (there is no real blur behind them).
+/// The glass look on top of a scheme's colors: controls at rest and
+/// windows framed in `frame`, rounder corners (there is no real blur behind
+/// them). Hovered, pressed and open controls keep their own frames, so the
+/// see-through one marks a control at rest.
 fn glass(v: &mut Visuals, frame: Color32) {
     v.window_stroke = egui::Stroke::new(1.0, frame);
     let w = &mut v.widgets;
@@ -285,9 +291,9 @@ struct Palette {
     inner: Color32,
     /// Buttons and other controls at rest, close to the background.
     widget: Color32,
-    /// Around buttons and windows: the accent, see-through.
+    /// Around buttons at rest and windows: the accent, see-through.
     frame: Color32,
-    /// Separators and frames.
+    /// Separators, and around hovered and open controls.
     border: Color32,
     text: Color32,
     /// Hovered and pressed text, headings.
@@ -310,7 +316,6 @@ impl Palette {
         let pressed = self.widget.lerp_to_gamma(self.strong, 0.16);
         v.panel_fill = self.background;
         v.window_fill = self.surface;
-        v.window_stroke = stroke(1.0, self.border);
         v.extreme_bg_color = self.inner;
         v.faint_bg_color = self.background.lerp_to_gamma(self.strong, 0.04);
         v.code_bg_color = self.widget;
@@ -417,6 +422,9 @@ mod tests {
             assert_eq!(v.widgets.inactive.bg_fill, egui.widgets.inactive.bg_fill, "{theme:?}");
             assert_eq!(v.widgets.noninteractive.fg_stroke, egui.widgets.noninteractive.fg_stroke, "{theme:?}");
             assert_ne!(v, egui, "{theme:?}: with the glass look");
+            let [r, g, b, _] = egui.hyperlink_color.to_srgba_unmultiplied();
+            let frame = Color32::from_rgba_unmultiplied(r, g, b, GLASS_FRAME_ALPHA);
+            assert_eq!((v.widgets.inactive.bg_stroke.color, v.window_stroke.color), (frame, frame), "{theme:?}: framed in see-through link blue");
         }
     }
 
@@ -437,12 +445,16 @@ mod tests {
         }
     }
 
+    /// Below this contrast a button reads as part of the panel, told apart
+    /// by its glass frame rather than its fill.
+    const CLOSE_TO_THE_PANEL: f32 = 1.3;
+
     #[test]
     fn the_fixed_schemes_buttons_sit_close_to_the_panel() {
         for scheme in Scheme::ALL.into_iter().filter(|&s| s != Scheme::Lumen) {
             let v = scheme.visuals(Theme::Dark);
             let step = contrast(v.widgets.inactive.bg_fill, v.panel_fill);
-            assert!(step < 1.3, "{scheme:?}: a button {step:.2} away from the panel");
+            assert!(step < CLOSE_TO_THE_PANEL, "{scheme:?}: a button {step:.2} away from the panel");
         }
     }
 
