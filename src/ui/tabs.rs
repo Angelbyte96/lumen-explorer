@@ -1,5 +1,7 @@
-//! The tab bar under the system title bar: one tab per open folder, a × to
-//! close each (when there is more than one) and a + for a new one.
+//! The tab bar, which is also the window's title bar (see `caption`): one tab
+//! per open folder, a × to close each (when there is more than one) and a +
+//! for a new one. The tabs take only their own width; the empty space after
+//! them is left to the bar, which moves the window.
 
 use std::path::{Path, PathBuf};
 

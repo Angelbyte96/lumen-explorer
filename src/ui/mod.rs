@@ -1,5 +1,6 @@
 pub mod confirm;
 pub mod app_menu;
+pub mod caption;
 pub mod context_menu;
 pub mod dnd;
 pub mod drives_view;

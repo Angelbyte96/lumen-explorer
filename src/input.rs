@@ -35,6 +35,10 @@ pub enum Action {
     AppMenu,
     /// Ctrl+,: the Options window.
     Options,
+    /// Alt+M: minimize the window.
+    Minimize,
+    /// F11: maximize the window, or restore it when it is maximized.
+    ToggleMaximize,
     ToggleHidden,
     /// Ctrl+E: also list what the subfolders hold, all the way down.
     ToggleFlat,
@@ -130,6 +134,31 @@ pub fn read_actions(ctx: &Context) -> Vec<Action> {
         actions.extend(wheel_zoom(ctx, &events));
     }
     actions
+}
+
+/// The window's own keys (Alt+M, F11): read on every screen, whoever holds the
+/// keyboard, and only the first press of a held key counts.
+pub fn read_window_actions(ctx: &Context) -> Vec<Action> {
+    ctx.input_mut(|i| {
+        let mut actions = Vec::new();
+        // Exact modifiers: matching ignores an extra Shift or Alt, and Ctrl+Alt is AltGr.
+        i.events.retain(|event| match event {
+            Event::Key { key: Key::M, pressed: true, repeat, modifiers, .. } if *modifiers == Modifiers::ALT => {
+                if !repeat {
+                    actions.push(Action::Minimize);
+                }
+                false
+            }
+            Event::Key { key: Key::F11, pressed: true, repeat, modifiers, .. } if modifiers.is_none() => {
+                if !repeat {
+                    actions.push(Action::ToggleMaximize);
+                }
+                false
+            }
+            _ => true,
+        });
+        actions
+    })
 }
 
 /// The list holds the keys while it has the keyboard focus or nothing has.
@@ -835,5 +864,49 @@ mod tests {
         assert_eq!(stop(&ctx, escape), [Action::Cancel]);
         // The ring went away with the keys; the list still has them.
         assert_eq!(stop(&ctx, vec![release(Key::Escape, Modifiers::NONE), key(Key::ArrowDown, Modifiers::NONE)]), [Action::Move(1)]);
+    }
+
+    /// Runs one frame with these events and returns what `read_window_actions` saw.
+    fn window_actions_for(events: Vec<Event>) -> Vec<Action> {
+        let ctx = Context::default();
+        let mut actions = Vec::new();
+        ctx.run_ui(RawInput { events, ..RawInput::default() }, |ui| {
+            actions = read_window_actions(ui.ctx());
+        })
+        .drop_without_applying_deltas();
+        actions
+    }
+
+    #[test]
+    fn alt_m_minimizes_and_f11_toggles_maximized() {
+        assert_eq!(window_actions_for(vec![key(Key::M, Modifiers::ALT)]), [Action::Minimize]);
+        assert_eq!(window_actions_for(vec![key(Key::F11, Modifiers::NONE)]), [Action::ToggleMaximize]);
+    }
+
+    #[test]
+    fn other_combinations_of_those_keys_are_not_the_window_keys() {
+        for (k, held) in [
+            (Key::M, Modifiers::NONE),
+            (Key::M, Modifiers::CTRL),
+            (Key::M, Modifiers::ALT | Modifiers::CTRL),
+            (Key::F11, Modifiers::ALT),
+            (Key::F11, Modifiers::SHIFT),
+            (Key::F11, Modifiers::CTRL),
+        ] {
+            assert_eq!(window_actions_for(vec![key(k, held)]), [], "{k:?} with {held:?}");
+        }
+    }
+
+    #[test]
+    fn a_held_window_key_acts_once() {
+        let held = |k, modifiers| Event::Key { key: k, physical_key: None, pressed: true, repeat: true, modifiers };
+        let events = vec![key(Key::F11, Modifiers::NONE), held(Key::F11, Modifiers::NONE), key(Key::M, Modifiers::ALT), held(Key::M, Modifiers::ALT)];
+        assert_eq!(window_actions_for(events), [Action::ToggleMaximize, Action::Minimize]);
+    }
+
+    #[test]
+    fn alt_m_types_nothing_into_the_filter_and_the_list_does_not_read_it() {
+        let actions = actions_for(vec![Event::ModifiersChanged(Modifiers::ALT), key(Key::M, Modifiers::ALT), Event::Text("m".into())]);
+        assert_eq!(actions, []);
     }
 }
