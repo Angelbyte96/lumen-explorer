@@ -213,6 +213,7 @@ pub fn position_text(selected: Option<usize>, rows: usize) -> String {
 /// "12 items", or how many rows the filter left.
 pub fn count_text(items: usize, filtering: bool) -> String {
     match (filtering, items) {
+        (false, 1) => tr!("1 item").into(),
         (false, n) => tr!("{0} items", n),
         (true, 0) => tr!("No matches").into(),
         (true, 1) => tr!("1 match").into(),
@@ -458,6 +459,15 @@ mod tests {
         assert_eq!(count_text(3, true), "3 matches");
         assert_eq!(count_text(1, true), "1 match");
         assert_eq!(count_text(0, true), "No matches");
+    }
+
+    #[test]
+    fn one_item_is_counted_in_the_singular() {
+        assert_eq!(count_text(1, false), "1 item");
+        crate::i18n::set(crate::i18n::Lang::Es);
+        let spanish = [count_text(1, false), count_text(2, false)];
+        crate::i18n::set(crate::i18n::Lang::En);
+        assert_eq!(spanish, ["1 elemento", "2 elementos"]);
     }
 
     #[test]
