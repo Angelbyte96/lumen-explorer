@@ -10,6 +10,7 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::format::{format_size, format_time};
 use crate::fs::entry::kind_of;
+use crate::i18n::tr;
 use crate::recycle_bin::Recycled;
 use crate::ui::{file_list, icons};
 
@@ -263,7 +264,7 @@ pub struct Look<'a> {
 pub fn show(ui: &mut egui::Ui, rows: &[Recycled], look: &Look) -> Option<RecycleEvent> {
     let mut event = None;
     if rows.is_empty() {
-        ui.weak(if look.loading { "Reading the Recycle Bin…" } else { "The Recycle Bin is empty" });
+        ui.weak(if look.loading { tr!("Reading the Recycle Bin…") } else { tr!("The Recycle Bin is empty") });
         return None;
     }
     let row_height = ui.text_style_height(&egui::TextStyle::Body) + 10.0;

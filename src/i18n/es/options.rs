@@ -1,0 +1,40 @@
+//! The Options window and the Language option.
+
+pub const ENTRIES: &[(&str, &str)] = &[
+    // The Language option.
+    ("System", "Sistema"),
+    // The Options window.
+    ("Language", "Idioma"),
+    ("The language of the interface: the system's, or one chosen.", "El idioma de la interfaz: el del sistema o uno elegido."),
+    ("System Light / Dark Scheme", "Esquema claro / oscuro del sistema"),
+    ("Color Scheme", "Esquema de color"),
+    ("Light Color Scheme", "Esquema de color claro"),
+    ("Dark Color Scheme", "Esquema de color oscuro"),
+    ("Scroll Beyond Last Item", "Desplazar más allá del último elemento"),
+    ("Reverse Scroll Direction", "Invertir la dirección de desplazamiento"),
+    ("Character Key Action", "Acción de las teclas de caracteres"),
+    ("Load On Startup", "Cargar al iniciar"),
+    ("New Tab Show", "Mostrar en pestaña nueva"),
+    ("Automatically adapt between light and dark color schemes based on system settings.", "Cambia solo entre los esquemas claro y oscuro según la configuración del sistema."),
+    ("Applies a color palette to all UI elements.", "Aplica una paleta de colores a toda la interfaz."),
+    ("Color theme applied when the system uses bright colors.", "Tema de color que se aplica cuando el sistema usa colores claros."),
+    ("Color theme applied when the system uses dark colors.", "Tema de color que se aplica cuando el sistema usa colores oscuros."),
+    ("Allows scrolling past the last item for extra space.", "Permite desplazarse más allá del último elemento para dejar espacio."),
+    ("Reverses the scroll direction in scrollable views.", "Invierte la dirección de desplazamiento en las vistas desplazables."),
+    ("Determines the action when you press raw character keys without modifiers.", "Define qué pasa al pulsar una tecla de carácter sin modificadores."),
+    ("Previous session or location to load on startup.", "Sesión anterior o ubicación que se carga al iniciar."),
+    ("Location to open in a new tab.", "Ubicación que se abre en una pestaña nueva."),
+    ("Last Session", "Última sesión"),
+    ("Home", "Carpeta personal"),
+    ("Folder: {0}", "Carpeta: {0}"),
+    ("Up Down to navigate · Enter to use · Ctrl+R to reset · Escape to dismiss", "Arriba Abajo para moverse · Intro para usar · Ctrl+R para restablecer · Escape para cerrar"),
+    ("Select an option…", "Elige una opción…"),
+    ("Restore default setting.", "Restablecer el valor predeterminado."),
+    ("Back (Escape)", "Atrás (Escape)"),
+    // Behavior values.
+    ("Trigger Hotkey", "Ejecutar atajo"),
+    ("Type In Filter", "Escribir en el filtro"),
+    ("Select Typed Item", "Seleccionar lo escrito"),
+    ("Root", "Raíz"),
+    ("Current", "Actual"),
+];

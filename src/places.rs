@@ -4,6 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::i18n::tr;
+
 /// Bookmarked folders, in the order they were added.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Bookmarks {
@@ -191,7 +193,7 @@ pub fn places(home: &Path, user_dirs: Option<&str>, trash: Option<&Path>) -> Vec
         }
     }
     if let Some(trash) = trash {
-        places.push(Place { label: "Trash".into(), path: trash.to_path_buf(), trash: true, icon: "user-trash" });
+        places.push(Place { label: tr!("Trash").into(), path: trash.to_path_buf(), trash: true, icon: "user-trash" });
     }
     places
 }
@@ -288,9 +290,15 @@ pub fn is_this_pc(path: &Path) -> bool {
     path == Path::new(THIS_PC)
 }
 
-/// Whether typed text names This PC (on Windows, where it exists).
+/// Whether typed text names This PC (on Windows, where it exists), in
+/// English or in the interface's language.
 pub fn names_this_pc(text: &str) -> bool {
-    cfg!(windows) && text.trim().eq_ignore_ascii_case(THIS_PC)
+    cfg!(windows) && names(text, THIS_PC, tr!("This PC"))
+}
+
+fn names(text: &str, english: &str, shown: &str) -> bool {
+    let text = text.trim();
+    text.eq_ignore_ascii_case(english) || text.to_lowercase() == shown.to_lowercase()
 }
 
 /// What a tab shows for the Recycle Bin (Windows): the entries of every
@@ -312,12 +320,13 @@ pub fn is_marker(path: &Path) -> bool {
     is_this_pc(path) || is_recycle_bin(path)
 }
 
-/// The title a marker shows in a tab, the path bar and the crumbs.
+/// The title a marker shows in a tab, the path bar and the crumbs, in the
+/// interface's language.
 pub fn marker_label(path: &Path) -> Option<&'static str> {
     if is_this_pc(path) {
-        Some(THIS_PC)
+        Some(tr!("This PC"))
     } else {
-        is_recycle_bin(path).then_some(RECYCLE_BIN)
+        is_recycle_bin(path).then(|| tr!("Recycle Bin"))
     }
 }
 
@@ -326,14 +335,14 @@ pub fn named_marker(text: &str) -> Option<PathBuf> {
     if names_this_pc(text) {
         Some(this_pc())
     } else {
-        (cfg!(windows) && text.trim().eq_ignore_ascii_case(RECYCLE_BIN)).then(recycle_bin)
+        (cfg!(windows) && names(text, RECYCLE_BIN, tr!("Recycle Bin"))).then(recycle_bin)
     }
 }
 
 /// `places` with the Recycle Bin last when `windows`: after the user folders.
 pub fn with_recycle_bin(mut places: Vec<Place>, windows: bool) -> Vec<Place> {
     if windows {
-        places.push(Place { label: RECYCLE_BIN.into(), path: recycle_bin(), trash: false, icon: "user-trash" });
+        places.push(Place { label: tr!("Recycle Bin").into(), path: recycle_bin(), trash: false, icon: "user-trash" });
     }
     places
 }
@@ -341,7 +350,7 @@ pub fn with_recycle_bin(mut places: Vec<Place>, windows: bool) -> Vec<Place> {
 /// `places` with This PC first when `windows`: the only system that has it.
 pub fn with_this_pc(mut places: Vec<Place>, windows: bool) -> Vec<Place> {
     if windows {
-        places.insert(0, Place { label: THIS_PC.into(), path: this_pc(), trash: false, icon: "computer" });
+        places.insert(0, Place { label: tr!("This PC").into(), path: this_pc(), trash: false, icon: "computer" });
     }
     places
 }
@@ -372,11 +381,11 @@ impl DriveKind {
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::Local => "Local Disk",
-            Self::Removable => "Removable Disk",
-            Self::Network => "Network Drive",
-            Self::Cd => "CD Drive",
-            Self::Other => "Drive",
+            Self::Local => tr!("Local Disk"),
+            Self::Removable => tr!("Removable Disk"),
+            Self::Network => tr!("Network Drive"),
+            Self::Cd => tr!("CD Drive"),
+            Self::Other => tr!("Drive"),
         }
     }
 }
@@ -415,7 +424,7 @@ pub fn network_label(letter: char, volume: &str, remote: Option<&str>) -> String
     }
     match remote.and_then(share_parts) {
         Some((share, server)) => format!("{share} ({server}) ({letter}:)"),
-        None => format!("Network Drive ({letter}:)"),
+        None => tr!("Network Drive ({0}:)", letter),
     }
 }
 
@@ -530,7 +539,7 @@ pub fn parse_mounts(text: &str) -> Vec<Mount> {
         seen.push(device);
         let label = match path.file_name() {
             Some(name) => name.to_string_lossy().into_owned(),
-            None => "File System".into(),
+            None => tr!("File System").into(),
         };
         mounts.push(Mount { label, path });
     }
@@ -730,7 +739,7 @@ pub fn drive_mask() -> Option<u32> {
 /// "Windows (C:)"; without a volume name, "Local Disk (D:)" or "USB Drive (F:)"
 /// as File Explorer says.
 pub fn drive_label(letter: char, volume: &str, removable: bool) -> String {
-    let unnamed = if removable { "USB Drive" } else { "Local Disk" };
+    let unnamed = if removable { tr!("USB Drive") } else { tr!("Local Disk") };
     let name = if volume.trim().is_empty() { unnamed } else { volume.trim() };
     format!("{name} ({letter}:)")
 }
@@ -1091,6 +1100,18 @@ mod this_pc_tests {
         for text in ["This", "This PC\\", "C:\\"] {
             assert!(!names_this_pc(text), "{text:?}");
         }
+    }
+
+    #[test]
+    fn in_spanish_the_markers_show_and_are_typed_in_spanish_and_english_still_works() {
+        crate::i18n::set(crate::i18n::Lang::Es);
+        let shown = (marker_label(&this_pc()), marker_label(&recycle_bin()));
+        let typed = ["este equipo", "This PC", "Papelera de reciclaje", "recycle bin"].map(named_marker);
+        crate::i18n::set(crate::i18n::Lang::En);
+        assert_eq!(shown, (Some("Este equipo"), Some("Papelera de reciclaje")));
+        let want = |marker: PathBuf| cfg!(windows).then_some(marker);
+        assert_eq!(typed, [want(this_pc()), want(this_pc()), want(recycle_bin()), want(recycle_bin())]);
+        assert_eq!(marker_label(&this_pc()), Some("This PC"), "English as before");
     }
 
     #[test]

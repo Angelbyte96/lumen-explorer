@@ -5,6 +5,7 @@ use eframe::egui;
 use crate::format::format_size;
 use crate::fs::count::Totals;
 use crate::fs::transfer::{Mode, Progress};
+use crate::i18n::tr;
 use crate::ui::view_size::ViewSize;
 
 pub struct Status<'a> {
@@ -81,7 +82,7 @@ pub fn show(ctx: &egui::Context, area: egui::Rect, status: &Status<'_>) -> Optio
                     ui.weak(count_text(status.item_count, true));
                 }
                 if status.hidden_count > 0 && !status.show_hidden {
-                    ui.weak(format!("({} hidden, Ctrl+H to show)", status.hidden_count));
+                    ui.weak(tr!("({0} hidden, Ctrl+H to show)", status.hidden_count));
                 }
             });
         });
@@ -95,12 +96,12 @@ pub fn show(ctx: &egui::Context, area: egui::Rect, status: &Status<'_>) -> Optio
                     ui.separator();
                 }
                 crate::ui::icons::folder(ui);
-                ui.label(status.folder_count.to_string()).on_hover_text("Folders shown");
+                ui.label(status.folder_count.to_string()).on_hover_text(tr!("Folders shown"));
                 ui.add_space(6.0);
                 crate::ui::icons::file(ui);
-                let listed = status.last_elapsed.map(|e| format!("\nListed in {:.2} ms", e.as_secs_f64() * 1000.0)).unwrap_or_default();
+                let listed = status.last_elapsed.map(|e| format!("\n{}", tr!("Listed in {0} ms", format!("{:.2}", e.as_secs_f64() * 1000.0)))).unwrap_or_default();
                 ui.label(position_text(status.selected, status.item_count))
-                    .on_hover_text(format!("Selected row / rows shown ({}){listed}", count_text(status.item_count, false)));
+                    .on_hover_text(format!("{}{listed}", tr!("Selected row / rows shown ({0})", count_text(status.item_count, false))));
                 ui.separator();
                 picked = crate::ui::view_picker::show(ui, status.view);
             });
@@ -125,14 +126,14 @@ fn note(ctx: &egui::Context, area: egui::Rect, above: f32, status: &Status<'_>) 
                 if status.loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Loading…");
+                        ui.label(tr!("Loading…"));
                     });
                 }
                 for running in [&status.job, &status.counting, &status.walking].into_iter().flatten() {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label(running);
-                        ui.weak("Esc to cancel");
+                        ui.weak(tr!("Esc to cancel"));
                     });
                 }
                 if let Some(notice) = status.notice {
@@ -177,8 +178,7 @@ fn filter_bar(ui: &mut egui::Ui, filter: &str, items: usize, caret: bool) {
 
 /// What the empty filter bar says: "Filter 10 files…".
 pub fn filter_placeholder(items: usize) -> String {
-    let noun = if items == 1 { "file" } else { "files" };
-    format!("Filter {items} {noun}…")
+    if items == 1 { tr!("Filter 1 file…").to_owned() } else { tr!("Filter {0} files…", items) }
 }
 
 /// The picked rows' total size: files and folders counted with Alt+R add
@@ -202,7 +202,7 @@ pub fn picked_text(picked: usize, size: &PickedSize) -> Option<String> {
         (bytes, 0) => format_size(bytes),
         (bytes, _) => format!("{} + {folders}", format_size(bytes)),
     };
-    Some(format!("{picked} selected · {total}"))
+    Some(if picked == 1 { tr!("1 selected · {0}", total) } else { tr!("{0} selected · {1}", picked, total) })
 }
 
 /// "9/10": the selected row, counted from 1, of the rows shown.
@@ -213,33 +213,34 @@ pub fn position_text(selected: Option<usize>, rows: usize) -> String {
 /// "12 items", or how many rows the filter left.
 pub fn count_text(items: usize, filtering: bool) -> String {
     match (filtering, items) {
-        (false, n) => format!("{n} items"),
-        (true, 0) => "No matches".into(),
-        (true, 1) => "1 match".into(),
-        (true, n) => format!("{n} matches"),
+        (false, 1) => tr!("1 item").into(),
+        (false, n) => tr!("{0} items", n),
+        (true, 0) => tr!("No matches").into(),
+        (true, 1) => tr!("1 match").into(),
+        (true, n) => tr!("{0} matches", n),
     }
 }
 
 /// "Listing subfolders… 120 items" while a Ctrl+E walk runs.
 pub fn walking_text(found: usize) -> String {
     use crate::ui::preview::plural;
-    format!("Listing subfolders… {}", plural(found as u64, "item"))
+    tr!("Listing subfolders… {0}", plural(found as u64, "item"))
 }
 
 /// "Calculating “sub”… 3 folders · 120 files" while Alt+R runs.
 pub fn counting_text(name: &str, totals: &Totals) -> String {
     use crate::ui::preview::plural;
-    format!("Calculating “{name}”… {} · {}", plural(totals.folders, "folder"), plural(totals.files, "file"))
+    tr!("Calculating “{0}”… {1} · {2}", name, plural(totals.folders, "folder"), plural(totals.files, "file"))
 }
 
 /// "Copying 3/10 — 45%": files done of total, then share of bytes.
 /// `item` is which entry of a several-entry paste is running, and of how many.
 pub fn progress_text(mode: Mode, progress: &Progress, item: Option<(usize, usize)>) -> String {
     let verb = match mode {
-        Mode::Copy => "Copying",
-        Mode::Move => "Moving",
+        Mode::Copy => tr!("Copying"),
+        Mode::Move => tr!("Moving"),
     };
-    let item = item.map(|(n, total)| format!("item {n} of {total}: ")).unwrap_or_default();
+    let item = item.map(|(n, total)| tr!("item {0} of {1}: ", n, total)).unwrap_or_default();
     format!("{verb} {item}{}/{} — {}%", progress.files_done, progress.files_total, progress.percent())
 }
 
@@ -458,6 +459,15 @@ mod tests {
         assert_eq!(count_text(3, true), "3 matches");
         assert_eq!(count_text(1, true), "1 match");
         assert_eq!(count_text(0, true), "No matches");
+    }
+
+    #[test]
+    fn one_item_is_counted_in_the_singular() {
+        assert_eq!(count_text(1, false), "1 item");
+        crate::i18n::set(crate::i18n::Lang::Es);
+        let spanish = [count_text(1, false), count_text(2, false)];
+        crate::i18n::set(crate::i18n::Lang::En);
+        assert_eq!(spanish, ["1 elemento", "2 elementos"]);
     }
 
     #[test]

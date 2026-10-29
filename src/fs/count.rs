@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::i18n::tr;
+
 /// What a folder holds, counted all the way down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Totals {
@@ -29,7 +31,7 @@ pub fn count(
     cancel: &AtomicBool,
     mut on_progress: impl FnMut(&Totals),
 ) -> Result<Option<Totals>, String> {
-    let device = device_of(root).map_err(|err| format!("Cannot read {}: {err}", root.display()))?;
+    let device = device_of(root).map_err(|err| tr!("Cannot read {0}: {1}", root.display(), err))?;
     let mut totals = Totals::default();
     // A stack, not recursion: a very deep tree cannot overflow it.
     let mut pending = vec![root.to_path_buf()];
@@ -37,7 +39,7 @@ pub fn count(
     while let Some(dir) = pending.pop() {
         let items = match std::fs::read_dir(&dir) {
             Ok(items) => items,
-            Err(err) if is_root => return Err(format!("Cannot read {}: {err}", root.display())),
+            Err(err) if is_root => return Err(tr!("Cannot read {0}: {1}", root.display(), err)),
             Err(_) => {
                 totals.unreadable += 1;
                 continue;

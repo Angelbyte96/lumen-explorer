@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use eframe::egui;
 
+use crate::i18n::tr;
+
 /// One open tab as the box lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -24,10 +26,10 @@ pub struct Entry {
 pub fn ago(idle: Option<Duration>) -> String {
     let minutes = idle.map_or(0, |idle| idle.as_secs() / 60);
     match minutes {
-        0 => "Now".to_owned(),
-        1..60 => format!("{minutes} min ago"),
-        60..1440 => format!("{} h ago", minutes / 60),
-        _ => format!("{} d ago", minutes / 1440),
+        0 => tr!("Now").to_owned(),
+        1..60 => tr!("{0} min ago", minutes),
+        60..1440 => tr!("{0} h ago", minutes / 60),
+        _ => tr!("{0} d ago", minutes / 1440),
     }
 }
 
@@ -75,7 +77,11 @@ fn field_id() -> egui::Id {
 const WIDTH: f32 = 520.0;
 /// The box's height besides its rows: search field, separators, footer and margins.
 const CHROME: f32 = 140.0;
-const FOOTER: &str = "Up Down to navigate · Enter to switch · Escape to dismiss";
+
+/// The line under the rows.
+fn footer() -> &'static str {
+    tr!("Up Down to navigate · Enter to switch · Escape to dismiss")
+}
 
 #[derive(Default)]
 pub struct TabSearch {
@@ -139,7 +145,7 @@ impl TabSearch {
         let width = WIDTH.min(ctx.content_rect().width() - frame.total_margin().sum().x).max(0.0);
         let picked = self.picked;
         let follow = keys.up || keys.down;
-        let hint = format!("Search {} tabs...", entries.len());
+        let hint = tr!("Search {0} tabs...", entries.len());
         let search = &mut self.search;
         let mut typed = false;
         let modal = egui::Modal::new(egui::Id::new("lumen_tab_search")).frame(frame).show(ctx, |ui| {
@@ -169,7 +175,7 @@ impl TabSearch {
                 }
             });
             ui.separator();
-            ui.weak(FOOTER);
+            ui.weak(footer());
         });
         if typed {
             self.picked = 0;
@@ -301,7 +307,7 @@ mod tests {
         let (ctx, mut search) = opened(&entries);
         let (_, texts) = step(&ctx, &mut search, &entries, vec![]);
         at(&texts, "Search 3 tabs...");
-        at(&texts, FOOTER);
+        at(&texts, footer());
         for (name, path, when) in [("Documents", "~/Documents", "5 min ago"), ("src", "~/code/lumen/src", "Now"), ("Pictures", "/media/Pictures", "1 h ago")] {
             let (name, path, when) = (at(&texts, name), at(&texts, path), at(&texts, when));
             assert!(path.left() > name.right() && (path.center().y - name.center().y).abs() < 1.0, "the path on its name's row, after it");

@@ -6,6 +6,7 @@ use std::collections::HashSet;
 
 use crate::app::{Sort, SortColumn};
 use crate::fs::Entry;
+use crate::i18n::tr;
 use crate::ui::file_list::{COLUMNS, Order, SORT_ASCENDING, SORT_DESCENDING, Shown, shift};
 use crate::ui::path_popup::word_ranges;
 
@@ -428,33 +429,33 @@ impl Menu {
 pub fn entry_menu(selection: &[&Entry], bookmarked: bool, apps: &[App]) -> Vec<Item> {
     let single = selection.len() == 1;
     let folder = single && selection[0].is_dir;
-    let mut items = vec![Item::run("Open", Some("Enter"), single, Command::Open)];
+    let mut items = vec![Item::run(tr!("Open"), Some(tr!("Enter")), single, Command::Open)];
     if single && !apps.is_empty() {
         let apps = apps.iter().map(|app| Item::run(app.name.clone(), None, true, Command::OpenWith(app.clone()))).collect();
-        items.push(Item::sub("Open With", MenuIcon::OpenWith, apps));
+        items.push(Item::sub(tr!("Open With"), MenuIcon::OpenWith, apps));
     }
     if folder {
-        items.push(Item::run("Open in New Tab", None, true, Command::OpenInNewTab));
+        items.push(Item::run(tr!("Open in New Tab"), None, true, Command::OpenInNewTab));
     }
     items.extend([
         Item::separator(),
-        Item::run("Cut", Some("Ctrl+X"), true, Command::Cut),
-        Item::run("Copy", Some("Ctrl+C"), true, Command::Copy),
-        Item::run("Copy Path", Some("Ctrl+Shift+C"), true, Command::CopyPath),
+        Item::run(tr!("Cut"), Some("Ctrl+X"), true, Command::Cut),
+        Item::run(tr!("Copy"), Some("Ctrl+C"), true, Command::Copy),
+        Item::run(tr!("Copy Path"), Some("Ctrl+Shift+C"), true, Command::CopyPath),
         Item::separator(),
-        Item::run("Rename", Some("F2"), single, Command::Rename),
-        Item::run("Move to Trash", Some("Delete"), true, Command::Trash),
-        Item::run("Delete Permanently", Some("Shift+Delete"), true, Command::DeleteForever),
+        Item::run(tr!("Rename"), Some("F2"), single, Command::Rename),
+        Item::run(tr!("Move to Trash"), Some("Delete"), true, Command::Trash),
+        Item::run(tr!("Delete Permanently"), Some("Shift+Delete"), true, Command::DeleteForever),
     ]);
     if folder {
-        let bookmark = if bookmarked { "Remove from Bookmarks" } else { "Add to Bookmarks" };
+        let bookmark = if bookmarked { tr!("Remove from Bookmarks") } else { tr!("Add to Bookmarks") };
         items.extend([
             Item::separator(),
             Item::run(bookmark, None, true, Command::ToggleBookmark),
-            Item::run("Calculate Size", Some("Alt+R"), true, Command::Count),
+            Item::run(tr!("Calculate Size"), Some("Alt+R"), true, Command::Count),
         ]);
         if TERMINAL {
-            items.push(Item::run("Open Terminal Here", None, true, Command::OpenTerminal));
+            items.push(Item::run(tr!("Open Terminal Here"), None, true, Command::OpenTerminal));
         }
     }
     items
@@ -463,17 +464,17 @@ pub fn entry_menu(selection: &[&Entry], bookmarked: bool, apps: &[App]) -> Vec<I
 /// The menu for a side panel item (a bookmark, place, disk or recent folder):
 /// its own path, whatever the list has selected. `bookmarked`: it is a bookmark.
 pub fn place_menu(path: &std::path::Path, bookmarked: bool) -> Vec<Item> {
-    let mut items = vec![Item::run("Open", None, true, Command::OpenPlace(path.to_path_buf())), Item::separator()];
+    let mut items = vec![Item::run(tr!("Open"), None, true, Command::OpenPlace(path.to_path_buf())), Item::separator()];
     items.extend(place_own(path, bookmarked));
     items
 }
 
 /// What only Lumen adds to a side panel item's menu.
 pub fn place_own(path: &std::path::Path, bookmarked: bool) -> [Item; 3] {
-    let bookmark = if bookmarked { "Remove from Bookmarks" } else { "Add to Bookmarks" };
+    let bookmark = if bookmarked { tr!("Remove from Bookmarks") } else { tr!("Add to Bookmarks") };
     [
-        Item::run("Open in New Tab", None, true, Command::OpenPlaceInNewTab(path.to_path_buf())),
-        Item::run("Copy Path", None, true, Command::CopyPlacePath(path.to_path_buf())),
+        Item::run(tr!("Open in New Tab"), None, true, Command::OpenPlaceInNewTab(path.to_path_buf())),
+        Item::run(tr!("Copy Path"), None, true, Command::CopyPlacePath(path.to_path_buf())),
         Item::run(bookmark, None, true, Command::ToggleBookmarkOf(path.to_path_buf())),
     ]
 }
@@ -494,7 +495,7 @@ pub fn sort_menu(sort: Sort) -> Item {
             Item::run(label, None, true, Command::Sort(column))
         })
         .collect();
-    Item::sub("Sort by", MenuIcon::Sort, columns)
+    Item::sub(tr!("Sort by"), MenuIcon::Sort, columns)
 }
 
 /// Right click on the list's header `column`, like File Pilot's.
@@ -502,13 +503,13 @@ pub fn sort_menu(sort: Sort) -> Item {
 pub fn column_menu(column: usize, shown: &Shown, order: &Order) -> Vec<Item> {
     let can_shift = |left| shift(order, shown, column, left) != *order;
     let mut items = vec![
-        Item::run("Shift Column Left", None, can_shift(true), Command::ShiftColumnLeft(column)),
-        Item::run("Shift Column Right", None, can_shift(false), Command::ShiftColumnRight(column)),
-        Item::run("Size Column To Fit", None, true, Command::FitColumn(column)),
-        Item::run("Close Column", Some("Middle click"), column != 0, Command::ToggleColumn(column)),
-        Item::run("Size All Columns To Fit", Some("Ctrl+Shift+F"), true, Command::FitAllColumns),
+        Item::run(tr!("Shift Column Left"), None, can_shift(true), Command::ShiftColumnLeft(column)),
+        Item::run(tr!("Shift Column Right"), None, can_shift(false), Command::ShiftColumnRight(column)),
+        Item::run(tr!("Size Column To Fit"), None, true, Command::FitColumn(column)),
+        Item::run(tr!("Close Column"), Some(tr!("Middle click")), column != 0, Command::ToggleColumn(column)),
+        Item::run(tr!("Size All Columns To Fit"), Some("Ctrl+Shift+F"), true, Command::FitAllColumns),
         Item::separator(),
-        Item::run("Restore Default Columns", None, true, Command::RestoreColumns),
+        Item::run(tr!("Restore Default Columns"), None, true, Command::RestoreColumns),
         Item::separator(),
     ];
     for (i, (label, _)) in COLUMNS.into_iter().enumerate() {
@@ -521,16 +522,16 @@ pub fn column_menu(column: usize, shown: &Shown, order: &Order) -> Vec<Item> {
 /// only the list's two fits apply.
 pub fn drives_column_menu(column: usize) -> Vec<Item> {
     vec![
-        Item::run("Size Column To Fit", None, true, Command::FitColumn(column)),
-        Item::run("Size All Columns To Fit", Some("Ctrl+Shift+F"), true, Command::FitAllColumns),
+        Item::run(tr!("Size Column To Fit"), None, true, Command::FitColumn(column)),
+        Item::run(tr!("Size All Columns To Fit"), Some("Ctrl+Shift+F"), true, Command::FitAllColumns),
     ]
 }
 
 /// Right click on entries of the Recycle Bin view.
 pub fn recycle_menu() -> Vec<Item> {
     vec![
-        Item::run("Restore", None, true, Command::Restore),
-        Item::run("Delete Permanently", Some("Delete"), true, Command::DeleteForever),
+        Item::run(tr!("Restore"), None, true, Command::Restore),
+        Item::run(tr!("Delete Permanently"), Some("Delete"), true, Command::DeleteForever),
     ]
 }
 
@@ -538,8 +539,8 @@ pub fn recycle_menu() -> Vec<Item> {
 /// something; `templates`: the files New ▸ offers copies of.
 pub fn background_menu(can_paste: bool, sort: Sort, templates: &[std::path::PathBuf]) -> Vec<Item> {
     let mut new = vec![
-        Item::run("Folder", Some("Ctrl+Shift+N"), true, Command::NewFolder),
-        Item::run("Empty File", None, true, Command::NewFile(None)),
+        Item::run(tr!("Folder"), Some("Ctrl+Shift+N"), true, Command::NewFolder),
+        Item::run(tr!("Empty File"), None, true, Command::NewFile(None)),
     ];
     if !templates.is_empty() {
         new.push(Item::separator());
@@ -549,11 +550,11 @@ pub fn background_menu(can_paste: bool, sort: Sort, templates: &[std::path::Path
         let label = t.file_stem().map_or_else(|| t.display().to_string(), |s| s.to_string_lossy().into_owned());
         Item::run(label, None, true, Command::NewFile(Some(t.clone())))
     }));
-    let mut items = vec![Item::run("Paste", Some("Ctrl+V"), can_paste, Command::Paste), Item::sub("New", MenuIcon::New, new)];
+    let mut items = vec![Item::run(tr!("Paste"), Some("Ctrl+V"), can_paste, Command::Paste), Item::sub(tr!("New"), MenuIcon::New, new)];
     if TERMINAL {
-        items.push(Item::run("Open Terminal Here", None, true, Command::OpenTerminal));
+        items.push(Item::run(tr!("Open Terminal Here"), None, true, Command::OpenTerminal));
     }
-    items.extend([Item::separator(), sort_menu(sort), Item::run("Refresh", None, true, Command::Refresh)]);
+    items.extend([Item::separator(), sort_menu(sort), Item::run(tr!("Refresh"), None, true, Command::Refresh)]);
     items
 }
 
@@ -906,5 +907,22 @@ pub(crate) mod tests {
                 ("Size All Columns To Fit", Some("Ctrl+Shift+F"), Some(&Command::FitAllColumns), true, None),
             ]
         );
+    }
+
+    #[test]
+    fn the_system_strings_come_out_in_spanish_when_the_language_is_spanish() {
+        crate::i18n::set(crate::i18n::Lang::Es);
+        let menu = outline(&background_menu(true, Sort::default(), &[]));
+        let folder_name = crate::fs::ops::validate_name("");
+        let kind = crate::fs::entry::kind_of(std::path::Path::new("a/photo.png"), false);
+        let restored = crate::recycle_bin::restored_notice(3);
+        let one = crate::recycle_bin::restored_notice(1);
+        let missing = crate::fs::ops::delete_forever(std::path::Path::new("/no/such/path"));
+        crate::i18n::set(crate::i18n::Lang::En);
+        assert_eq!(menu[..4], ["Pegar [Ctrl+V]", "Nuevo", "  Carpeta [Ctrl+Shift+N]", "  Archivo vacío"]);
+        assert_eq!(folder_name, Err("El nombre no puede estar vacío".to_owned()));
+        assert_eq!((kind.as_str(), restored.as_str(), one.as_str()), ("Archivo PNG", "3 elementos restaurados", "1 elemento restaurado"));
+        assert_eq!(missing, Err("Ya no existe: /no/such/path".to_owned()));
+        assert_eq!(crate::recycle_bin::restored_notice(3), "3 items restored", "English again");
     }
 }

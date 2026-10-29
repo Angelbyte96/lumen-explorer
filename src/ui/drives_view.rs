@@ -8,6 +8,7 @@ use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
 use crate::format::format_size;
+use crate::i18n::tr;
 use crate::places::{DriveInfo, Mount, Usage};
 use crate::ui::file_list;
 use crate::ui::sidebar::{DISK, used_fraction};
@@ -181,7 +182,7 @@ pub enum DrivesEvent {
 pub fn show(ui: &mut egui::Ui, rows: &[DriveRow], selected: Option<&Path>, sort: Option<DriveSort>, widths: &Widths) -> Option<DrivesEvent> {
     let mut event = None;
     if rows.is_empty() {
-        ui.weak("No drives");
+        ui.weak(tr!("No drives"));
         return None;
     }
     let row_height = ui.text_style_height(&egui::TextStyle::Body) + 10.0;

@@ -15,6 +15,7 @@ mod icon_names;
 #[cfg(not(windows))]
 mod icon_theme;
 mod fs;
+mod i18n;
 mod input;
 mod menu;
 mod shell_menu;

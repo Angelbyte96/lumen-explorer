@@ -19,6 +19,8 @@ use windows_sys::Win32::System::Registry::{
     RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 
+use crate::i18n::tr;
+
 use super::{Origin, Record, Switches, System};
 
 /// The binary's name in the install folder.
@@ -186,10 +188,10 @@ impl Windows {
 
     fn set_desktop_shortcut(&self, on: bool, target: &Path) -> Result<(), String> {
         let Some(file) = self.desktop_link() else {
-            return if on { Err("This PC has no Desktop folder".into()) } else { Ok(()) };
+            return if on { Err(tr!("This PC has no Desktop folder").into()) } else { Ok(()) };
         };
         if !on {
-            return super::remove_file(&file).map_err(|err| format!("Cannot remove {}: {err}", file.display()));
+            return super::remove_file(&file).map_err(|err| tr!("Cannot remove {0}: {1}", file.display(), err));
         }
         write_shortcut(&file, target)
     }
@@ -245,7 +247,7 @@ impl Windows {
     fn set_path(&self, on: bool, dir: &Path) -> Result<(), String> {
         let dir = text(dir)?;
         if dir.contains(';') {
-            return Err(format!("A folder with a ; in its name cannot be on the PATH: {dir}"));
+            return Err(tr!("A folder with a ; in its name cannot be on the PATH: {0}", dir));
         }
         // The value keeps its type: %USERPROFILE% and the like stay unexpanded.
         let (before, kind) = read_value(&self.environment, "Path")?.unwrap_or((String::new(), REG_EXPAND_SZ));
@@ -265,7 +267,7 @@ impl Windows {
     fn park_running(&self, exe: &Path) -> Result<(), String> {
         let parked = self.temp.join(format!("lumen-uninstalled-{}.exe", std::process::id()));
         std::fs::rename(exe, &parked)
-            .map_err(|err| format!("Cannot move {} out of its folder: {err}. Delete it after closing Lumen.", exe.display()))
+            .map_err(|err| tr!("Cannot move {0} out of its folder: {1}. Delete it after closing Lumen.", exe.display(), err))
     }
 }
 
@@ -284,9 +286,9 @@ impl System for Windows {
 
     fn install_script(&self, dir: &Path, want: Switches) -> Result<String, String> {
         if !dir.is_absolute() {
-            return Err(format!("Choose a full path, not {}", dir.display()));
+            return Err(tr!("Choose a full path, not {0}", dir.display()));
         }
-        let record_file = self.record_file.as_deref().ok_or("Lumen has no settings folder to remember the install in")?;
+        let record_file = self.record_file.as_deref().ok_or(tr!("Lumen has no settings folder to remember the install in"))?;
         let shown = quotable(&dir.join(BINARY))?;
         let binary = dir.join(BINARY);
         let kb = std::fs::metadata(&self.exe).map(|meta| meta.len().div_ceil(1024)).unwrap_or(0);
@@ -318,13 +320,13 @@ impl System for Windows {
     }
 
     fn apply_script(&self, want: Switches) -> Result<String, String> {
-        let dir = self.installed_dir().ok_or("Lumen is not installed")?;
+        let dir = self.installed_dir().ok_or(tr!("Lumen is not installed"))?;
         let body = self.switch_steps(self.read(), want, &dir)?;
         Ok(self.script("change the switches", &body))
     }
 
     fn apply(&self, want: Switches) -> Result<(), String> {
-        let dir = self.installed_dir().ok_or("Lumen is not installed")?;
+        let dir = self.installed_dir().ok_or(tr!("Lumen is not installed"))?;
         let target = dir.join(BINARY);
         let now = self.read();
         let mut errors = Vec::new();
@@ -356,36 +358,36 @@ impl System for Windows {
 
     fn install(&self, dir: &Path, want: Switches) -> Result<(), String> {
         if !dir.is_absolute() {
-            return Err(format!("Choose a full path, not {}", dir.display()));
+            return Err(tr!("Choose a full path, not {0}", dir.display()));
         }
-        let record_file = self.record_file.as_deref().ok_or("Lumen has no settings folder to remember the install in")?;
+        let record_file = self.record_file.as_deref().ok_or(tr!("Lumen has no settings folder to remember the install in"))?;
         // Before anything is copied: the paths go quoted into the registry.
         let shown = quotable(&dir.join(BINARY))?;
-        let binary = super::copy_binary(&self.exe, dir, BINARY).map_err(|err| format!("Cannot copy Lumen to {}: {err}", dir.display()))?;
+        let binary = super::copy_binary(&self.exe, dir, BINARY).map_err(|err| tr!("Cannot copy Lumen to {0}: {1}", dir.display(), err))?;
         write_shortcut(&self.start_menu_link(), &binary)?;
         self.register_uninstall(dir, &shown, &binary)?;
         Record { dir: dir.to_path_buf(), version: env!("CARGO_PKG_VERSION").into() }
             .save(record_file)
-            .map_err(|err| format!("Cannot write {}: {err}", record_file.display()))?;
+            .map_err(|err| tr!("Cannot write {0}: {1}", record_file.display(), err))?;
         self.apply(want)
     }
 
     fn uninstall(&self) -> Result<(), String> {
         let Origin::Installed { record, running_it } = self.origin() else {
-            return Err("Lumen is not installed".into());
+            return Err(tr!("Lumen is not installed").into());
         };
         self.apply(Switches::default())?;
         let link = self.start_menu_link();
-        super::remove_file(&link).map_err(|err| format!("Cannot remove {}: {err}", link.display()))?;
+        super::remove_file(&link).map_err(|err| tr!("Cannot remove {0}: {1}", link.display(), err))?;
         delete_tree(&self.uninstall_key())?;
         if let Some(file) = &self.record_file {
-            super::remove_file(file).map_err(|err| format!("Cannot remove {}: {err}", file.display()))?;
+            super::remove_file(file).map_err(|err| tr!("Cannot remove {0}: {1}", file.display(), err))?;
         }
         let exe = record.dir.join(BINARY);
         if running_it {
             self.park_running(&exe)?;
         } else {
-            super::remove_file(&exe).map_err(|err| format!("Cannot remove {}: {err}", exe.display()))?;
+            super::remove_file(&exe).map_err(|err| tr!("Cannot remove {0}: {1}", exe.display(), err))?;
         }
         // Only when empty: the folder may hold the user's own files.
         let _ = std::fs::remove_dir(&record.dir);
@@ -417,7 +419,7 @@ impl Windows {
         if want.desktop_shortcut != now.desktop_shortcut {
             step("Desktop shortcut", want.desktop_shortcut);
             match (self.desktop_link(), want.desktop_shortcut) {
-                (None, true) => return Err("This PC has no Desktop folder".into()),
+                (None, true) => return Err(tr!("This PC has no Desktop folder").into()),
                 (None, false) => {}
                 (Some(link), true) => lines.push(vec![format!("Set-Shortcut {} {exe}", ps(&text(&link)?))]),
                 (Some(link), false) => lines.push(vec![format!("Remove-File {}", ps(&text(&link)?))]),
@@ -466,7 +468,7 @@ impl Windows {
             step("Add to PATH", want.path);
             let dir = text(dir)?;
             if dir.contains(';') {
-                return Err(format!("A folder with a ; in its name cannot be on the PATH: {dir}"));
+                return Err(tr!("A folder with a ; in its name cannot be on the PATH: {0}", dir));
             }
             let mut part = vec![format!("Set-PathEntry {} {} ${}", ps(&self.environment), ps(&dir), want.path)];
             if self.run_tools {
@@ -522,13 +524,13 @@ impl Windows {
 fn quotable(path: &Path) -> Result<String, String> {
     let shown = text(path)?;
     if shown.contains('"') {
-        return Err(format!("Lumen cannot start from a path holding \": {shown}"));
+        return Err(tr!("Lumen cannot start from a path holding \": {0}", shown));
     }
     Ok(shown)
 }
 
 fn text(path: &Path) -> Result<String, String> {
-    path.to_str().map(str::to_owned).ok_or_else(|| format!("Lumen cannot use a path that is not Unicode: {}", path.display()))
+    path.to_str().map(str::to_owned).ok_or_else(|| tr!("Lumen cannot use a path that is not Unicode: {0}", path.display()))
 }
 
 /// Whether the `;`-separated PATH `value` already names `dir`: the case and a
@@ -631,7 +633,7 @@ fn write_shortcut(link: &Path, target: &Path) -> Result<(), String> {
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
     use windows::core::{Interface, PCWSTR};
     if let Some(dir) = link.parent() {
-        std::fs::create_dir_all(dir).map_err(|err| format!("Cannot create {}: {err}", dir.display()))?;
+        std::fs::create_dir_all(dir).map_err(|err| tr!("Cannot create {0}: {1}", dir.display(), err))?;
     }
     let _com = Com::start();
     let (target_w, folder_w, link_w) = (wide(target), wide(target.parent().unwrap_or(target)), wide(link));
@@ -646,7 +648,7 @@ fn write_shortcut(link: &Path, target: &Path) -> Result<(), String> {
             shortcut.cast::<IPersistFile>()?.Save(PCWSTR(link_w.as_ptr()), true)
         })()
     };
-    made.map_err(|err| format!("Cannot write {}: {err}", link.display()))
+    made.map_err(|err| tr!("Cannot write {0}: {1}", link.display(), err))
 }
 
 /// An open registry key, closed on drop.
@@ -660,7 +662,7 @@ impl Drop for Key {
 }
 
 fn registry_error(action: &str, path: &str, code: u32) -> String {
-    format!("Cannot {action} HKCU\\{path}: {}", std::io::Error::from_raw_os_error(code as i32))
+    tr!("Cannot {0} HKCU\\{1}: {2}", action, path, std::io::Error::from_raw_os_error(code as i32))
 }
 
 /// `HKCU\<path>`; `None` when it does not exist.
@@ -671,7 +673,7 @@ fn open(path: &str, access: u32) -> Result<Option<Key>, String> {
     match code {
         ERROR_SUCCESS => Ok(Some(Key(key))),
         ERROR_FILE_NOT_FOUND => Ok(None),
-        _ => Err(registry_error("read", path, code)),
+        _ => Err(registry_error(tr!("read"), path, code)),
     }
 }
 
@@ -691,17 +693,17 @@ fn read_value(path: &str, name: &str) -> Result<Option<(String, u32)>, String> {
     match code {
         ERROR_SUCCESS => {}
         ERROR_FILE_NOT_FOUND => return Ok(None),
-        _ => return Err(registry_error("read", path, code)),
+        _ => return Err(registry_error(tr!("read"), path, code)),
     }
     // A value that is not text is another program's: never to be overwritten.
     if kind != REG_SZ && kind != REG_EXPAND_SZ {
-        return Err(format!("HKCU\\{path} {name} is not text"));
+        return Err(tr!("HKCU\\{0} {1} is not text", path, name));
     }
     let mut buf = vec![0u16; size as usize / 2 + 1];
     size = (buf.len() * 2) as u32;
     let code = unsafe { RegQueryValueExW(key.0, name_w.as_ptr(), null(), &mut kind, buf.as_mut_ptr().cast(), &mut size) };
     if code != ERROR_SUCCESS {
-        return Err(registry_error("read", path, code));
+        return Err(registry_error(tr!("read"), path, code));
     }
     let value = String::from_utf16_lossy(&buf[..(size as usize / 2).min(buf.len())]);
     Ok(Some((value.trim_end_matches('\0').to_owned(), kind)))
@@ -712,13 +714,13 @@ fn write_raw(path: &str, name: &str, kind: u32, data: &[u8]) -> Result<(), Strin
     // SAFETY: the path is nul-terminated and `key` receives the handle.
     let code = unsafe { RegCreateKeyExW(HKEY_CURRENT_USER, wide(path).as_ptr(), 0, null(), REG_OPTION_NON_VOLATILE, KEY_WRITE, null(), &mut key, null_mut()) };
     if code != ERROR_SUCCESS {
-        return Err(registry_error("write", path, code));
+        return Err(registry_error(tr!("write"), path, code));
     }
     let key = Key(key);
     // SAFETY: `data` is `data.len()` bytes.
     let code = unsafe { RegSetValueExW(key.0, wide(name).as_ptr(), 0, kind, data.as_ptr(), data.len() as u32) };
     if code != ERROR_SUCCESS {
-        return Err(registry_error("write", path, code));
+        return Err(registry_error(tr!("write"), path, code));
     }
     Ok(())
 }
@@ -740,7 +742,7 @@ fn delete_value(path: &str, name: &str) -> Result<(), String> {
     // SAFETY: the name is nul-terminated.
     match unsafe { RegDeleteValueW(key.0, wide(name).as_ptr()) } {
         ERROR_SUCCESS | ERROR_FILE_NOT_FOUND => Ok(()),
-        code => Err(registry_error("remove", path, code)),
+        code => Err(registry_error(tr!("remove"), path, code)),
     }
 }
 
@@ -748,12 +750,12 @@ fn delete_value(path: &str, name: &str) -> Result<(), String> {
 fn delete_tree(path: &str) -> Result<(), String> {
     // An empty path would be HKCU itself.
     if path.is_empty() {
-        return Err("Cannot remove HKCU".into());
+        return Err(tr!("Cannot remove HKCU").into());
     }
     // SAFETY: the path is nul-terminated.
     match unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, wide(path).as_ptr()) } {
         ERROR_SUCCESS | ERROR_FILE_NOT_FOUND => Ok(()),
-        code => Err(registry_error("remove", path, code)),
+        code => Err(registry_error(tr!("remove"), path, code)),
     }
 }
 

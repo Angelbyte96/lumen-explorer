@@ -10,6 +10,7 @@ use std::path::Path;
 use eframe::egui;
 
 use crate::behavior::{Behavior, CharKey, NewTab, Startup};
+use crate::i18n::{Language, tr};
 use crate::ui::theme::{Scheme, Schemes};
 
 /// Every setting the window edits.
@@ -22,6 +23,8 @@ struct Prefs {
 /// One option, a row of the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Opt {
+    /// The interface's language, first so it is found in any language.
+    Language,
     /// "System Light / Dark Scheme": a switch.
     System,
     /// One scheme for both system themes.
@@ -42,42 +45,46 @@ const BEHAVIOR: [Opt; 5] = [Opt::Overscroll, Opt::ReverseScroll, Opt::CharKey, O
 impl Opt {
     fn label(self) -> &'static str {
         match self {
-            Opt::System => "System Light / Dark Scheme",
-            Opt::Scheme => "Color Scheme",
-            Opt::Light => "Light Color Scheme",
-            Opt::Dark => "Dark Color Scheme",
-            Opt::Overscroll => "Scroll Beyond Last Item",
-            Opt::ReverseScroll => "Reverse Scroll Direction",
-            Opt::CharKey => "Character Key Action",
-            Opt::Startup => "Load On Startup",
-            Opt::NewTab => "New Tab Show",
+            Opt::Language => tr!("Language"),
+            Opt::System => tr!("System Light / Dark Scheme"),
+            Opt::Scheme => tr!("Color Scheme"),
+            Opt::Light => tr!("Light Color Scheme"),
+            Opt::Dark => tr!("Dark Color Scheme"),
+            Opt::Overscroll => tr!("Scroll Beyond Last Item"),
+            Opt::ReverseScroll => tr!("Reverse Scroll Direction"),
+            Opt::CharKey => tr!("Character Key Action"),
+            Opt::Startup => tr!("Load On Startup"),
+            Opt::NewTab => tr!("New Tab Show"),
         }
     }
 
-    /// Words the search also finds the row by, lowercase.
+    /// Words the search also finds the row by, lowercase, in English and
+    /// Spanish whatever the interface's language.
     fn aliases(self) -> &'static [&'static str] {
         match self {
-            Opt::System => &["theme", "dark", "light", "system"],
-            Opt::Scheme | Opt::Light | Opt::Dark => &["theme", "color", "palette"],
-            Opt::Overscroll => &["scroll", "overscroll", "space", "end"],
-            Opt::ReverseScroll => &["scroll", "wheel", "invert", "natural"],
-            Opt::CharKey => &["key", "letter", "type", "filter", "hotkey", "jump"],
-            Opt::Startup => &["start", "startup", "launch", "session", "open"],
-            Opt::NewTab => &["tab", "open", "root", "home"],
+            Opt::Language => &["language", "english", "spanish", "translation", "idioma", "lenguaje", "español", "inglés", "traducción"],
+            Opt::System => &["theme", "dark", "light", "system", "tema", "oscuro", "claro", "sistema"],
+            Opt::Scheme | Opt::Light | Opt::Dark => &["theme", "color", "palette", "tema", "paleta"],
+            Opt::Overscroll => &["scroll", "overscroll", "space", "end", "desplazar", "espacio", "final"],
+            Opt::ReverseScroll => &["scroll", "wheel", "invert", "natural", "desplazar", "rueda", "invertir"],
+            Opt::CharKey => &["key", "letter", "type", "filter", "hotkey", "jump", "tecla", "letra", "escribir", "filtro", "atajo", "saltar"],
+            Opt::Startup => &["start", "startup", "launch", "session", "open", "inicio", "iniciar", "sesión", "abrir"],
+            Opt::NewTab => &["tab", "open", "root", "home", "pestaña", "abrir", "raíz", "personal"],
         }
     }
 
     fn about(self) -> &'static str {
         match self {
-            Opt::System => "Automatically adapt between light and dark color schemes based on system settings.",
-            Opt::Scheme => "Applies a color palette to all UI elements.",
-            Opt::Light => "Color theme applied when the system uses bright colors.",
-            Opt::Dark => "Color theme applied when the system uses dark colors.",
-            Opt::Overscroll => "Allows scrolling past the last item for extra space.",
-            Opt::ReverseScroll => "Reverses the scroll direction in scrollable views.",
-            Opt::CharKey => "Determines the action when you press raw character keys without modifiers.",
-            Opt::Startup => "Previous session or location to load on startup.",
-            Opt::NewTab => "Location to open in a new tab.",
+            Opt::Language => tr!("The language of the interface: the system's, or one chosen."),
+            Opt::System => tr!("Automatically adapt between light and dark color schemes based on system settings."),
+            Opt::Scheme => tr!("Applies a color palette to all UI elements."),
+            Opt::Light => tr!("Color theme applied when the system uses bright colors."),
+            Opt::Dark => tr!("Color theme applied when the system uses dark colors."),
+            Opt::Overscroll => tr!("Allows scrolling past the last item for extra space."),
+            Opt::ReverseScroll => tr!("Reverses the scroll direction in scrollable views."),
+            Opt::CharKey => tr!("Determines the action when you press raw character keys without modifiers."),
+            Opt::Startup => tr!("Previous session or location to load on startup."),
+            Opt::NewTab => tr!("Location to open in a new tab."),
         }
     }
 
@@ -104,6 +111,7 @@ impl Opt {
     /// current tab's (`here`) and the one already chosen, if another.
     fn choices(self, prefs: &Prefs, here: &Path) -> Vec<Choice> {
         match self {
+            Opt::Language => Language::ALL.map(Choice::Language).to_vec(),
             Opt::Scheme | Opt::Light | Opt::Dark => Scheme::ALL.map(Choice::Scheme).to_vec(),
             Opt::CharKey => CharKey::ALL.map(Choice::CharKey).to_vec(),
             Opt::NewTab => NewTab::ALL.map(Choice::NewTab).to_vec(),
@@ -129,6 +137,7 @@ impl Opt {
             Opt::CharKey => Some(Choice::CharKey(prefs.behavior.char_key)),
             Opt::Startup => Some(Choice::Startup(prefs.behavior.startup.clone())),
             Opt::NewTab => Some(Choice::NewTab(prefs.behavior.new_tab)),
+            Opt::Language => Some(Choice::Language(prefs.behavior.language)),
             Opt::System | Opt::Overscroll | Opt::ReverseScroll => None,
         }
     }
@@ -141,6 +150,7 @@ impl Opt {
             (Opt::CharKey, Choice::CharKey(c)) => prefs.behavior.char_key = c,
             (Opt::Startup, Choice::Startup(s)) => prefs.behavior.startup = s,
             (Opt::NewTab, Choice::NewTab(n)) => prefs.behavior.new_tab = n,
+            (Opt::Language, Choice::Language(l)) => prefs.behavior.language = l,
             _ => {}
         }
     }
@@ -165,6 +175,7 @@ impl Opt {
             Opt::CharKey => behavior.char_key = default.behavior.char_key,
             Opt::Startup => behavior.startup = default.behavior.startup,
             Opt::NewTab => behavior.new_tab = default.behavior.new_tab,
+            Opt::Language => behavior.language = default.behavior.language,
         }
     }
 }
@@ -176,6 +187,7 @@ enum Choice {
     CharKey(CharKey),
     Startup(Startup),
     NewTab(NewTab),
+    Language(Language),
 }
 
 impl Choice {
@@ -185,9 +197,10 @@ impl Choice {
             Choice::Scheme(s) => s.name().to_owned(),
             Choice::CharKey(c) => c.name().to_owned(),
             Choice::NewTab(n) => n.name().to_owned(),
-            Choice::Startup(Startup::LastSession) => "Last Session".to_owned(),
-            Choice::Startup(Startup::Home) => "Home".to_owned(),
-            Choice::Startup(Startup::Folder(path)) => format!("Folder: {}", path.display()),
+            Choice::Language(l) => l.name().to_owned(),
+            Choice::Startup(Startup::LastSession) => tr!("Last Session").to_owned(),
+            Choice::Startup(Startup::Home) => tr!("Home").to_owned(),
+            Choice::Startup(Startup::Folder(path)) => tr!("Folder: {0}", path.display()),
         }
     }
 
@@ -209,8 +222,9 @@ fn folder_name(path: &Path) -> String {
 fn listed(prefs: &Prefs, search: &str) -> Vec<Opt> {
     let schemes: &[Opt] = if prefs.schemes.follow_system { &[Opt::System, Opt::Light, Opt::Dark] } else { &[Opt::System, Opt::Scheme] };
     let words: Vec<String> = search.split_whitespace().map(str::to_lowercase).collect();
-    schemes
+    [Opt::Language]
         .iter()
+        .chain(schemes)
         .chain(BEHAVIOR.iter())
         .copied()
         .filter(|opt| words.iter().all(|w| opt.label().to_lowercase().contains(w) || opt.aliases().iter().any(|a| a.contains(w))))
@@ -259,7 +273,10 @@ const BACK: &str = "‹";
 const CURRENT: &str = "•";
 /// The window's height besides its rows: search box, separators, footer and margins.
 const CHROME: f32 = 140.0;
-const FOOTER: &str = "Up Down to navigate · Enter to use · Ctrl+R to reset · Escape to dismiss";
+/// The footer's hints, between " · ".
+fn footer_text() -> &'static str {
+    tr!("Up Down to navigate · Enter to use · Ctrl+R to reset · Escape to dismiss")
+}
 
 /// The footer: faint hints, the separators between them in plain text
 /// color (a faint middle dot is barely visible).
@@ -267,7 +284,7 @@ fn footer(style: &egui::Style) -> egui::text::LayoutJob {
     let font = egui::TextStyle::Body.resolve(style);
     let format = |color| egui::TextFormat::simple(font.clone(), color);
     let mut job = egui::text::LayoutJob::default();
-    for (index, hint) in FOOTER.split(" · ").enumerate() {
+    for (index, hint) in footer_text().split(" · ").enumerate() {
         if index > 0 {
             job.append(" · ", 0.0, format(style.visuals.text_color()));
         }
@@ -341,9 +358,9 @@ impl Options {
         }
     }
 
-    /// Draws the window while open; a change to `schemes` is applied at once,
-    /// one to `behavior` acts from the next frame. `here` is the current tab's
-    /// folder, which Load On Startup offers.
+    /// Draws the window while open; a change to `schemes` or to the language
+    /// is applied at once, one to the rest of `behavior` acts from the next
+    /// frame. `here` is the current tab's folder, which Load On Startup offers.
     pub fn show(&mut self, ctx: &egui::Context, schemes: &mut Schemes, behavior: &mut Behavior, here: &Path) {
         if !self.open {
             return;
@@ -353,6 +370,9 @@ impl Options {
         if prefs.schemes != *schemes {
             *schemes = prefs.schemes;
             schemes.apply(ctx);
+        }
+        if prefs.behavior.language != behavior.language {
+            prefs.behavior.language.apply();
         }
         *behavior = prefs.behavior;
     }
@@ -416,7 +436,7 @@ impl Options {
                         crate::ui::icons::magnifier(ui);
                         let field = egui::TextEdit::singleline(search)
                             .id(field_id())
-                            .hint_text("Select an option…")
+                            .hint_text(tr!("Select an option…"))
                             .desired_width(f32::INFINITY)
                             .frame(egui::Frame::NONE)
                             .show(ui);
@@ -515,7 +535,7 @@ fn option_row(ui: &mut egui::Ui, opt: Opt, prefs: &Prefs, index: usize, picked: 
                 // The reset slot is always taken, so the controls line up.
                 if opt.is_default(prefs) {
                     ui.allocate_space(egui::vec2(ui.spacing().interact_size.y, ui.spacing().interact_size.y));
-                } else if symbol_button(ui, egui::Id::new(("lumen_options_reset", opt.label())), RESET, "Restore default setting.").clicked() {
+                } else if symbol_button(ui, egui::Id::new(("lumen_options_reset", opt.label())), RESET, tr!("Restore default setting.")).clicked() {
                     ask = Some(Ask::Reset(opt));
                 }
                 match opt.switched(prefs) {
@@ -538,7 +558,7 @@ fn option_row(ui: &mut egui::Ui, opt: Opt, prefs: &Prefs, index: usize, picked: 
 fn list_of(ui: &mut egui::Ui, opt: Opt, prefs: &Prefs, here: &Path, picked: usize) -> Option<Ask> {
     let mut ask = None;
     ui.horizontal(|ui| {
-        if symbol_button(ui, egui::Id::new("lumen_options_back"), BACK, "Back (Escape)").clicked() {
+        if symbol_button(ui, egui::Id::new("lumen_options_back"), BACK, tr!("Back (Escape)")).clicked() {
             ask = Some(Ask::Back);
         }
         ui.label(egui::RichText::new(opt.label()).strong());
@@ -654,7 +674,7 @@ mod tests {
             "Color Scheme",
             "Applies a color palette to all UI elements.",
             "Lumen ›",
-            FOOTER,
+            footer_text(),
         ] {
             at(&texts, text);
         }
@@ -675,7 +695,7 @@ mod tests {
             "Color theme applied when the system uses bright colors.",
             "Dark Color Scheme",
             "Color theme applied when the system uses dark colors.",
-            FOOTER,
+            footer_text(),
         ] {
             at(&texts, text);
         }
@@ -702,8 +722,8 @@ mod tests {
         for row in [SYSTEM, "Color Scheme", "Light Color Scheme", "Dark Color Scheme"] {
             assert!(!painted(&texts, row), "{row} does not match");
         }
-        assert!(painted(&texts, FOOTER), "the footer stays");
-        assert_eq!(FOOTER, "Up Down to navigate · Enter to use · Ctrl+R to reset · Escape to dismiss", "File Pilot's footer, with Lumen's reset key");
+        assert!(painted(&texts, footer_text()), "the footer stays");
+        assert_eq!(footer_text(), "Up Down to navigate · Enter to use · Ctrl+R to reset · Escape to dismiss", "File Pilot's footer, with Lumen's reset key");
     }
 
     #[test]
@@ -711,7 +731,7 @@ mod tests {
         for scheme in Scheme::ALL {
             let style = egui::Style { visuals: scheme.visuals(egui::Theme::Dark), ..Default::default() };
             let job = footer(&style);
-            assert_eq!(job.text, FOOTER, "{scheme:?}");
+            assert_eq!(job.text, footer_text(), "{scheme:?}");
             let (weak, text) = (style.visuals.weak_text_color(), style.visuals.text_color());
             for section in &job.sections {
                 let part = &job.text[section.byte_range.start.0..section.byte_range.end.0];
@@ -815,7 +835,7 @@ mod tests {
         assert!(painted(&rows, SYSTEM) && !painted(&rows, "Dracula"));
         step(&ctx, &mut options, &mut schemes, key(Key::Escape));
         assert!(!options.is_open(), "the second closes");
-        assert!(!painted(&step(&ctx, &mut options, &mut schemes, vec![]), FOOTER));
+        assert!(!painted(&step(&ctx, &mut options, &mut schemes, vec![]), footer_text()));
     }
 
     #[test]
@@ -829,7 +849,8 @@ mod tests {
     #[test]
     fn the_arrows_pick_rows_and_enter_uses_them() {
         let (ctx, mut options, mut schemes) = opened(Schemes::default());
-        // The first row is picked: Enter flips the switch.
+        // Language is the first row: one down to the switch, Enter flips it.
+        step(&ctx, &mut options, &mut schemes, key(Key::ArrowDown));
         step(&ctx, &mut options, &mut schemes, key(Key::Enter));
         assert!(schemes.follow_system);
         step(&ctx, &mut options, &mut schemes, key(Key::Enter));
@@ -843,14 +864,16 @@ mod tests {
         step(&ctx, &mut options, &mut schemes, key(Key::Enter));
         assert_eq!(schemes.scheme, Scheme::Regulus);
         assert!(options.is_open(), "the arrows and Enter never closed it");
-        // Back on the rows with Color Scheme picked: Up goes to the switch, and Up again wraps to the last row.
+        // Back on the rows with Color Scheme picked: Up goes to the switch, then Language, and Up again wraps to the last row.
         key_back(&ctx, &mut options, &mut schemes);
-        step(&ctx, &mut options, &mut schemes, key(Key::ArrowUp));
-        step(&ctx, &mut options, &mut schemes, key(Key::ArrowUp));
+        for _ in 0..3 {
+            step(&ctx, &mut options, &mut schemes, key(Key::ArrowUp));
+        }
         let list = step(&ctx, &mut options, &mut schemes, key(Key::Enter));
         assert!(painted(&list, "Root") && painted(&list, "Current"), "wrapped to New Tab Show, the last row");
-        // Back, and down from the last row wraps to the switch.
+        // Back, and down from the last row wraps to Language, then the switch.
         key_back(&ctx, &mut options, &mut schemes);
+        step(&ctx, &mut options, &mut schemes, key(Key::ArrowDown));
         step(&ctx, &mut options, &mut schemes, key(Key::ArrowDown));
         step(&ctx, &mut options, &mut schemes, key(Key::Enter));
         assert!(schemes.follow_system, "wrapped to the switch");
@@ -858,6 +881,7 @@ mod tests {
         step(&ctx, &mut options, &mut schemes, key(Key::Enter));
         let mut chosen = Schemes { follow_system: false, ..schemes };
         let (ctx, mut options, _) = opened(chosen);
+        step(&ctx, &mut options, &mut chosen, key(Key::ArrowDown));
         step(&ctx, &mut options, &mut chosen, key(Key::ArrowDown));
         step(&ctx, &mut options, &mut chosen, key(Key::Enter));
         for _ in 0..5 {
@@ -932,6 +956,70 @@ mod tests {
         let tops: Vec<f32> = ["Color Scheme", OVERSCROLL, REVERSE, CHAR_KEY, STARTUP, NEW_TAB].iter().map(|t| at(&texts, t).top()).collect();
         assert!(tops.windows(2).all(|w| w[0] < w[1]), "in File Pilot's order, after the schemes: {tops:?}");
         assert!(!painted(&texts, RESET), "all at their defaults");
+    }
+
+    const LANGUAGE: &str = "Language";
+
+    #[test]
+    fn the_language_row_comes_first_and_offers_the_system_english_and_spanish() {
+        let mut window = Window::opened(Behavior::default());
+        let rows = window.step(vec![]);
+        for text in [LANGUAGE, "The language of the interface: the system's, or one chosen.", "System ›"] {
+            at(&rows, text);
+        }
+        assert!(at(&rows, LANGUAGE).top() < at(&rows, SYSTEM).top(), "before the color schemes");
+        let list = window.click_on(LANGUAGE);
+        let tops: Vec<f32> = ["System", "English", "Español"].iter().map(|n| at(&list, n).top()).collect();
+        assert!(tops.windows(2).all(|w| w[0] < w[1]), "{tops:?}");
+        assert!((at(&list, CURRENT).center().y - at(&list, "System").center().y).abs() < 1.0, "the default is marked");
+    }
+
+    #[test]
+    fn choosing_spanish_redraws_the_window_in_spanish_at_once_and_english_puts_it_back() {
+        let mut window = Window::opened(Behavior::default());
+        window.click_on(LANGUAGE);
+        let list = window.click_on("Español");
+        assert_eq!(window.behavior.language, Language::Spanish);
+        assert_eq!(crate::i18n::current(), crate::i18n::Lang::Es);
+        assert!(painted(&list, "Idioma") && painted(&list, "Sistema"), "the list itself, in Spanish: {list:?}");
+        let rows = window.back();
+        for text in [
+            "Idioma",
+            "Español ›",
+            "Esquema de color",
+            "Acción de las teclas de caracteres",
+            "Arriba Abajo para moverse · Intro para usar · Ctrl+R para restablecer · Escape para cerrar",
+        ] {
+            at(&rows, text);
+        }
+        assert!(!painted(&rows, SYSTEM) && !painted(&rows, LANGUAGE), "no English left on the rows");
+        assert_eq!(window.schemes, Schemes::default(), "the rest is left alone");
+        assert_eq!(window.behavior, Behavior { language: Language::Spanish, ..Behavior::default() });
+        window.click_on("Idioma");
+        window.click_on("English");
+        let rows = window.back();
+        assert_eq!(crate::i18n::current(), crate::i18n::Lang::En);
+        assert!(painted(&rows, LANGUAGE) && painted(&rows, "English ›") && painted(&rows, footer_text()));
+    }
+
+    #[test]
+    fn the_search_finds_the_language_row_in_english_and_in_spanish() {
+        for search in ["language", "idioma", "ESPAÑOL", "spanish"] {
+            let mut window = Window::opened(Behavior::default());
+            window.step(vec![Event::Text(search.into())]);
+            let rows = window.step(vec![]);
+            assert!(painted(&rows, LANGUAGE) && !painted(&rows, SYSTEM), "{search}");
+        }
+    }
+
+    #[test]
+    fn in_spanish_the_search_finds_rows_by_their_spanish_names() {
+        crate::i18n::set(crate::i18n::Lang::Es);
+        let mut window = Window::opened(Behavior::default());
+        window.step(vec![Event::Text("pestaña".into())]);
+        let rows = window.step(vec![]);
+        crate::i18n::set(crate::i18n::Lang::En);
+        assert!(painted(&rows, "Mostrar en pestaña nueva") && !painted(&rows, "Idioma"), "{rows:?}");
     }
 
     #[test]

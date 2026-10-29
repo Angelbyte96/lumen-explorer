@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
+use crate::i18n::tr;
+
 pub const NEW: &str = "+";
 pub const CLOSE: &str = "×";
 
@@ -67,7 +69,7 @@ pub fn show(ui: &mut egui::Ui, labels: &[String], active: usize) -> Option<TabEv
                             let text = if selected { text.strong() } else { text };
                             ui.add(egui::Label::new(text).truncate().selectable(false).sense(egui::Sense::hover()));
                             if labels.len() > 1 {
-                                close_clicked = close_button(ui, i).on_hover_text("Close tab (Ctrl+W)").clicked();
+                                close_clicked = close_button(ui, i).on_hover_text(tr!("Close tab (Ctrl+W)")).clicked();
                             }
                         });
                     });
@@ -81,7 +83,7 @@ pub fn show(ui: &mut egui::Ui, labels: &[String], active: usize) -> Option<TabEv
                 let new = egui::Button::new(egui::RichText::new(NEW).size(16.0)).frame(false);
                 let new = ui.add(new);
                 crate::ui::focus_ring(ui, &new);
-                if new.on_hover_text("New tab (Ctrl+T)").clicked() {
+                if new.on_hover_text(tr!("New tab (Ctrl+T)")).clicked() {
                     event = Some(TabEvent::New);
                 }
             });

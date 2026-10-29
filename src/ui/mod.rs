@@ -192,6 +192,58 @@ mod tests {
         }
     }
 
+    /// The Spanish catalog reaches what the views draw, by the same code paths English takes.
+    #[test]
+    fn the_views_speak_spanish_once_the_language_is_set() {
+        use std::time::Duration;
+
+        use super::status_bar::{PickedSize, count_text, filter_placeholder, picked_text, progress_text};
+        use crate::fs::transfer::{Mode, Progress};
+        use crate::i18n::{Lang, set};
+        use crate::places::Usage;
+
+        let ctx = egui::Context::default();
+        let progress = Progress { files_done: 3, files_total: 10, bytes_done: 45, bytes_total: 100 };
+        set(Lang::Es);
+        let (_, shapes) = super::testing::run(&ctx, vec![], |ui| {
+            super::drives_view::show(ui, &[], None, None, &super::drives_view::DEFAULT_WIDTHS);
+        });
+        let drawn: Vec<String> = shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        let said = [
+            count_text(12, false),
+            filter_placeholder(10),
+            picked_text(5, &PickedSize { bytes: 0, uncounted: 2 }).unwrap_or_default(),
+            progress_text(Mode::Copy, &progress, Some((2, 5))),
+            super::tab_search::ago(Some(Duration::from_secs(300))),
+            super::sidebar::usage_text(&Usage { free: 512, total: 2048 }),
+            super::file_list::column_label("Date Modified").to_owned(),
+            super::view_size::shown("XL Icons").to_owned(),
+            super::caption::Button::Minimize.hint().0.to_owned(),
+        ];
+        set(Lang::En);
+        assert!(drawn.iter().any(|t| t == "No hay unidades"), "{drawn:?}");
+        assert_eq!(
+            said,
+            [
+                "12 elementos",
+                "Filtrar 10 archivos…",
+                "5 seleccionados · 2 carpetas",
+                "Copiando elemento 2 de 5: 3/10 — 45%",
+                "hace 5 min",
+                "512 B disponibles de 2.0 KB",
+                "Fecha de modificación",
+                "Iconos XL",
+                "Minimizar ventana",
+            ]
+        );
+    }
+
     /// Catches a symbol added anywhere in UI code without updating the list
     /// above: every non-ASCII character outside tests and comments must draw.
     #[test]
