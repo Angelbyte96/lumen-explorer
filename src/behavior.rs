@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+use crate::i18n::{Language, tr};
+
 /// What a character key pressed without modifiers does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CharKey {
@@ -20,9 +22,9 @@ impl CharKey {
 
     pub fn name(self) -> &'static str {
         match self {
-            CharKey::TriggerHotkey => "Trigger Hotkey",
-            CharKey::TypeInFilter => "Type In Filter",
-            CharKey::SelectTypedItem => "Select Typed Item",
+            CharKey::TriggerHotkey => tr!("Trigger Hotkey"),
+            CharKey::TypeInFilter => tr!("Type In Filter"),
+            CharKey::SelectTypedItem => tr!("Select Typed Item"),
         }
     }
 
@@ -80,9 +82,9 @@ impl NewTab {
 
     pub fn name(self) -> &'static str {
         match self {
-            NewTab::Root => "Root",
-            NewTab::Home => "Home",
-            NewTab::Current => "Current",
+            NewTab::Root => tr!("Root"),
+            NewTab::Home => tr!("Home"),
+            NewTab::Current => tr!("Current"),
         }
     }
 
@@ -108,4 +110,6 @@ pub struct Behavior {
     pub char_key: CharKey,
     pub startup: Startup,
     pub new_tab: NewTab,
+    /// The interface's language.
+    pub language: Language,
 }

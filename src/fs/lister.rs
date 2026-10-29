@@ -11,6 +11,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::i18n::tr;
+
 use super::entry::{Entry, is_hidden_name};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,10 +38,10 @@ impl ListError {
 impl fmt::Display for ListError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotFound(p) => write!(f, "Path does not exist: {}", p.display()),
-            Self::PermissionDenied(p) => write!(f, "Permission denied: {}", p.display()),
-            Self::NotADirectory(p) => write!(f, "Not a directory: {}", p.display()),
-            Self::Other(p, msg) => write!(f, "Cannot open {}: {msg}", p.display()),
+            Self::NotFound(p) => write!(f, "{}", tr!("Path does not exist: {0}", p.display())),
+            Self::PermissionDenied(p) => write!(f, "{}", tr!("Permission denied: {0}", p.display())),
+            Self::NotADirectory(p) => write!(f, "{}", tr!("Not a directory: {0}", p.display())),
+            Self::Other(p, msg) => write!(f, "{}", tr!("Cannot open {0}: {1}", p.display(), msg)),
         }
     }
 }

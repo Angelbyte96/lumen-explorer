@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::i18n::tr;
+
 /// What a `$I` record holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Info {
@@ -170,7 +172,7 @@ pub fn free_name(original: &Path, is_dir: bool, taken: impl Fn(&Path) -> bool) -
     let at = if is_dir { None } else { name.rfind('.').filter(|&at| at > 0) };
     let (stem, ext) = at.map_or((name.as_str(), ""), |at| name.split_at(at));
     (1u32..)
-        .map(|n| original.with_file_name(if n == 1 { format!("{stem} (restored){ext}") } else { format!("{stem} (restored {n}){ext}") }))
+        .map(|n| original.with_file_name(if n == 1 { format!("{stem} {}{ext}", tr!("(restored)")) } else { format!("{stem} {}{ext}", tr!("(restored {0})", n)) }))
         .find(|candidate| !taken(candidate))
         .unwrap_or_else(|| original.to_path_buf())
 }
@@ -178,7 +180,7 @@ pub fn free_name(original: &Path, is_dir: bool, taken: impl Fn(&Path) -> bool) -
 /// Puts the entry back where it was, in its folder (made if it is gone) and
 /// under a free name, then drops its record. Returns where it landed.
 pub fn restore(item: &Recycled) -> Result<PathBuf, String> {
-    let fail = |err: std::io::Error| format!("Cannot restore {}: {err}", item.name);
+    let fail = |err: std::io::Error| tr!("Cannot restore {0}: {1}", item.name, err);
     if let Some(parent) = item.original.parent() {
         std::fs::create_dir_all(parent).map_err(fail)?;
     }
@@ -197,7 +199,7 @@ pub fn restore(item: &Recycled) -> Result<PathBuf, String> {
         }
     }
     if std::fs::symlink_metadata(&item.data).is_ok() {
-        return Err(format!("Cannot restore {}: every free name was taken", item.name));
+        return Err(tr!("Cannot restore {0}: every free name was taken", item.name));
     }
     // Without its content the record is skipped anyway: nothing to report.
     let _ = std::fs::remove_file(&item.info);
@@ -246,7 +248,7 @@ pub fn purge(item: &Recycled) -> Result<(), String> {
         crate::fs::ops::delete_forever(&item.data)?;
     }
     match std::fs::remove_file(&item.info) {
-        Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(format!("Cannot delete {}: {err}", item.info.display())),
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(tr!("Cannot delete {0}: {1}", item.info.display(), err)),
         _ => Ok(()),
     }
 }
@@ -274,7 +276,7 @@ fn each(items: &[&Recycled], mut run: impl FnMut(&Recycled) -> Result<(), String
 
 /// "1 item restored", "3 items restored".
 pub fn restored_notice(count: usize) -> String {
-    format!("{count} {} restored", if count == 1 { "item" } else { "items" })
+    if count == 1 { tr!("1 item restored").to_owned() } else { tr!("{0} items restored", count) }
 }
 
 /// Reads the bins on a thread of their own: a bin with thousands of entries

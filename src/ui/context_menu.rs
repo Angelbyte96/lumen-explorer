@@ -5,6 +5,7 @@
 
 use eframe::egui;
 
+use crate::i18n::tr;
 use crate::menu::{Command, Item, Key, Kind, Menu};
 use crate::ui::path_popup::marked_name;
 
@@ -72,7 +73,7 @@ impl ContextMenu {
                     let mut query = self.menu.query.clone();
                     let field = egui::TextEdit::singleline(&mut query)
                         .id(field_id())
-                        .hint_text("Select a command…")
+                        .hint_text(tr!("Select a command…"))
                         .desired_width(f32::INFINITY)
                         .frame(egui::Frame::NONE)
                         .show(ui);

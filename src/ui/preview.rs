@@ -12,7 +12,8 @@ use crate::app::{Sort, visible_rows};
 use crate::format::{format_size, format_time};
 use crate::fs::Entry;
 use crate::fs::count::Totals;
-use crate::ui::file_list::{COLUMNS, count_cells, count_cols, name_label};
+use crate::i18n::tr;
+use crate::ui::file_list::{COLUMNS, column_label, count_cells, count_cols, name_label};
 use crate::ui::icons;
 use crate::fs::preview::Content;
 
@@ -67,7 +68,7 @@ pub fn show(
         None => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Loading…");
+                ui.label(tr!("Loading…"));
             });
         }
         Some(Content::Folder(Ok(entries))) => folder(ui, entries, show_hidden, sort),
@@ -76,10 +77,10 @@ pub fn show(
         }
         Some(Content::Text { text, truncated }) => {
             if text.is_empty() {
-                ui.weak("Empty file");
+                ui.weak(tr!("Empty file"));
             }
             if *truncated {
-                ui.weak("Showing the first 256 KB");
+                ui.weak(tr!("Showing the first 256 KB"));
             }
             egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                 ui.add(egui::Label::new(egui::RichText::new(text).monospace()).extend());
@@ -122,7 +123,16 @@ fn details(entry: &Entry, totals: Option<&Totals>, content: Option<&Content>) ->
 
 /// "1 file", "9 files".
 pub fn plural(n: u64, noun: &str) -> String {
-    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
+    match (noun, n) {
+        ("file", 1) => tr!("1 file").to_owned(),
+        ("file", _) => tr!("{0} files", n),
+        ("folder", 1) => tr!("1 folder").to_owned(),
+        ("folder", _) => tr!("{0} folders", n),
+        ("item", 1) => tr!("1 item").to_owned(),
+        ("item", _) => tr!("{0} items", n),
+        (_, 1) => format!("1 {noun}"),
+        _ => format!("{n} {noun}s"),
+    }
 }
 
 /// The folder's entries as a read-only table, sorted and filtered for hidden
@@ -131,10 +141,10 @@ pub fn plural(n: u64, noun: &str) -> String {
 fn folder(ui: &mut egui::Ui, entries: &[Entry], show_hidden: bool, sort: Sort) {
     let rows = visible_rows(entries, &HashMap::new(), show_hidden, "", sort);
     if rows.is_empty() {
-        ui.weak("Empty folder");
+        ui.weak(tr!("Empty folder"));
         return;
     }
-    ui.weak(format!("{} items", rows.len()));
+    ui.weak(tr!("{0} items", rows.len()));
     let row_height = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
     TableBuilder::new(ui)
         // Its own id: the main list's scroll and column state must not leak in.
@@ -149,7 +159,7 @@ fn folder(ui: &mut egui::Ui, entries: &[Entry], show_hidden: bool, sort: Sort) {
         .header(row_height, |mut header| {
             for (label, _) in COLUMNS {
                 header.col(|ui| {
-                    ui.strong(label);
+                    ui.strong(column_label(label));
                 });
             }
         })

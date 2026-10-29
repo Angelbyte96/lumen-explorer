@@ -18,6 +18,7 @@ use eframe::egui;
 use crate::fs::index::Crawler;
 use crate::fs::search::{Hit, Searcher};
 use crate::fs::{self, Entry};
+use crate::i18n::tr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PopupEvent {
@@ -455,24 +456,24 @@ impl PathPopup {
                         self.picked = None;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if button(ui, "close", CLOSE, "Close (Escape)").clicked() {
+                        if button(ui, "close", CLOSE, tr!("Close (Escape)")).clicked() {
                             self.close();
                         }
                         ui.separator();
-                        if button(ui, "up", toolbar::UP, "Parent folder").clicked() {
+                        if button(ui, "up", toolbar::UP, tr!("Parent folder")).clicked() {
                             self.set_text(initial_text(&parent_of(&folder)), Cursor::End);
                         }
-                        if button(ui, "forward", toolbar::FORWARD, "Forward").clicked() {
+                        if button(ui, "forward", toolbar::FORWARD, tr!("Forward")).clicked() {
                             event = Some(PopupEvent::Forward);
                         }
-                        if button(ui, "back", toolbar::BACK, "Back").clicked() {
+                        if button(ui, "back", toolbar::BACK, tr!("Back")).clicked() {
                             event = Some(PopupEvent::Back);
                         }
                     });
                 });
                 ui.separator();
                 if let Some(items) = indexing {
-                    ui.weak(format!("Indexing… {items} items"));
+                    ui.weak(tr!("Indexing… {0} items", items));
                 }
                 let row_height = ui.spacing().interact_size.y;
                 egui::ScrollArea::vertical()
@@ -482,7 +483,7 @@ impl PathPopup {
                         if let Some(error) = &error {
                             ui.weak(error);
                         } else if rows.is_empty() && !(global && indexing.is_some()) {
-                            ui.weak("Nothing here matches");
+                            ui.weak(tr!("Nothing here matches"));
                         }
                         for (shown, row) in rows.iter().enumerate() {
                             let entry = &row.entry;
@@ -555,11 +556,11 @@ fn button(ui: &mut egui::Ui, name: &str, symbol: &str, hint: &str) -> egui::Resp
 fn hints(ui: &mut egui::Ui) {
     ui.horizontal_wrapped(|ui| {
         for (keys, what) in [
-            (&["Up", "Down"][..], "to navigate"),
-            (&["Enter"][..], "to use"),
-            (&["Tab"][..], "to expand"),
-            (&["Ctrl+Enter"][..], "to open in a new tab"),
-            (&["Escape"][..], "to dismiss"),
+            (&["Up", "Down"][..], tr!("to navigate")),
+            (&[tr!("Enter")][..], tr!("to use")),
+            (&["Tab"][..], tr!("to expand")),
+            (&[tr!("Ctrl+Enter")][..], tr!("to open in a new tab")),
+            (&["Escape"][..], tr!("to dismiss")),
         ] {
             for key in keys {
                 egui::Frame::new()

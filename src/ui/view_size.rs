@@ -2,6 +2,8 @@
 //! view. Details, Tree, List and M Icons are steps; from M Icons up to XL Icons
 //! it is one icon grid whose icons grow smoothly with the position.
 
+use crate::i18n::tr;
+
 /// The views, smallest to largest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
@@ -20,6 +22,20 @@ pub const STOPS: [(u8, &str, Layout); 6] = [
     (65, "L Icons", Layout::Icons),
     (100, "XL Icons", Layout::Icons),
 ];
+
+/// A stop's name in the interface's language. `STOPS` and `ViewSize::name`
+/// hold English, which the views are told apart by.
+pub fn shown(name: &str) -> &str {
+    match name {
+        "Details" => tr!("Details"),
+        "Tree" => tr!("Tree"),
+        "List" => tr!("List"),
+        "M Icons" => tr!("M Icons"),
+        "L Icons" => tr!("L Icons"),
+        "XL Icons" => tr!("XL Icons"),
+        other => other,
+    }
+}
 
 /// Where the icon grid starts: below it only the steps exist.
 pub const ICONS: u8 = 30;

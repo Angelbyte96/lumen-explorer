@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::i18n::tr;
+
 /// One row in the file list. Built once per listing; the UI never touches the disk.
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -23,11 +25,11 @@ impl Entry {
 /// "Folder", "PNG file", or "File" when there is no extension, for any path.
 pub fn kind_of(path: &Path, is_dir: bool) -> String {
     if is_dir {
-        return "Folder".into();
+        return tr!("Folder").into();
     }
     match path.extension().map(|e| e.to_string_lossy()) {
-        Some(ext) if !ext.is_empty() => format!("{} file", ext.to_uppercase()),
-        _ => "File".into(),
+        Some(ext) if !ext.is_empty() => tr!("{0} file", ext.to_uppercase()),
+        _ => tr!("File").into(),
     }
 }
 
