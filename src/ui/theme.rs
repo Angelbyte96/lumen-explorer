@@ -31,7 +31,7 @@ pub fn card(visuals: &Visuals) -> Color32 {
 }
 
 /// A color scheme, chosen in the Options window. File Pilot's built-in
-/// schemes by name, with Lumen in Voidstar's place, then Dracula and Gentleman.
+/// schemes by name, with Lumen in Voidstar's place, then Dracula, Gentleman and Space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scheme {
     Sirius,
@@ -42,11 +42,12 @@ pub enum Scheme {
     Altair,
     Dracula,
     Gentleman,
+    Space,
 }
 
 impl Scheme {
     /// Every scheme, in the order the Options window lists them.
-    pub const ALL: [Scheme; 8] = [
+    pub const ALL: [Scheme; 9] = [
         Scheme::Sirius,
         Scheme::Pollux,
         Scheme::Eridanus,
@@ -55,6 +56,7 @@ impl Scheme {
         Scheme::Altair,
         Scheme::Dracula,
         Scheme::Gentleman,
+        Scheme::Space,
     ];
 
     pub fn name(self) -> &'static str {
@@ -67,6 +69,7 @@ impl Scheme {
             Scheme::Altair => "Altair",
             Scheme::Dracula => "Dracula",
             Scheme::Gentleman => "Gentleman",
+            Scheme::Space => "Space",
         }
     }
 
@@ -76,10 +79,17 @@ impl Scheme {
     }
 
     /// What it looks like when the system uses `theme`: Lumen follows it,
-    /// every other scheme is always light or always dark.
+    /// every other scheme is always light or always dark. Every scheme
+    /// has the glass look; Lumen frames its controls in egui's link blue,
+    /// brighter than its selection.
     pub fn visuals(self, theme: egui::Theme) -> Visuals {
         match self.palette() {
-            None => theme.default_visuals(),
+            None => {
+                let mut v = theme.default_visuals();
+                let [r, g, b, _] = v.hyperlink_color.to_srgba_unmultiplied();
+                glass(&mut v, Color32::from_rgba_unmultiplied(r, g, b, GLASS_FRAME_ALPHA));
+                v
+            }
             Some(palette) => palette.visuals(),
         }
     }
@@ -89,7 +99,9 @@ impl Scheme {
     /// File Pilot's built-in colors are not published: Sirius, Pollux,
     /// Eridanus, Regulus and Altair are Lumen's own take on each star until
     /// they are read from File Pilot. Dracula is draculatheme.com's palette,
-    /// Gentleman is gentle-shell's Gentleman-Sexy.
+    /// Gentleman is gentle-shell's Gentleman-Sexy on a dark plum instead of
+    /// its black, Space is Lumen's purple glass. The buttons sit close to the
+    /// panel, framed in a see-through accent.
     fn palette(self) -> Option<Palette> {
         Some(match self {
             Scheme::Lumen => return None,
@@ -99,7 +111,8 @@ impl Scheme {
                 background: hex(0xF4F7FB),
                 surface: hex(0xFFFFFF),
                 inner: hex(0xFFFFFF),
-                widget: hex(0xE3E9F2),
+                widget: hex(0xEBF0F7),
+                frame: glass_frame(0x2F6FEB),
                 border: hex(0xC5CFDD),
                 text: hex(0x3A4250),
                 strong: hex(0x10151C),
@@ -115,7 +128,8 @@ impl Scheme {
                 background: hex(0x1E1A16),
                 surface: hex(0x26211C),
                 inner: hex(0x15120F),
-                widget: hex(0x3A322A),
+                widget: hex(0x27221D),
+                frame: glass_frame(0xE0954A),
                 border: hex(0x4A4036),
                 text: hex(0xCFC4B6),
                 strong: hex(0xF5ECE0),
@@ -131,7 +145,8 @@ impl Scheme {
                 background: hex(0x0F1724),
                 surface: hex(0x152033),
                 inner: hex(0x0A101A),
-                widget: hex(0x22304A),
+                widget: hex(0x162133),
+                frame: glass_frame(0x3BBDB5),
                 border: hex(0x2E3F5C),
                 text: hex(0xB4C2D6),
                 strong: hex(0xEAF1FB),
@@ -147,7 +162,8 @@ impl Scheme {
                 background: hex(0x1A1B26),
                 surface: hex(0x222433),
                 inner: hex(0x12131B),
-                widget: hex(0x2F3245),
+                widget: hex(0x232534),
+                frame: glass_frame(0x7480EA),
                 border: hex(0x3D4159),
                 text: hex(0xBFC3DA),
                 strong: hex(0xF0F1FA),
@@ -163,7 +179,8 @@ impl Scheme {
                 background: hex(0xFAF6EF),
                 surface: hex(0xFFFDF8),
                 inner: hex(0xFFFFFF),
-                widget: hex(0xEFE7DA),
+                widget: hex(0xF3ECE1),
+                frame: glass_frame(0xB8501A),
                 border: hex(0xD8CCB8),
                 text: hex(0x4A4036),
                 strong: hex(0x1C1712),
@@ -178,7 +195,8 @@ impl Scheme {
                 background: hex(0x282A36),
                 surface: hex(0x21222C),
                 inner: hex(0x191A21),
-                widget: hex(0x343746),
+                widget: hex(0x2F3140),
+                frame: glass_frame(0xBD93F9),
                 border: hex(0x44475A),
                 text: hex(0xF8F8F2),
                 strong: hex(0xFFFFFF),
@@ -190,21 +208,66 @@ impl Scheme {
             },
             Scheme::Gentleman => Palette {
                 dark: true,
-                background: hex(0x060407),
-                surface: hex(0x100A0F),
-                inner: hex(0x100A0F),
-                widget: hex(0x2A1720),
+                background: hex(0x221820),
+                surface: hex(0x2A1E27),
+                inner: hex(0x170F15),
+                widget: hex(0x2C1F28),
+                frame: glass_frame(0xE0306F),
                 border: hex(0x563040),
                 text: hex(0xD2CBD0),
                 strong: hex(0xF6EFF3),
-                accent: hex(0xBF0F50),
-                on_accent: hex(0xF6EFF3),
+                accent: hex(0xF43888),
+                on_accent: hex(0x060407),
                 link: hex(0xFF4F9A),
                 warning: hex(0xF2B86D),
                 error: hex(0xFF718F),
             },
+            // Purple glass: controls barely lighter than the panel, framed in
+            // see-through lavender (no real blur behind them).
+            Scheme::Space => Palette {
+                dark: true,
+                background: hex(0x221D25),
+                surface: hex(0x29222D),
+                inner: hex(0x1A161D),
+                widget: hex(0x2A2330),
+                frame: SPACE_BORDER,
+                border: SPACE_BORDER,
+                text: hex(0xC9B3DD),
+                strong: hex(0xF3ECF9),
+                accent: hex(0x7A4A96),
+                on_accent: hex(0xF3ECF9),
+                link: hex(0xB98BE0),
+                warning: hex(0xF2B86D),
+                error: hex(0xFF7A9A),
+            },
         })
     }
+}
+
+/// How much shows through a glass frame.
+const GLASS_FRAME_ALPHA: u8 = 0x99;
+/// A glass frame in `rgb`.
+const fn glass_frame(rgb: u32) -> Color32 {
+    Color32::from_rgba_unmultiplied_const((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, GLASS_FRAME_ALPHA)
+}
+/// Space's frames and separators: its lavender, see-through.
+const SPACE_BORDER: Color32 = glass_frame(0x9060AA);
+/// How round the controls are.
+const GLASS_CORNERS: u8 = 6;
+/// How round windows and menus are.
+const GLASS_WINDOW_CORNERS: u8 = 10;
+
+/// The glass look on top of a scheme's colors: controls and windows
+/// framed in `frame`, rounder corners (there is no real blur behind them).
+fn glass(v: &mut Visuals, frame: Color32) {
+    v.window_stroke = egui::Stroke::new(1.0, frame);
+    let w = &mut v.widgets;
+    w.inactive.bg_stroke = egui::Stroke::new(1.0, frame);
+    for state in [&mut w.noninteractive, &mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+        state.corner_radius = egui::CornerRadius::same(GLASS_CORNERS);
+    }
+    v.window_corner_radius = egui::CornerRadius::same(GLASS_WINDOW_CORNERS);
+    v.menu_corner_radius = egui::CornerRadius::same(GLASS_WINDOW_CORNERS);
 }
 
 const fn hex(rgb: u32) -> Color32 {
@@ -220,8 +283,10 @@ struct Palette {
     surface: Color32,
     /// Inside text fields.
     inner: Color32,
-    /// Buttons and other controls at rest.
+    /// Buttons and other controls at rest, close to the background.
     widget: Color32,
+    /// Around buttons and windows: the accent, see-through.
+    frame: Color32,
     /// Separators and frames.
     border: Color32,
     text: Color32,
@@ -274,6 +339,7 @@ impl Palette {
         w.open.weak_bg_fill = hovered;
         w.open.bg_stroke = stroke(1.0, self.border);
         w.open.fg_stroke = stroke(1.0, self.text.lerp_to_gamma(self.strong, 0.5));
+        glass(&mut v, self.frame);
         v
     }
 }
@@ -331,9 +397,9 @@ mod tests {
     }
 
     #[test]
-    fn the_schemes_are_file_pilots_with_lumen_for_voidstar_then_dracula_and_gentleman() {
+    fn the_schemes_are_file_pilots_with_lumen_for_voidstar_then_dracula_gentleman_and_space() {
         let names: Vec<&str> = Scheme::ALL.iter().map(|s| s.name()).collect();
-        assert_eq!(names, ["Sirius", "Pollux", "Eridanus", "Lumen", "Regulus", "Altair", "Dracula", "Gentleman"]);
+        assert_eq!(names, ["Sirius", "Pollux", "Eridanus", "Lumen", "Regulus", "Altair", "Dracula", "Gentleman", "Space"]);
         for scheme in Scheme::ALL {
             assert_eq!(Scheme::from_name(scheme.name()), Some(scheme));
             assert_eq!(Scheme::from_name(&scheme.name().to_uppercase()), Some(scheme), "any case");
@@ -344,8 +410,40 @@ mod tests {
 
     #[test]
     fn lumen_keeps_its_current_colors_and_follows_the_system() {
-        assert_eq!(Scheme::Lumen.visuals(Theme::Dark), Visuals::dark());
-        assert_eq!(Scheme::Lumen.visuals(Theme::Light), Visuals::light());
+        for (theme, egui) in [(Theme::Dark, Visuals::dark()), (Theme::Light, Visuals::light())] {
+            let v = Scheme::Lumen.visuals(theme);
+            assert_eq!(v.dark_mode, egui.dark_mode, "{theme:?}");
+            assert_eq!((v.panel_fill, v.window_fill, v.selection), (egui.panel_fill, egui.window_fill, egui.selection), "{theme:?}");
+            assert_eq!(v.widgets.inactive.bg_fill, egui.widgets.inactive.bg_fill, "{theme:?}");
+            assert_eq!(v.widgets.noninteractive.fg_stroke, egui.widgets.noninteractive.fg_stroke, "{theme:?}");
+            assert_ne!(v, egui, "{theme:?}: with the glass look");
+        }
+    }
+
+    #[test]
+    fn every_scheme_is_glass() {
+        for scheme in Scheme::ALL {
+            for theme in [Theme::Dark, Theme::Light] {
+                let v = scheme.visuals(theme);
+                let frame = v.widgets.inactive.bg_stroke.color;
+                assert!(frame.a() > 0 && frame.a() < 255, "{scheme:?} {theme:?}: buttons framed see-through, {frame:?}");
+                assert_eq!(v.window_stroke.color, frame, "{scheme:?} {theme:?}: windows in the same frame");
+                for w in [v.widgets.noninteractive, v.widgets.inactive, v.widgets.hovered, v.widgets.active, v.widgets.open] {
+                    assert_eq!(w.corner_radius, egui::CornerRadius::same(GLASS_CORNERS), "{scheme:?} {theme:?}: rounded controls");
+                }
+                let windows = egui::CornerRadius::same(GLASS_WINDOW_CORNERS);
+                assert_eq!((v.window_corner_radius, v.menu_corner_radius), (windows, windows), "{scheme:?} {theme:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_fixed_schemes_buttons_sit_close_to_the_panel() {
+        for scheme in Scheme::ALL.into_iter().filter(|&s| s != Scheme::Lumen) {
+            let v = scheme.visuals(Theme::Dark);
+            let step = contrast(v.widgets.inactive.bg_fill, v.panel_fill);
+            assert!(step < 1.3, "{scheme:?}: a button {step:.2} away from the panel");
+        }
     }
 
     #[test]
@@ -358,21 +456,37 @@ mod tests {
         assert_eq!(v.hyperlink_color, hex(0x8BE9FD), "cyan");
         assert_eq!(v.error_fg_color, hex(0xFF5555), "red");
         assert_eq!(v.warn_fg_color, hex(0xFFB86C), "orange");
-        assert_eq!(v.window_stroke.color, hex(0x44475A), "current line");
+        assert_eq!(v.widgets.noninteractive.bg_stroke.color, hex(0x44475A), "current line, on separators");
+        assert_eq!(v.window_stroke.color, glass_frame(0xBD93F9), "framed in see-through purple");
     }
 
     #[test]
     fn gentleman_uses_gentle_shells_pink() {
         let v = Scheme::Gentleman.visuals(Theme::Light);
         assert!(v.dark_mode);
-        assert_eq!(v.panel_fill, hex(0x060407), "bg");
-        assert_eq!(v.window_fill, hex(0x100A0F), "bgPanel");
+        assert_eq!(v.panel_fill, hex(0x221820), "a dark plum, not gentle-shell's black bg");
+        assert!(contrast(v.panel_fill, Color32::BLACK) > 1.15, "lifted from black");
         assert_eq!(v.widgets.active.fg_stroke.color, hex(0xF6EFF3), "text");
-        assert_eq!(v.window_stroke.color, hex(0x563040), "border");
-        assert_eq!(v.selection.bg_fill, hex(0xBF0F50), "deepPink");
+        assert_eq!(v.widgets.noninteractive.bg_stroke.color, hex(0x563040), "border, on separators");
+        assert_eq!(v.selection.bg_fill, hex(0xF43888), "accent, the theme's own pink");
+        assert_eq!(v.selection.stroke.color, hex(0x060407), "bg, readable on the pink");
         assert_eq!(v.hyperlink_color, hex(0xFF4F9A), "activePink");
         assert_eq!(v.error_fg_color, hex(0xFF718F), "error");
         assert_eq!(v.warn_fg_color, hex(0xF2B86D), "warning");
+    }
+
+    #[test]
+    fn space_is_purple_glass() {
+        let v = Scheme::Space.visuals(Theme::Light);
+        assert!(v.dark_mode);
+        assert_eq!(v.panel_fill, hex(0x221D25), "panel");
+        assert_eq!(v.widgets.inactive.bg_fill, hex(0x2A2330), "buttons close to the panel");
+        let border = v.widgets.inactive.bg_stroke.color;
+        assert_eq!(border, SPACE_BORDER, "buttons framed in see-through lavender");
+        assert!(border.a() < 255);
+        assert_eq!(v.window_stroke.color, border);
+        assert_eq!(v.selection.bg_fill, hex(0x7A4A96), "purple selection");
+        assert_eq!(v.widgets.noninteractive.fg_stroke.color, hex(0xC9B3DD), "lavender text");
     }
 
     #[test]
@@ -415,8 +529,8 @@ mod tests {
         assert_eq!(ctx.style_of(Theme::Light).visuals, Scheme::Sirius.visuals(Theme::Light));
         assert_eq!(ctx.style_of(Theme::Dark).visuals, Scheme::Gentleman.visuals(Theme::Dark));
         Schemes::default().apply(&ctx);
-        assert_eq!(ctx.style_of(Theme::Light).visuals, Visuals::light(), "back to Lumen's own");
-        assert_eq!(ctx.style_of(Theme::Dark).visuals, Visuals::dark());
+        assert_eq!(ctx.style_of(Theme::Light).visuals, Scheme::Lumen.visuals(Theme::Light), "back to Lumen's own");
+        assert_eq!(ctx.style_of(Theme::Dark).visuals, Scheme::Lumen.visuals(Theme::Dark));
     }
 
     #[test]

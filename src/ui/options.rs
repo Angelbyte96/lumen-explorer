@@ -823,7 +823,7 @@ mod tests {
         step(&ctx, &mut options, &mut schemes, key(Key::ArrowDown));
         step(&ctx, &mut options, &mut schemes, key(Key::Enter));
         assert!(schemes.follow_system, "wrapped to the switch");
-        // On Color Scheme's list, five up from Regulus wraps round to Gentleman, the last.
+        // On Color Scheme's list, five up from Regulus wraps round to Space, the last.
         step(&ctx, &mut options, &mut schemes, key(Key::Enter));
         let mut chosen = Schemes { follow_system: false, ..schemes };
         let (ctx, mut options, _) = opened(chosen);
@@ -833,7 +833,7 @@ mod tests {
             step(&ctx, &mut options, &mut chosen, key(Key::ArrowUp));
         }
         step(&ctx, &mut options, &mut chosen, key(Key::Enter));
-        assert_eq!(chosen.scheme, Scheme::Gentleman);
+        assert_eq!(chosen.scheme, Scheme::Space);
     }
 
     /// The window with behavior options as they are kept between frames.
