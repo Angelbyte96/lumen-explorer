@@ -144,6 +144,8 @@ On Windows:
 - Files open as a double-click in File Explorer does: Windows asks before
   opening a downloaded file only when its type is dangerous (`.exe`, `.bat`…),
   not for a downloaded image or document.
+- The window opens as you left it: maximized or not, and at the size it
+  restores to (`maximized` and `window` in the settings file).
 - Settings are saved in `%APPDATA%\lumen\config`. A settings file left by
   Lumen 0.1 in `%USERPROFILE%\.config\lumen\config` is moved there the first
   time; if it cannot be moved, Lumen keeps using it where it is.

@@ -1414,6 +1414,9 @@ pub struct LumenApp {
     saved: Config,
     /// Inner window size in points, saved when Lumen closes.
     window: Option<[f32; 2]>,
+    /// Whether the window is maximized, saved when Lumen closes. `window`
+    /// keeps the restored size meanwhile.
+    maximized: bool,
     path_popup: PathPopup,
     /// Files' own icons (an .exe's), loaded off the UI thread.
     file_icons: crate::ui::file_icons::FileIcons,
@@ -1588,6 +1591,7 @@ impl LumenApp {
             config_path: None,
             saved: Config::default(),
             window: None,
+            maximized: false,
             path_popup: PathPopup::default(),
             file_icons: Default::default(),
             thumbnails: Default::default(),
@@ -1707,6 +1711,7 @@ impl LumenApp {
         app.bookmarks = Bookmarks::from_paths(config.bookmarks);
         app.visits = Visits::from_list(config.visited);
         app.window = config.window;
+        app.maximized = config.maximized;
         app.schemes = config.schemes;
         app.schemes.apply(ctx);
         app.behavior = config.behavior;
@@ -1767,6 +1772,7 @@ impl LumenApp {
             sidebar: self.sidebar_open,
             preview: self.preview_open,
             window: if with_window { self.window } else { self.saved.window },
+            maximized: if with_window { self.maximized } else { self.saved.maximized },
             bookmarks: self.bookmarks.paths().to_vec(),
             view: self.default_look.view,
             columns: self.columns,
@@ -3086,9 +3092,12 @@ impl LumenApp {
         ctx.request_repaint();
     }
 
-    /// Ends every frame: remembers the window's size, then saves the settings if they changed.
+    /// Ends every frame: remembers whether the window is maximized and its
+    /// size (the restored one while maximized), then saves the settings if they changed.
     fn end_frame(&mut self, ctx: &egui::Context) {
-        if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
+        let (inner, maximized) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().maximized));
+        self.maximized = maximized.unwrap_or(self.maximized);
+        if let Some(rect) = inner.filter(|_| !self.maximized) {
             self.window = Some([rect.width(), rect.height()]);
         }
         self.save_settings(false);
@@ -6741,6 +6750,7 @@ mod tests {
             sidebar: false,
             preview: true,
             window: Some([1000.0, 700.0]),
+            maximized: true,
             bookmarks: vec![PathBuf::from("/srv"), PathBuf::from("/srv")],
             view: ui::view_size::ViewSize::new(65),
             columns: [250.0, 90.0, 140.0, 55.0, 60.0, 95.0],
@@ -6905,6 +6915,7 @@ mod tests {
         assert!(app.preview_open);
         assert_eq!(app.bookmarks.paths(), [PathBuf::from("/srv")], "repeats dropped");
         assert_eq!(app.window, Some([1000.0, 700.0]));
+        assert!(app.maximized, "the window starts as it was left");
         assert_eq!(app.tab.view_size, ui::view_size::ViewSize::new(65));
         assert_eq!(app.columns, [250.0, 90.0, 140.0, 55.0, 60.0, 95.0]);
     }
@@ -7138,6 +7149,42 @@ mod tests {
         assert_eq!(Config::load(&path).unwrap().window, None, "a resize alone is not written");
         app.save_settings(true);
         assert_eq!(Config::load(&path).unwrap().window, Some([900.0, 600.0]), "closing writes it");
+    }
+
+    /// `end_frame` in a frame where the window has `inner` size and is `maximized` (None: not reported).
+    fn end_frame_in(ctx: &egui::Context, app: &mut LumenApp, inner: egui::Vec2, maximized: Option<bool>) {
+        let mut input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, inner)), ..Default::default() };
+        let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+        info.inner_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, inner));
+        info.maximized = maximized;
+        let mut output = ctx.run_ui(input, |ui| app.end_frame(ui.ctx()));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn a_maximized_window_is_remembered_with_the_size_it_restores_to() {
+        let (ctx, mut app, _) = app_in("app-window-maximized");
+        end_frame_in(&ctx, &mut app, egui::vec2(900.0, 600.0), Some(false));
+        assert_eq!((app.window, app.maximized), (Some([900.0, 600.0]), false), "restored: its size, not maximized");
+        end_frame_in(&ctx, &mut app, egui::vec2(1920.0, 1040.0), Some(true));
+        assert_eq!((app.window, app.maximized), (Some([900.0, 600.0]), true), "maximized: the restored size is kept");
+        end_frame_in(&ctx, &mut app, egui::vec2(1920.0, 1040.0), None);
+        assert_eq!((app.window, app.maximized), (Some([900.0, 600.0]), true), "nothing reported: as it was");
+        end_frame_in(&ctx, &mut app, egui::vec2(800.0, 500.0), Some(false));
+        assert_eq!((app.window, app.maximized), (Some([800.0, 500.0]), false), "restored again: the new size");
+    }
+
+    #[test]
+    fn closing_a_maximized_window_writes_maximized_and_the_restored_size() {
+        let (ctx, mut app, dir) = app_in("app-window-maximized-saved");
+        let path = dir.join("config");
+        app.config_path = Some(path.clone());
+        end_frame_in(&ctx, &mut app, egui::vec2(900.0, 600.0), Some(false));
+        end_frame_in(&ctx, &mut app, egui::vec2(1920.0, 1040.0), Some(true));
+        app.save_settings(true);
+        let written = Config::load(&path).unwrap();
+        assert_eq!((written.window, written.maximized), (Some([900.0, 600.0]), true));
+        assert!(app.saved.window.is_some() && app.saved.maximized, "what was written is what is saved");
     }
 
     #[test]
