@@ -3057,6 +3057,8 @@ impl LumenApp {
     /// The Setup screen alone in the window, and what it asks for.
     fn show_setup(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let Some(screen) = self.setup.as_mut() else { return };
+        // No tab row here: a bare strip stands in for the title bar, so the window still moves.
+        egui::Panel::top("setup_caption").show_separator_line(false).show(ui, |ui| ui::caption::show(ui, |ui| ui.add_space(24.0)));
         let event = egui::CentralPanel::default_margins().show(ui, |ui| screen.show(ui)).inner;
         let outcome = match (event, self.system.as_deref()) {
             (Some(event), Some(system)) => screen.handle(system, event),
@@ -3871,6 +3873,9 @@ impl eframe::App for LumenApp {
             self.finish_job(&ctx, running, result);
         }
 
+        // The window has no system frame: its edges resize it, on every screen.
+        ui::caption::resize_edges(&ctx);
+
         if self.setup.is_some() {
             self.show_setup(&ctx, ui);
             self.end_frame(&ctx);
@@ -3878,19 +3883,22 @@ impl eframe::App for LumenApp {
         }
 
         egui::Panel::top("tabs").show(ui, |ui| {
-            ui.add_space(3.0);
-            let labels = self.tab_labels();
-            let (menu, tab) = ui.horizontal(|ui| (ui::app_menu::show(ui, self.setup_row), ui::tabs::show(ui, &labels, self.active))).inner;
-            if let Some(event) = menu {
-                self.handle_menu(&ctx, event);
-            }
-            match tab {
-                Some(TabEvent::Select(i)) => self.select_tab(&ctx, i),
-                Some(TabEvent::Close(i)) => self.close_tab(&ctx, i),
-                Some(TabEvent::New) => self.new_tab(&ctx),
-                None => {}
-            }
-            ui::tabs::drop_targets(ui, &self.tab_folders());
+            // The tab row is the window's title bar: its empty space moves the window.
+            ui::caption::show(ui, |ui| {
+                ui.add_space(3.0);
+                let labels = self.tab_labels();
+                let (menu, tab) = ui.horizontal(|ui| (ui::app_menu::show(ui, self.setup_row), ui::tabs::show(ui, &labels, self.active))).inner;
+                if let Some(event) = menu {
+                    self.handle_menu(&ctx, event);
+                }
+                match tab {
+                    Some(TabEvent::Select(i)) => self.select_tab(&ctx, i),
+                    Some(TabEvent::Close(i)) => self.close_tab(&ctx, i),
+                    Some(TabEvent::New) => self.new_tab(&ctx),
+                    None => {}
+                }
+                ui::tabs::drop_targets(ui, &self.tab_folders());
+            });
         });
 
         egui::Panel::top("toolbar").show(ui, |ui| {
@@ -10724,6 +10732,49 @@ mod tests {
         app.handle_menu(&ctx, AppMenuEvent::Setup);
         let commands = finish_setup(&ctx, &mut app, ui::setup_view::Outcome::Close);
         assert!(commands.contains(&egui::ViewportCommand::Close), "{commands:?}");
+    }
+
+    /// One window frame with `events`, and what it asked of the window.
+    fn window_commands(ctx: &egui::Context, app: &mut LumenApp, events: Vec<egui::Event>) -> Vec<egui::ViewportCommand> {
+        let mut frame = eframe::Frame::_new_kittest();
+        let input = egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        let mut output = ctx.run_ui(input, |ui| eframe::App::ui(app, ui, &mut frame));
+        output.textures_delta.clear();
+        output.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.commands.clone()).unwrap_or_default()
+    }
+
+    /// Presses at `at`, then drags a little, and gathers what the window was asked.
+    fn drag_from(ctx: &egui::Context, app: &mut LumenApp, at: egui::Pos2) -> Vec<egui::ViewportCommand> {
+        let press = egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE };
+        window_commands(ctx, app, vec![egui::Event::PointerMoved(at)]);
+        let mut commands = window_commands(ctx, app, vec![press]);
+        commands.extend(window_commands(ctx, app, vec![egui::Event::PointerMoved(at + egui::vec2(20.0, 0.0))]));
+        commands
+    }
+
+    #[test]
+    fn the_empty_space_of_the_tab_row_moves_the_window_and_so_does_the_setup_strip() {
+        for setup in [false, true] {
+            let (ctx, mut app, _) = if setup { app_with_setup("app-caption-setup") } else { app_in("app-caption-tabs") };
+            for _ in 0..3 {
+                window_commands(&ctx, &mut app, vec![]);
+            }
+            // Far right of the top bar, past the tabs: nothing is drawn there.
+            let commands = drag_from(&ctx, &mut app, egui::pos2(crate::ui::testing::SCREEN.right() - 100.0, 12.0));
+            assert!(commands.contains(&egui::ViewportCommand::StartDrag), "setup {setup}: {commands:?}");
+        }
+    }
+
+    #[test]
+    fn the_windows_edges_resize_it_on_every_screen() {
+        for setup in [false, true] {
+            let (ctx, mut app, _) = if setup { app_with_setup("app-edges-setup") } else { app_in("app-edges-tabs") };
+            for _ in 0..3 {
+                window_commands(&ctx, &mut app, vec![]);
+            }
+            let commands = drag_from(&ctx, &mut app, egui::pos2(1.0, 300.0));
+            assert!(commands.contains(&egui::ViewportCommand::BeginResize(egui::viewport::ResizeDirection::West)), "setup {setup}: {commands:?}");
+        }
     }
 
     #[test]
