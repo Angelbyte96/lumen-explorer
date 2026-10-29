@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use crate::format::format_size;
+use crate::i18n::tr;
 use crate::places::{self, Mount, Place, Usage};
 use crate::ui::file_icons::FileIcons;
 use crate::ui::icons;
@@ -33,7 +34,7 @@ pub enum SidebarEvent {
 
 /// "120.0 GB free of 465.0 GB".
 pub fn usage_text(usage: &Usage) -> String {
-    format!("{} free of {}", format_size(usage.free), format_size(usage.total))
+    tr!("{0} free of {1}", format_size(usage.free), format_size(usage.total))
 }
 
 /// A disk row's tooltip: where it is mounted and, when known, its free space.
@@ -82,9 +83,9 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         ui.add_space(4.0);
         let at = rows.len();
-        let title = section(ui, "Bookmarks", true, |ui| {
+        let title = section(ui, "Bookmarks", tr!("Bookmarks"), true, |ui| {
             if sidebar.bookmarks.is_empty() {
-                ui.weak("Ctrl+D or ☆ adds the folder you are in");
+                ui.weak(tr!("Ctrl+D or ☆ adds the folder you are in"));
             }
             for path in sidebar.bookmarks {
                 let response = drop_target(ui, Some(path), |ui| item(ui, ItemIcon::Folder, "folder", &label_of(path), &path.display().to_string(), path, sidebar.current, sidebar.icons));
@@ -99,7 +100,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
         });
         rows.insert(at, title);
         let at = rows.len();
-        let title = section(ui, "Places", true, |ui| {
+        let title = section(ui, "Places", tr!("Places"), true, |ui| {
             for place in sidebar.places {
                 let marker = places::is_marker(&place.path);
                 let trash = place.trash || places::is_recycle_bin(&place.path);
@@ -126,7 +127,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
         });
         rows.insert(at, title);
         let at = rows.len();
-        let title = section(ui, "Storage", true, |ui| {
+        let title = section(ui, "Storage", tr!("Storage"), true, |ui| {
             for (mount, usage) in sidebar.disks {
                 // The bar is only 4 px tall: the whole row tells the free space too.
                 let hint = disk_hint(&mount.path, usage.as_ref());
@@ -146,7 +147,7 @@ pub fn show(ui: &mut egui::Ui, sidebar: &Sidebar<'_>) -> Option<SidebarEvent> {
         });
         rows.insert(at, title);
         let at = rows.len();
-        let title = section(ui, "Recents", false, |ui| {
+        let title = section(ui, "Recents", tr!("Recents"), false, |ui| {
             for path in sidebar.recents {
                 let response = item(ui, ItemIcon::Folder, "folder", &label_of(path), &path.display().to_string(), path, sidebar.current, sidebar.icons);
                 rows.push(Row { rect: response.rect, kind: RowKind::Item(path.clone()) });
@@ -240,8 +241,9 @@ fn set_open(ui: &egui::Ui, id: egui::Id, open: bool) {
 }
 
 /// A title that opens and closes its section on a click. Not a Tab stop, as
-/// egui's own collapsing header would be: the panel is one.
-fn section(ui: &mut egui::Ui, title: &str, open: bool, body: impl FnOnce(&mut egui::Ui)) -> Row {
+/// egui's own collapsing header would be: the panel is one. `title` is what
+/// keeps the section's open state, `shown` what the title says.
+fn section(ui: &mut egui::Ui, title: &str, shown: &str, open: bool, body: impl FnOnce(&mut egui::Ui)) -> Row {
     let id = ui.make_persistent_id(("lumen_section", title));
     let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open);
     let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
@@ -253,7 +255,7 @@ fn section(ui: &mut egui::Ui, title: &str, open: bool, body: impl FnOnce(&mut eg
     let mut icon = header.clone();
     icon.rect = egui::Rect::from_center_size(egui::pos2(rect.left() + indent / 2.0, rect.center().y), egui::Vec2::splat(ui.spacing().icon_width));
     egui::collapsing_header::paint_default_icon(ui, state.openness(ui.ctx()), &icon);
-    let galley = egui::WidgetText::from(egui::RichText::new(title).strong()).into_galley(ui, Some(egui::TextWrapMode::Truncate), rect.width() - indent, egui::TextStyle::Button);
+    let galley = egui::WidgetText::from(egui::RichText::new(shown).strong()).into_galley(ui, Some(egui::TextWrapMode::Truncate), rect.width() - indent, egui::TextStyle::Button);
     let text_pos = egui::pos2(rect.left() + indent, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(text_pos, galley, ui.visuals().text_color());
     let open = state.is_open();

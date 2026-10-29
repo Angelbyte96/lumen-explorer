@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use eframe::egui;
 
+use crate::i18n::tr;
 use crate::menu::MenuIcon;
 use crate::setup::{Origin, Switches, System};
 use crate::ui::theme;
@@ -20,10 +21,14 @@ const LOGO: f32 = 132.0;
 const BUTTON_TEXT: f32 = 22.0;
 
 /// Above the buttons while Install is held ([`crate::setup::INSTALL_HELD`]).
-pub const HELD_NOTE: &str = "Lumen is not code-signed yet, so Setup copies a PowerShell script instead of changing Windows itself.";
+pub fn held_note() -> &'static str {
+    tr!("Lumen is not code-signed yet, so Setup copies a PowerShell script instead of changing Windows itself.")
+}
 
 /// The note after a script went to the clipboard.
-pub const SCRIPT_COPIED: &str = "Script copied. Paste it into PowerShell (no admin rights needed), then reopen Lumen Setup.";
+pub fn script_copied() -> &'static str {
+    tr!("Script copied. Paste it into PowerShell (no admin rights needed), then reopen Lumen Setup.")
+}
 
 /// What the user asked for, read by [`SetupScreen::handle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,14 +167,14 @@ impl SetupScreen {
                 self.note = Some(match script {
                     Ok(script) => {
                         self.copy = Some(script);
-                        Note::Done(SCRIPT_COPIED.into())
+                        Note::Done(script_copied().into())
                     }
                     Err(err) => Note::Failed(err),
                 });
             }
             SetupEvent::Modify => {
                 self.note = Some(match system.apply(self.want) {
-                    Ok(()) => Note::Done("Changes applied.".into()),
+                    Ok(()) => Note::Done(tr!("Changes applied.").into()),
                     Err(err) => Note::Failed(err),
                 });
                 // After a failure the switches show what the machine has.
@@ -179,11 +184,7 @@ impl SetupScreen {
                 let dir = self.install_dir();
                 let want = self.want;
                 self.note = Some(match system.install(&dir, want) {
-                    Ok(()) => Note::Done(format!(
-                        "Lumen {} is installed in {}.",
-                        env!("CARGO_PKG_VERSION"),
-                        dir.display()
-                    )),
+                    Ok(()) => Note::Done(tr!("Lumen {0} is installed in {1}.", env!("CARGO_PKG_VERSION"), dir.display())),
                     Err(err) => Note::Failed(err),
                 });
                 let typed = self.dir.clone();
@@ -205,13 +206,13 @@ impl SetupScreen {
                     Ok(()) if running_it => {
                         self.uninstalled = true;
                         self.note = Some(Note::Done(
-                            "Lumen was uninstalled; your settings stay. Close Lumen to finish."
+                            tr!("Lumen was uninstalled; your settings stay. Close Lumen to finish.")
                                 .into(),
                         ));
                     }
                     Ok(()) => {
                         self.note = Some(Note::Done(
-                            "Lumen was uninstalled; your settings stay.".into(),
+                            tr!("Lumen was uninstalled; your settings stay.").into(),
                         ));
                         self.reload(system);
                     }
@@ -301,9 +302,9 @@ impl SetupScreen {
         let editable = matches!(self.origin, Origin::NotInstalled { .. }) && !self.uninstalled;
         ui.horizontal(|ui| {
             let label = if editable {
-                "Install Path:"
+                tr!("Install Path:")
             } else {
-                "Installed Path:"
+                tr!("Installed Path:")
             };
             ui.label(egui::RichText::new(label).size(20.0));
             if !editable && !self.uninstalled {
@@ -323,7 +324,7 @@ impl SetupScreen {
                         color,
                     );
                     crate::ui::focus_ring(ui, &response);
-                    if response.on_hover_text("Open this folder").clicked() {
+                    if response.on_hover_text(tr!("Open this folder")).clicked() {
                         event = Some(SetupEvent::OpenFolder);
                     }
                 });
@@ -360,21 +361,23 @@ impl SetupScreen {
                 .num_columns(4)
                 .spacing([14.0, 12.0])
                 .show(ui, |ui| {
-                    let pair = |ui: &mut egui::Ui, name: &str, on: &mut bool, enabled: bool| {
-                        ui.label(egui::RichText::new(name).size(17.0));
-                        ui.add_enabled(enabled, Toggle(on, name));
+                    // `name` (English) keeps the switch's id, `shown` is what it says.
+                    let pair = |ui: &mut egui::Ui, name: &str, shown: &str, on: &mut bool, enabled: bool| {
+                        ui.label(egui::RichText::new(shown).size(17.0));
+                        ui.add_enabled(enabled, Toggle(on, name, shown));
                     };
                     pair(
                         ui,
                         "Desktop shortcut:",
+                        tr!("Desktop shortcut:"),
                         &mut self.want.desktop_shortcut,
                         !off,
                     );
-                    pair(ui, "Set as default:", &mut self.want.default, !off);
+                    pair(ui, "Set as default:", tr!("Set as default:"), &mut self.want.default, !off);
                     ui.end_row();
-                    pair(ui, "Right-click entries:", &mut self.want.right_click, !off);
+                    pair(ui, "Right-click entries:", tr!("Right-click entries:"), &mut self.want.right_click, !off);
                     // apt's /usr/bin is always on the PATH.
-                    pair(ui, "Add to PATH:", &mut self.want.path, !off && !package);
+                    pair(ui, "Add to PATH:", tr!("Add to PATH:"), &mut self.want.path, !off && !package);
                     ui.end_row();
                 });
             ui.data_mut(|d| d.insert_temp(width_id, grid.response.rect.width()));
@@ -385,7 +388,7 @@ impl SetupScreen {
     fn actions(&mut self, ui: &mut egui::Ui) -> Option<SetupEvent> {
         let mut event = None;
         if self.uninstalled {
-            if big_button(ui, "Close Lumen", true) {
+            if big_button(ui, tr!("Close Lumen"), true) {
                 event = Some(SetupEvent::Close);
             };
             return event;
@@ -393,35 +396,34 @@ impl SetupScreen {
         // Held: the buttons that would write copy a script instead.
         let held = self.held;
         if held {
-            ui.label(HELD_NOTE);
+            ui.label(held_note());
             ui.add_space(6.0);
         }
         match &self.origin {
             Origin::NotInstalled { .. } => {
-                let text = if held { "Copy install script" } else { "Install" };
+                let text = if held { tr!("Copy install script") } else { tr!("Install") };
                 if big_button(ui, text, !self.dir.trim().is_empty()) {
                     event = Some(SetupEvent::Install);
                 }
             }
             Origin::Installed { record, running_it } => {
-                let text = if held { "Copy script" } else { "Modify" };
+                let text = if held { tr!("Copy script") } else { tr!("Modify") };
                 if big_button(ui, text, self.want != self.now) {
                     event = Some(SetupEvent::Modify);
                 };
                 if !running_it {
-                    let text = format!(
-                        "{} this copy (v{}) over v{}",
-                        if held { "Copy script to install" } else { "Install" },
-                        env!("CARGO_PKG_VERSION"),
-                        record.version
-                    );
+                    let text = if held {
+                        tr!("Copy script to install this copy (v{0}) over v{1}", env!("CARGO_PKG_VERSION"), record.version)
+                    } else {
+                        tr!("Install this copy (v{0}) over v{1}", env!("CARGO_PKG_VERSION"), record.version)
+                    };
                     if big_button(ui, &text, true) {
                         event = Some(SetupEvent::Install);
                     };
                 }
             }
             Origin::Package { .. } => {
-                if big_button(ui, "Modify", self.want != self.now) {
+                if big_button(ui, tr!("Modify"), self.want != self.now) {
                     event = Some(SetupEvent::Modify);
                 }
             }
@@ -431,14 +433,14 @@ impl SetupScreen {
         ui.add_space(6.0);
         match &self.origin {
             Origin::Installed { .. } if self.asking_uninstall => {
-                ui.label("Uninstall Lumen and remove its shortcuts? Your settings stay.");
+                ui.label(tr!("Uninstall Lumen and remove its shortcuts? Your settings stay."));
                 let answer = ui
                     .horizontal(|ui| {
                         // Centred: the two buttons' width, around the middle.
                         ui.add_space((ui.available_width() - 260.0).max(0.0) / 2.0);
                         let danger = theme::danger(ui.visuals());
                         let yes = egui::Button::new(
-                            egui::RichText::new("Uninstall")
+                            egui::RichText::new(tr!("Uninstall"))
                                 .size(BUTTON_TEXT)
                                 .color(danger),
                         )
@@ -448,7 +450,7 @@ impl SetupScreen {
                         ui.add_space(24.0);
                         if yes.clicked() {
                             Some(SetupEvent::Uninstall)
-                        } else if big_button(ui, "Cancel", true) {
+                        } else if big_button(ui, tr!("Cancel"), true) {
                             Some(SetupEvent::CancelUninstall)
                         } else {
                             None
@@ -460,19 +462,19 @@ impl SetupScreen {
                 }
             }
             Origin::Installed { .. } => {
-                if big_button(ui, "Uninstall", true) {
+                if big_button(ui, tr!("Uninstall"), true) {
                     event = Some(SetupEvent::AskUninstall);
                 }
             }
             Origin::Package { .. } => {
-                ui.label("Lumen was installed with apt. To uninstall it, run:");
+                ui.label(tr!("Lumen was installed with apt. To uninstall it, run:"));
                 ui.add(
                     egui::Label::new(egui::RichText::new(APT_REMOVE).monospace()).selectable(true),
                 );
             }
             Origin::NotInstalled { .. } => {}
         }
-        if big_button(ui, "Back", true) {
+        if big_button(ui, tr!("Back"), true) {
             event = Some(SetupEvent::Back);
         };
         event
@@ -494,10 +496,10 @@ pub const APT_REMOVE: &str = "sudo apt remove lumen";
 fn version_line(origin: &Origin, uninstalled: bool) -> String {
     let own = env!("CARGO_PKG_VERSION");
     match origin {
-        _ if uninstalled => format!("Lumen {own} was uninstalled."),
-        Origin::Installed { record, .. } => format!("Installed version {}.", record.version),
-        Origin::Package { .. } => format!("Installed version {own} (apt)."),
-        Origin::NotInstalled { .. } => format!("Lumen {own} is not installed."),
+        _ if uninstalled => tr!("Lumen {0} was uninstalled.", own),
+        Origin::Installed { record, .. } => tr!("Installed version {0}.", record.version),
+        Origin::Package { .. } => tr!("Installed version {0} (apt).", own),
+        Origin::NotInstalled { .. } => tr!("Lumen {0} is not installed.", own),
     }
 }
 
@@ -507,11 +509,12 @@ fn toggle_id(name: &str) -> egui::Id {
 
 /// A switch like File Pilot's: a pill with a knob, ✓ on the right when on,
 /// ✕ on the left when off.
-struct Toggle<'a>(&'a mut bool, &'a str);
+/// Its `name` (English) keeps its id, `shown` is the name it has for assistive tools.
+struct Toggle<'a>(&'a mut bool, &'a str, &'a str);
 
 impl egui::Widget for Toggle<'_> {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
-        let Toggle(on, name) = self;
+        let Toggle(on, name, shown) = self;
         let size = egui::vec2(52.0, 28.0);
         let rect = ui.allocate_space(size).1;
         let mut response = ui.interact(rect, toggle_id(name), egui::Sense::click());
@@ -520,7 +523,7 @@ impl egui::Widget for Toggle<'_> {
             response.mark_changed();
         }
         response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *on, name)
+            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *on, shown)
         });
         let t = ui.ctx().animate_bool_responsive(response.id, *on);
         let visuals = ui.visuals();
@@ -900,7 +903,7 @@ mod tests {
         screen.want.desktop_shortcut = true;
         let shown = texts(&mut screen);
         let over = format!("Copy script to install this copy (v{}) over v0.6.0", env!("CARGO_PKG_VERSION"));
-        for line in ["Installed version 0.6.0.", "Copy script", over.as_str(), "Uninstall", "Back", HELD_NOTE] {
+        for line in ["Installed version 0.6.0.", "Copy script", over.as_str(), "Uninstall", "Back", held_note()] {
             assert!(shown.split('|').any(|t| t == line), "{line} missing from {shown}");
         }
         assert!(!shown.split('|').any(|t| t == "Modify"), "{shown}");
@@ -933,7 +936,7 @@ mod tests {
     fn held_not_installed_offers_to_copy_the_install_script() {
         let mut screen = SetupScreen::open(&not_installed_fake()).held(true);
         let shown = texts(&mut screen);
-        for line in ["Install Path:", "Copy install script", "Back", HELD_NOTE] {
+        for line in ["Install Path:", "Copy install script", "Back", held_note()] {
             assert!(shown.split('|').any(|t| t == line), "{line} missing from {shown}");
         }
         assert!(!shown.split('|').any(|t| t == "Install" || t == "Modify" || t == "Uninstall"), "{shown}");
@@ -947,7 +950,7 @@ mod tests {
         let want = screen.want;
         assert_eq!(screen.handle(&fake, SetupEvent::Modify), None);
         assert_eq!(screen.copy(), Some(format!("apply {want:?}").as_str()));
-        assert_eq!(screen.note(), Some(&Note::Done(SCRIPT_COPIED.into())));
+        assert_eq!(screen.note(), Some(&Note::Done(script_copied().into())));
         assert!(fake.calls.borrow().is_empty(), "apply never ran: {:?}", fake.calls.borrow());
         assert_eq!(fake.read(), Switches::default(), "the machine is as it was");
         assert_eq!(screen.want, want, "the switches stay as chosen, no reload");
@@ -967,7 +970,7 @@ mod tests {
         let want = screen.want;
         assert_eq!(screen.handle(&fake, SetupEvent::Install), None);
         assert_eq!(screen.copy(), Some(format!("install {} {want:?}", apps_dir().display()).as_str()));
-        assert_eq!(screen.note(), Some(&Note::Done(SCRIPT_COPIED.into())));
+        assert_eq!(screen.note(), Some(&Note::Done(script_copied().into())));
         assert_eq!(*fake.scripts.borrow(), [format!("install_script {}", apps_dir().display())]);
         assert!(fake.calls.borrow().is_empty(), "install never ran: {:?}", fake.calls.borrow());
         assert!(matches!(screen.origin(), Origin::NotInstalled { .. }), "nothing was installed");

@@ -11,6 +11,7 @@ use eframe::egui::{self, DragAndDrop, Rect};
 use crate::app::View;
 use crate::drag::{Drag, Keys};
 use crate::fs::transfer::Mode;
+use crate::i18n::tr;
 
 /// A drop a target took this frame (the list, a side panel folder or a
 /// tab), for the app to run.
@@ -329,17 +330,16 @@ pub fn finish(ctx: &egui::Context) -> Option<Mode> {
     };
     let Some(at) = pointer(ctx).filter(|_| !gone) else { return preferred };
     let items = match drag.paths.len() {
-        1 => "1 item".to_owned(),
-        n => format!("{n} items"),
+        1 => tr!("1 item").to_owned(),
+        n => tr!("{0} items", n),
     };
     let text = match aim {
         Some(Aim { target, mode, .. }) => {
             let name = target.file_name().map_or_else(|| target.display().to_string(), |n| n.to_string_lossy().into_owned());
-            let verb = match mode {
-                Mode::Move => "Move",
-                Mode::Copy => "Copy",
-            };
-            format!("{verb} {items} to {name}")
+            match mode {
+                Mode::Move => tr!("Move {0} to {1}", items, name),
+                Mode::Copy => tr!("Copy {0} to {1}", items, name),
+            }
         }
         None => items,
     };

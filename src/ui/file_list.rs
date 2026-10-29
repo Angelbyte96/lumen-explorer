@@ -9,6 +9,7 @@ use crate::app::{Scroll, SortColumn, View};
 use crate::format::{format_size, format_time};
 use crate::fs::Entry;
 use crate::fs::count::Totals;
+use crate::i18n::tr;
 use crate::ui::file_icons::FileIcons;
 use crate::ui::icons;
 use crate::ui::path_popup::{marked_name, word_ranges};
@@ -491,7 +492,7 @@ pub fn body_measure(ctx: &egui::Context) -> impl Fn(String) -> f32 + '_ {
 
 /// The width a header `label` needs, with room for the sort arrow, which may show up later.
 pub fn header_width(ctx: &egui::Context, label: &str) -> f32 {
-    body_measure(ctx)(format!("{label} {SORT_DESCENDING}")) + 2.0 * ctx.global_style().spacing.button_padding.x
+    body_measure(ctx)(format!("{} {SORT_DESCENDING}", column_label(label))) + 2.0 * ctx.global_style().spacing.button_padding.x
 }
 
 /// The column width for a `widest` cell: some air, whole points (the config keeps them so).
@@ -837,6 +838,26 @@ pub const COLUMNS: [(&str, SortColumn); 6] = [
     ("Size", SortColumn::Size),
 ];
 
+/// A column header's label in the interface's language: the `COLUMNS` of the
+/// list, the drives and the Recycle Bin hold English, which sorting and the
+/// widths go by.
+pub fn column_label(english: &str) -> &str {
+    match english {
+        "Name" => tr!("Name"),
+        "Type" => tr!("Type"),
+        "Date Modified" => tr!("Date Modified"),
+        "Folders" => tr!("Folders"),
+        "Files" => tr!("Files"),
+        "Size" => tr!("Size"),
+        "File System" => tr!("File System"),
+        "Free Space" => tr!("Free Space"),
+        "Percent Full" => tr!("Percent Full"),
+        "Original Location" => tr!("Original Location"),
+        "Date Deleted" => tr!("Date Deleted"),
+        other => other,
+    }
+}
+
 /// Marks the sorted column's direction.
 pub const SORT_ASCENDING: &str = "⏶";
 pub const SORT_DESCENDING: &str = "⏷";
@@ -995,7 +1016,7 @@ fn sort_header(ui: &mut egui::Ui, label: &str, direction: Option<bool>) -> egui:
         Some(false) => SORT_ASCENDING,
         Some(true) => SORT_DESCENDING,
     };
-    let text = egui::RichText::new(format!("{label} {arrow}")).strong();
+    let text = egui::RichText::new(format!("{} {arrow}", column_label(label))).strong();
     ui.add(egui::Button::new(text).frame(false).sense(egui::Sense::CLICK))
 }
 

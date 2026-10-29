@@ -4,7 +4,8 @@
 
 use eframe::egui::{self, Color32, Rect, Stroke, pos2, vec2};
 
-use crate::ui::view_size::{Layout, STOPS, ViewSize};
+use crate::i18n::tr;
+use crate::ui::view_size::{Layout, STOPS, ViewSize, shown};
 
 /// The slider's rail, bottom (0%) to top (100%), in points.
 const RAIL: f32 = 230.0;
@@ -32,7 +33,7 @@ pub fn show(ui: &mut egui::Ui, size: ViewSize) -> Option<ViewSize> {
     let icon_side = ui.text_style_height(&egui::TextStyle::Body);
     let (icon_rect, icon) = ui.allocate_exact_size(vec2(icon_side, icon_side), egui::Sense::click());
     paint_icon(ui.painter(), icon_rect, size.layout(), ui.visuals().text_color());
-    let name = ui.add(egui::Button::new(size.name()).frame(false)).on_hover_text("View (Ctrl+wheel)");
+    let name = ui.add(egui::Button::new(shown(size.name())).frame(false)).on_hover_text(tr!("View (Ctrl+wheel)"));
     let percent = percent_box(ui, size);
     let anchor = name.rect.union(icon.rect).union(percent.rect);
     let open = egui::Popup::is_id_open(&ctx, popup_id());
@@ -76,7 +77,7 @@ fn percent_box(ui: &mut egui::Ui, size: ViewSize) -> egui::Response {
     painter.rect_filled(filled, 3.0, ui.visuals().selection.bg_fill);
     painter.rect_stroke(rect, 3.0, ui.visuals().widgets.inactive.bg_stroke, egui::StrokeKind::Inside);
     painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::PLACEHOLDER);
-    response.on_hover_text("View size")
+    response.on_hover_text(tr!("View size"))
 }
 
 /// The open panel: each view's name at its height on the slider, the slider
@@ -106,7 +107,7 @@ fn panel(ui: &mut egui::Ui, size: ViewSize) -> Option<ViewSize> {
         let icon = Rect::from_center_size(pos2(row_rect.left() + 6.0 + side / 2.0, y), vec2(side, side));
         paint_icon(painter, icon, layout, text);
         let font = egui::TextStyle::Body.resolve(ui.style());
-        painter.text(pos2(icon.right() + 8.0, y), egui::Align2::LEFT_CENTER, name, font, text);
+        painter.text(pos2(icon.right() + 8.0, y), egui::Align2::LEFT_CENTER, shown(name), font, text);
         if response.clicked() {
             picked = Some(ViewSize::new(percent));
         }

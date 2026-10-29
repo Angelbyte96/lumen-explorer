@@ -4,6 +4,7 @@
 
 use eframe::egui;
 
+use crate::i18n::tr;
 use crate::menu::MenuIcon;
 
 pub const MENU: &str = "☰";
@@ -26,18 +27,20 @@ pub enum AppMenuEvent {
 type Item = (MenuIcon, &'static str, &'static str, Option<AppMenuEvent>);
 
 /// The menu's rows top to bottom, in groups split by a line.
-const GROUPS: [&[Item]; 3] = [
-    &[
-        (MenuIcon::GoTo, "Go To", "Ctrl+L", Some(AppMenuEvent::GoTo)),
-        (MenuIcon::Commands, "Commands", "Ctrl+Shift+P", None),
-    ],
-    &[
-        (MenuIcon::LoadLayout, "Load Layout", "", None),
-        (MenuIcon::SaveLayout, "Save Layout", "", None),
-        (MenuIcon::Options, "Options", "Ctrl+,", Some(AppMenuEvent::Options)),
-    ],
-    &[(MenuIcon::Setup, "Lumen Setup", "", Some(AppMenuEvent::Setup))],
-];
+fn groups() -> [Vec<Item>; 3] {
+    [
+        vec![
+            (MenuIcon::GoTo, tr!("Go To"), "Ctrl+L", Some(AppMenuEvent::GoTo)),
+            (MenuIcon::Commands, tr!("Commands"), "Ctrl+Shift+P", None),
+        ],
+        vec![
+            (MenuIcon::LoadLayout, tr!("Load Layout"), "", None),
+            (MenuIcon::SaveLayout, tr!("Save Layout"), "", None),
+            (MenuIcon::Options, tr!("Options"), "Ctrl+,", Some(AppMenuEvent::Options)),
+        ],
+        vec![(MenuIcon::Setup, tr!("Lumen Setup"), "", Some(AppMenuEvent::Setup))],
+    ]
+}
 
 /// The line under the rows.
 pub fn version() -> String {
@@ -101,7 +104,7 @@ pub fn command_hint(response: egui::Response, name: &str, shortcut: &str) -> egu
     response.on_hover_ui(|ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            ui.label("Cmd:");
+            ui.label(tr!("Cmd:"));
             ui.weak(name);
             egui::Frame::new()
                 .fill(ui.visuals().widgets.inactive.bg_fill)
@@ -160,19 +163,17 @@ fn step_through(ctx: &egui::Context, rows: &[egui::Response]) {
     }
 }
 
-/// Hovering a greyed Lumen Setup says why.
-const NO_SETUP: &str = "Lumen Setup cannot find this user's folders";
-
 /// The ☰ and the panel button, side by side; `setup` is whether the Lumen
 /// Setup row can open its screen (greyed when not).
 pub fn show(ui: &mut egui::Ui, setup: bool) -> Option<AppMenuEvent> {
     let mut event = None;
+    let groups = groups();
     let ctx = ui.ctx().clone();
     let open = is_open(&ctx);
     let menu = square(ui, button_id(), open, |painter, rect, color| {
         painter.text(rect.center(), egui::Align2::CENTER_CENTER, MENU, egui::FontId::proportional(16.0), color);
     });
-    let menu = command_hint(menu, "Menu", "F10");
+    let menu = command_hint(menu, tr!("Menu"), "F10");
     // Tab took the focus out of the button and its menu: nothing else closes it.
     let menu_layer = egui::LayerId::new(egui::Order::Foreground, menu_id());
     let outside = ctx
@@ -186,20 +187,20 @@ pub fn show(ui: &mut egui::Ui, setup: bool) -> Option<AppMenuEvent> {
         ui.set_min_width(220.0);
         let focus_first = ctx.data_mut(|d| d.remove_temp::<bool>(focus_first_id())).unwrap_or(false);
         let mut enabled = Vec::new();
-        for (n, group) in GROUPS.iter().enumerate() {
+        for (n, group) in groups.iter().enumerate() {
             if n > 0 {
                 ui.separator();
             }
-            for &(icon, name, shortcut, on_click) in *group {
+            for &(icon, name, shortcut, on_click) in group {
                 let held = on_click == Some(AppMenuEvent::Setup) && !setup;
                 let on_click = if held { None } else { on_click };
                 // A greyed row's shortcut would do nothing yet: it shows once the command exists.
                 let shortcut = if on_click.is_some() { shortcut } else { "" };
                 let mut row = ui.add_enabled_ui(on_click.is_some(), |ui| row(ui, icon, name, shortcut)).inner;
                 if held {
-                    row = row.on_disabled_hover_text(NO_SETUP);
+                    row = row.on_disabled_hover_text(tr!("Lumen Setup cannot find this user's folders"));
                 }
-                if focus_first && n == 0 && name == GROUPS[0][0].1 {
+                if focus_first && n == 0 && name == groups[0][0].1 {
                     row.request_focus();
                 }
                 crate::ui::focus_ring(ui, &row);
@@ -218,7 +219,7 @@ pub fn show(ui: &mut egui::Ui, setup: bool) -> Option<AppMenuEvent> {
         step_through(&ctx, &enabled);
     });
     let panel = square(ui, panel_button_id(), false, crate::ui::icons::paint_side_panel);
-    if command_hint(panel, "Toggle Side Panel", "Ctrl+B").clicked() {
+    if command_hint(panel, tr!("Toggle Side Panel"), "Ctrl+B").clicked() {
         event = Some(AppMenuEvent::ToggleSidebar);
     }
     event
