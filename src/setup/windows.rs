@@ -563,17 +563,28 @@ fn path_with(value: &str, dir: &str, on: bool) -> String {
 
 /// `text` as a PowerShell string that takes it literally: in single quotes,
 /// its own quotes (and the typographic ones PowerShell also takes for
-/// quotes) doubled.
+/// quotes) doubled. A line break is written "`n" between the lines: pasted
+/// into the console, a string over several lines gets extra line breaks.
 fn ps(text: &str) -> String {
-    let mut out = String::from("'");
-    for c in text.chars() {
-        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
-            out.push(c);
-        }
-        out.push(c);
+    let quoted: Vec<String> = text
+        .split('\n')
+        .map(|line| {
+            let mut out = String::from("'");
+            for c in line.chars() {
+                if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+                    out.push(c);
+                }
+                out.push(c);
+            }
+            out.push('\'');
+            out
+        })
+        .collect();
+    match quoted.as_slice() {
+        [one] => one.clone(),
+        // In parentheses: a command's argument, not three.
+        lines => format!("({})", lines.join(" + \"`n\" + ")),
     }
-    out.push('\'');
-    out
 }
 
 fn wide(text: impl AsRef<OsStr>) -> Vec<u16> {
@@ -1159,7 +1170,9 @@ mod tests {
         let dir = fresh_fixture("setup-windows-script-quotes");
         let out = dir.join("it's [here]").join("out.txt");
         std::fs::create_dir_all(out.parent().unwrap()).unwrap();
-        let text = "it's \u{2018}a\u{2019} \"b\" $c `d %1 \u{201a}e\u{201b}";
+        let text = "it's \u{2018}a\u{2019} \"b\" $c `d %1 \u{201a}e\u{201b}\nnext line\n";
+        // Pasted into the console, a string over several lines gets extra line breaks.
+        assert!(!ps(text).contains('\n'), "{}", ps(text));
         run_script("setup-windows-script-quotes-run", &format!("[IO.File]::WriteAllText({}, {})", ps(&out.to_string_lossy()), ps(text)));
         assert_eq!(std::fs::read_to_string(&out).unwrap(), text);
     }
@@ -1194,6 +1207,7 @@ mod tests {
         // A quote PowerShell must keep, in the folder's name.
         let dir = win.home.join(r"Lumen's apps\Lumen");
         let script = win.install_script(&dir, all()).unwrap();
+        assert!(script.lines().any(|line| line.contains("Write-Record") && line.contains("version=")), "the record on one line, to paste: {script}");
         assert_eq!(win.origin(), Origin::NotInstalled { default_dir: win.default_dir.clone() }, "making the script installs nothing");
         run_setup_script("setup-windows-script-install-run", &script);
         let record = Record { dir: dir.clone(), version: env!("CARGO_PKG_VERSION").into() };
