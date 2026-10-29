@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use crate::config::{Config, Settings};
+use crate::i18n::tr;
 use crate::folder_views::{FolderViews, Look};
 use crate::fs::count::{Count, Totals};
 use crate::fs::index::Crawler;
@@ -1195,9 +1196,9 @@ enum Dialog {
 impl Dialog {
     fn title(&self) -> &'static str {
         match self {
-            Self::Trash { .. } => "Move to Trash",
-            Self::Delete { .. } | Self::Purge { .. } => "Delete Permanently",
-            Self::Replace(_) | Self::Paste { .. } => "Replace",
+            Self::Trash { .. } => tr!("Move to Trash"),
+            Self::Delete { .. } | Self::Purge { .. } => tr!("Delete Permanently"),
+            Self::Replace(_) | Self::Paste { .. } => tr!("Replace"),
         }
     }
 
@@ -1217,50 +1218,46 @@ impl Dialog {
     fn message(&self) -> String {
         match self {
             Self::Trash { paths, .. } => match paths.as_slice() {
-                [one] => format!("Move “{}” to the trash?", file_name(one).unwrap_or_default()),
-                many => format!("Move {} items to the trash?", many.len()),
+                [one] => tr!("Move “{0}” to the trash?", file_name(one).unwrap_or_default()),
+                many => tr!("Move {0} items to the trash?", many.len()),
             },
             Self::Delete { paths, .. } => match paths.as_slice() {
-                [one] => format!("Permanently delete “{}”? This cannot be undone.", file_name(one).unwrap_or_default()),
-                many => format!("Permanently delete {} items? This cannot be undone.", many.len()),
+                [one] => tr!("Permanently delete “{0}”? This cannot be undone.", file_name(one).unwrap_or_default()),
+                many => tr!("Permanently delete {0} items? This cannot be undone.", many.len()),
             },
             Self::Purge { items, .. } => match items.as_slice() {
-                [one] => format!("Permanently delete “{}”? This cannot be undone.", one.name),
-                many => format!("Permanently delete {} items? This cannot be undone.", many.len()),
+                [one] => tr!("Permanently delete “{0}”? This cannot be undone.", one.name),
+                many => tr!("Permanently delete {0} items? This cannot be undone.", many.len()),
             },
-            Self::Replace(edit) => format!(
-                "“{}” already exists. Replace it? The existing one goes to the trash.",
-                edit.text
-            ),
-            Self::Paste { target, .. } => format!(
-                "“{}” already exists here. Replace it? The existing one goes to the trash.",
-                file_name(target).unwrap_or_default()
-            ),
+            Self::Replace(edit) => tr!("“{0}” already exists. Replace it? The existing one goes to the trash.", edit.text),
+            Self::Paste { target, .. } => {
+                tr!("“{0}” already exists here. Replace it? The existing one goes to the trash.", file_name(target).unwrap_or_default())
+            }
         }
     }
 
     fn yes_label(&self) -> &'static str {
         match self {
-            Self::Trash { .. } => "Move to Trash",
-            Self::Delete { .. } | Self::Purge { .. } => "Delete",
-            Self::Replace(_) | Self::Paste { .. } => "Replace",
+            Self::Trash { .. } => tr!("Move to Trash"),
+            Self::Delete { .. } | Self::Purge { .. } => tr!("Delete"),
+            Self::Replace(_) | Self::Paste { .. } => tr!("Replace"),
         }
     }
 
     /// The line under the message saying what the keys do.
     fn hint(&self) -> &'static str {
         match self {
-            Self::Paste { .. } => "Enter to replace · Esc to skip",
-            Self::Delete { .. } | Self::Purge { .. } => "Enter to delete · Esc to cancel",
-            Self::Trash { .. } | Self::Replace(_) => "Enter to confirm · Esc to cancel",
+            Self::Paste { .. } => tr!("Enter to replace · Esc to skip"),
+            Self::Delete { .. } | Self::Purge { .. } => tr!("Enter to delete · Esc to cancel"),
+            Self::Trash { .. } | Self::Replace(_) => tr!("Enter to confirm · Esc to cancel"),
         }
     }
 
     /// The other answer (Escape): a paste goes on without this item.
     fn no_label(&self) -> &'static str {
         match self {
-            Self::Paste { .. } => "Skip",
-            Self::Trash { .. } | Self::Delete { .. } | Self::Purge { .. } | Self::Replace(_) => "Cancel",
+            Self::Paste { .. } => tr!("Skip"),
+            Self::Trash { .. } | Self::Delete { .. } | Self::Purge { .. } | Self::Replace(_) => tr!("Cancel"),
         }
     }
 }
@@ -1721,7 +1718,10 @@ impl LumenApp {
         app.schemes = config.schemes;
         app.schemes.apply(ctx);
         app.behavior = config.behavior;
-        app.behavior.language.apply();
+        // Tests run in English, whatever language the machine is in.
+        if cfg!(not(test)) || app.behavior.language != crate::i18n::Language::System {
+            app.behavior.language.apply();
+        }
         app.saved = app.settings(true);
         app.config_path = path;
         app
@@ -1820,7 +1820,7 @@ impl LumenApp {
                 self.saved = Config { bookmarks: merged.bookmarks, ..settings };
             }
             Err(err) => {
-                self.tab.view.error = Some(format!("Cannot save settings: {err}"));
+                self.tab.view.error = Some(tr!("Cannot save settings: {0}", err));
                 // The next change tries again, not every frame.
                 self.saved = settings;
             }
@@ -2379,7 +2379,7 @@ impl LumenApp {
         }
         let paths: Vec<&Path> = selection.iter().map(|e| e.path.as_path()).collect();
         ctx.copy_text(paths_text(&paths));
-        self.notice = Some(if paths.len() == 1 { "Path copied".into() } else { format!("{} paths copied", paths.len()) });
+        self.notice = Some(if paths.len() == 1 { tr!("Path copied").into() } else { tr!("{0} paths copied", paths.len()) });
     }
 
     fn run_command(&mut self, ctx: &egui::Context, command: Command) {
@@ -2527,7 +2527,7 @@ impl LumenApp {
             }
             Command::CopyPlacePath(path) => {
                 ctx.copy_text(paths_text(&[path.as_path()]));
-                self.notice = Some("Path copied".into());
+                self.notice = Some(tr!("Path copied").into());
             }
             Command::ToggleBookmarkOf(path) => self.toggle_bookmark(path),
         }
@@ -2610,7 +2610,7 @@ impl LumenApp {
         if let Some(trash) = self.trash.as_deref()
             && paths.iter().any(|path| places::in_trash(path, trash))
         {
-            self.tab.view.error = Some("This is already in the trash".into());
+            self.tab.view.error = Some(tr!("This is already in the trash").into());
             return None;
         }
         Some((paths, self.tab.view.path_after_removal(), subject))
@@ -2706,10 +2706,12 @@ impl LumenApp {
         if paths.is_empty() {
             return;
         }
-        let items = if paths.len() == 1 { "1 item".to_owned() } else { format!("{} items", paths.len()) };
-        self.notice = Some(match mode {
-            Mode::Copy => format!("{items} copied"),
-            Mode::Move => format!("{items} cut"),
+        let count = paths.len();
+        self.notice = Some(match (mode, count) {
+            (Mode::Copy, 1) => tr!("1 item copied").into(),
+            (Mode::Copy, _) => tr!("{0} items copied", count),
+            (Mode::Move, 1) => tr!("1 item cut").into(),
+            (Mode::Move, _) => tr!("{0} items cut", count),
         });
         self.clipboard = Some(Clip { paths, mode });
     }
@@ -2722,7 +2724,7 @@ impl LumenApp {
         }
         // Moved in by hand it would have no record to be restored from.
         if places::is_recycle_bin(&dest) || places::in_recycle_bin(&dest) || self.trash.as_deref().is_some_and(|trash| places::in_trash(&dest, trash)) {
-            self.tab.view.error = Some("Nothing can be dropped into the trash".into());
+            self.tab.view.error = Some(tr!("Nothing can be dropped into the trash").into());
             return;
         }
         if self.refuse_when_busy() {
@@ -2751,7 +2753,7 @@ impl LumenApp {
             return;
         }
         let Some(Clip { paths, mode }) = self.clipboard.clone() else {
-            self.notice = Some("Nothing to paste: Ctrl+C or Ctrl+X first".into());
+            self.notice = Some(tr!("Nothing to paste: Ctrl+C or Ctrl+X first").into());
             return;
         };
         self.start_batch(ctx, paths, dest, mode);
@@ -2769,7 +2771,7 @@ impl LumenApp {
     fn refuse_when_busy(&mut self) -> bool {
         let busy = self.job.is_some() || self.batch.is_some();
         if busy {
-            self.tab.view.error = Some("Another operation is still running".into());
+            self.tab.view.error = Some(tr!("Another operation is still running").into());
         }
         busy
     }
@@ -2854,8 +2856,8 @@ impl LumenApp {
         }
         if batch.in_place.len() == batch.total {
             self.notice = Some(match batch.in_place.as_slice() {
-                [one] => format!("“{}” is already in this folder", file_name(one).unwrap_or_default()),
-                _ => "These items are already in this folder".into(),
+                [one] => tr!("“{0}” is already in this folder", file_name(one).unwrap_or_default()),
+                _ => tr!("These items are already in this folder").into(),
             });
         }
         // A navigation started meanwhile shows fresh contents anyway; reloading
@@ -2900,8 +2902,8 @@ impl LumenApp {
             }
             Ok(Outcome::Cancelled) => {
                 self.notice = Some(match mode {
-                    Mode::Copy => "Copy cancelled".into(),
-                    Mode::Move => "Move cancelled".into(),
+                    Mode::Copy => tr!("Copy cancelled").into(),
+                    Mode::Move => tr!("Move cancelled").into(),
                 });
                 true
             }
@@ -3044,9 +3046,9 @@ impl LumenApp {
         }
         let name = file_name(&folder).unwrap_or_else(|| folder.display().to_string());
         self.notice = Some(if self.bookmarks.toggle(&folder) {
-            format!("Added “{name}” to bookmarks")
+            tr!("Added “{0}” to bookmarks", name)
         } else {
-            format!("Removed “{name}” from bookmarks")
+            tr!("Removed “{0}” from bookmarks", name)
         });
     }
 
@@ -3208,8 +3210,11 @@ impl LumenApp {
             Ok(Some(totals)) => {
                 if totals.unreadable > 0 {
                     let n = totals.unreadable;
-                    let folders = if n == 1 { "folder" } else { "folders" };
-                    self.notice = Some(format!("“{name}”: {n} {folders} could not be read"));
+                    self.notice = Some(if n == 1 {
+                        tr!("“{0}”: 1 folder could not be read", name)
+                    } else {
+                        tr!("“{0}”: {1} folders could not be read", name, n)
+                    });
                 }
                 self.tab.view.set_totals(count.path.clone(), totals);
             }
@@ -3498,7 +3503,7 @@ impl LumenApp {
     /// as it is until F5, so a reload does not walk them all again and again.
     fn check_refused(&mut self) {
         if self.watcher.take_refused() {
-            self.notice = Some("Too many folders to watch: press F5 to refresh".into());
+            self.notice = Some(tr!("Too many folders to watch: press F5 to refresh").into());
             self.tab.flat_refused = true;
             self.refresh = RefreshTimer::default();
             self.watcher.take_changed();
@@ -3798,11 +3803,11 @@ impl LumenApp {
                 let left_mode = self.filter_mode.take().is_some();
                 self.hold_absorbed = self.tab.view.clear_filter() || left_mode || (self.tab.view.drop_picks() && seen);
                 if !self.hold_absorbed && self.cancel_count() {
-                    self.notice = Some("Calculation cancelled".into());
+                    self.notice = Some(tr!("Calculation cancelled").into());
                     self.hold_absorbed = true;
                 }
                 if !self.hold_absorbed && self.cancel_flat(ctx) {
-                    self.notice = Some("Listing cancelled".into());
+                    self.notice = Some(tr!("Listing cancelled").into());
                     self.hold_absorbed = true;
                 }
                 if !self.hold_absorbed {
@@ -3811,7 +3816,7 @@ impl LumenApp {
                     } else if self.clipboard.as_ref().is_some_and(|clip| clip.mode == Mode::Move) {
                         // Last: a cut waiting to be pasted is forgotten, as in other explorers.
                         self.clipboard = None;
-                        self.notice = Some("Cut cancelled".into());
+                        self.notice = Some(tr!("Cut cancelled").into());
                     } else {
                         // With nothing else to undo, the cursor keeps only its outline.
                         self.tab.view.unselect();
@@ -3997,7 +4002,7 @@ impl eframe::App for LumenApp {
                         );
                     }
                     _ => {
-                        ui.weak("Nothing selected");
+                        ui.weak(tr!("Nothing selected"));
                     }
                 });
         }
@@ -5053,6 +5058,32 @@ mod tests {
         assert_eq!(trash.hint(), "Enter to confirm · Esc to cancel", "as before");
         let paste = Dialog::Paste { source: "/x/a".into(), target: "/y/a".into(), mode: Mode::Copy };
         assert_eq!(paste.hint(), "Enter to replace · Esc to skip");
+    }
+
+    #[test]
+    fn the_dialogs_and_notices_come_out_in_spanish() {
+        use crate::i18n::{self, Lang};
+        let (_ctx, mut app, dir) = app_in("app-spanish");
+        let subject = ui::confirm::Subject::of(&[]);
+        let trash = Dialog::Trash { paths: vec![PathBuf::from("/x/a"), PathBuf::from("/x/b")], select: None, subject };
+        let paste = Dialog::Paste { source: "/x/a".into(), target: "/y/a".into(), mode: Mode::Copy };
+        i18n::set(Lang::Es);
+        app.toggle_bookmark(dir.join("sub"));
+        let spanish = (trash.title(), trash.message(), trash.yes_label(), trash.no_label(), trash.hint(), paste.hint(), app.notice.clone());
+        i18n::set(Lang::En);
+        assert_eq!(
+            spanish,
+            (
+                "Mover a la papelera",
+                "¿Mover 2 elementos a la papelera?".to_owned(),
+                "Mover a la papelera",
+                "Cancelar",
+                "Intro para confirmar · Esc para cancelar",
+                "Intro para reemplazar · Esc para omitir",
+                Some("Se añadió “sub” a marcadores".to_owned()),
+            )
+        );
+        assert_eq!(trash.message(), "Move 2 items to the trash?", "English again");
     }
 
     /// Runs the frames that start and land the tab's flatten walk.
