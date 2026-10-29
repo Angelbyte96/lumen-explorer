@@ -6779,8 +6779,8 @@ mod tests {
         assert_eq!(app.settings(false).schemes, schemes);
         let plain = egui::Context::default();
         LumenApp::with_config(&plain, dir, false, Settings { config: Config::default(), path: None, error: None });
-        assert_eq!(plain.style_of(egui::Theme::Dark).visuals, egui::Visuals::dark(), "Lumen's own colors by default");
-        assert_eq!(plain.style_of(egui::Theme::Light).visuals, egui::Visuals::light());
+        assert_eq!(plain.style_of(egui::Theme::Dark).visuals, Scheme::Lumen.visuals(egui::Theme::Dark), "Lumen's own colors by default");
+        assert_eq!(plain.style_of(egui::Theme::Light).visuals, Scheme::Lumen.visuals(egui::Theme::Light));
     }
 
     #[test]
