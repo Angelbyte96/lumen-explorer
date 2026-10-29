@@ -48,7 +48,10 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("Lumen")
             .with_app_id("lumen")
+            // Lumen draws its own title bar (the tab row), on Windows and Linux alike.
+            .with_decorations(false)
             .with_inner_size(settings.config.window.unwrap_or([960.0, 640.0]))
+            .with_maximized(settings.config.maximized)
             .with_min_inner_size(config::MIN_WINDOW)
             .with_icon(window_icon()),
         ..Default::default()

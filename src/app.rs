@@ -1414,6 +1414,9 @@ pub struct LumenApp {
     saved: Config,
     /// Inner window size in points, saved when Lumen closes.
     window: Option<[f32; 2]>,
+    /// Whether the window is maximized, saved when Lumen closes. `window`
+    /// keeps the restored size meanwhile.
+    maximized: bool,
     path_popup: PathPopup,
     /// Files' own icons (an .exe's), loaded off the UI thread.
     file_icons: crate::ui::file_icons::FileIcons,
@@ -1588,6 +1591,7 @@ impl LumenApp {
             config_path: None,
             saved: Config::default(),
             window: None,
+            maximized: false,
             path_popup: PathPopup::default(),
             file_icons: Default::default(),
             thumbnails: Default::default(),
@@ -1707,6 +1711,7 @@ impl LumenApp {
         app.bookmarks = Bookmarks::from_paths(config.bookmarks);
         app.visits = Visits::from_list(config.visited);
         app.window = config.window;
+        app.maximized = config.maximized;
         app.schemes = config.schemes;
         app.schemes.apply(ctx);
         app.behavior = config.behavior;
@@ -1767,6 +1772,7 @@ impl LumenApp {
             sidebar: self.sidebar_open,
             preview: self.preview_open,
             window: if with_window { self.window } else { self.saved.window },
+            maximized: if with_window { self.maximized } else { self.saved.maximized },
             bookmarks: self.bookmarks.paths().to_vec(),
             view: self.default_look.view,
             columns: self.columns,
@@ -3057,6 +3063,8 @@ impl LumenApp {
     /// The Setup screen alone in the window, and what it asks for.
     fn show_setup(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let Some(screen) = self.setup.as_mut() else { return };
+        // No tab row here: a bare strip stands in for the title bar, so the window still moves.
+        egui::Panel::top("setup_caption").frame(ui::caption::frame(ui.style())).show_separator_line(false).show(ui, |ui| ui::caption::show(ui, |ui| ui.add_space(24.0)));
         let event = egui::CentralPanel::default_margins().show(ui, |ui| screen.show(ui)).inner;
         let outcome = match (event, self.system.as_deref()) {
             (Some(event), Some(system)) => screen.handle(system, event),
@@ -3084,9 +3092,12 @@ impl LumenApp {
         ctx.request_repaint();
     }
 
-    /// Ends every frame: remembers the window's size, then saves the settings if they changed.
+    /// Ends every frame: remembers whether the window is maximized and its
+    /// size (the restored one while maximized), then saves the settings if they changed.
     fn end_frame(&mut self, ctx: &egui::Context) {
-        if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
+        let (inner, maximized) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().maximized));
+        self.maximized = maximized.unwrap_or(self.maximized);
+        if let Some(rect) = inner.filter(|_| !self.maximized) {
             self.window = Some([rect.width(), rect.height()]);
         }
         self.save_settings(false);
@@ -3665,6 +3676,8 @@ impl LumenApp {
             Action::ToggleSidebar => self.handle_menu(ctx, AppMenuEvent::ToggleSidebar),
             Action::AppMenu => ui::app_menu::toggle(ctx),
             Action::Options => self.handle_menu(ctx, AppMenuEvent::Options),
+            Action::Minimize => ui::caption::minimize(ctx),
+            Action::ToggleMaximize => ui::caption::toggle_maximized(ctx),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
             Action::ToggleFlat => self.toggle_flat(ctx),
             // The drives or the bins are read again there, as the menu's Refresh does.
@@ -3847,6 +3860,11 @@ impl eframe::App for LumenApp {
             ui::shift_tab_from_list(&ctx);
         }
 
+        // The window's own keys (Alt+M, F11) work on every screen, a dialog or a text field included.
+        for action in input::read_window_actions(&ctx) {
+            self.handle_action(&ctx, action);
+        }
+
         // An open dialog takes the keyboard; the list must not react underneath.
         if self.setup.is_some() {
             // Setup reads its own keys when drawn; the list under it reads none.
@@ -3871,26 +3889,32 @@ impl eframe::App for LumenApp {
             self.finish_job(&ctx, running, result);
         }
 
+        // The window has no system frame: its edges resize it, on every screen.
+        ui::caption::resize_edges(&ctx);
+
         if self.setup.is_some() {
             self.show_setup(&ctx, ui);
             self.end_frame(&ctx);
             return;
         }
 
-        egui::Panel::top("tabs").show(ui, |ui| {
-            ui.add_space(3.0);
-            let labels = self.tab_labels();
-            let (menu, tab) = ui.horizontal(|ui| (ui::app_menu::show(ui, self.setup_row), ui::tabs::show(ui, &labels, self.active))).inner;
-            if let Some(event) = menu {
-                self.handle_menu(&ctx, event);
-            }
-            match tab {
-                Some(TabEvent::Select(i)) => self.select_tab(&ctx, i),
-                Some(TabEvent::Close(i)) => self.close_tab(&ctx, i),
-                Some(TabEvent::New) => self.new_tab(&ctx),
-                None => {}
-            }
-            ui::tabs::drop_targets(ui, &self.tab_folders());
+        egui::Panel::top("tabs").frame(ui::caption::frame(ui.style())).show(ui, |ui| {
+            // The tab row is the window's title bar: its empty space moves the window.
+            ui::caption::show(ui, |ui| {
+                ui.add_space(3.0);
+                let labels = self.tab_labels();
+                let (menu, tab) = ui.horizontal(|ui| (ui::app_menu::show(ui, self.setup_row), ui::tabs::show(ui, &labels, self.active))).inner;
+                if let Some(event) = menu {
+                    self.handle_menu(&ctx, event);
+                }
+                match tab {
+                    Some(TabEvent::Select(i)) => self.select_tab(&ctx, i),
+                    Some(TabEvent::Close(i)) => self.close_tab(&ctx, i),
+                    Some(TabEvent::New) => self.new_tab(&ctx),
+                    None => {}
+                }
+                ui::tabs::drop_targets(ui, &self.tab_folders());
+            });
         });
 
         egui::Panel::top("toolbar").show(ui, |ui| {
@@ -6726,6 +6750,7 @@ mod tests {
             sidebar: false,
             preview: true,
             window: Some([1000.0, 700.0]),
+            maximized: true,
             bookmarks: vec![PathBuf::from("/srv"), PathBuf::from("/srv")],
             view: ui::view_size::ViewSize::new(65),
             columns: [250.0, 90.0, 140.0, 55.0, 60.0, 95.0],
@@ -6890,6 +6915,7 @@ mod tests {
         assert!(app.preview_open);
         assert_eq!(app.bookmarks.paths(), [PathBuf::from("/srv")], "repeats dropped");
         assert_eq!(app.window, Some([1000.0, 700.0]));
+        assert!(app.maximized, "the window starts as it was left");
         assert_eq!(app.tab.view_size, ui::view_size::ViewSize::new(65));
         assert_eq!(app.columns, [250.0, 90.0, 140.0, 55.0, 60.0, 95.0]);
     }
@@ -7123,6 +7149,42 @@ mod tests {
         assert_eq!(Config::load(&path).unwrap().window, None, "a resize alone is not written");
         app.save_settings(true);
         assert_eq!(Config::load(&path).unwrap().window, Some([900.0, 600.0]), "closing writes it");
+    }
+
+    /// `end_frame` in a frame where the window has `inner` size and is `maximized` (None: not reported).
+    fn end_frame_in(ctx: &egui::Context, app: &mut LumenApp, inner: egui::Vec2, maximized: Option<bool>) {
+        let mut input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, inner)), ..Default::default() };
+        let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+        info.inner_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, inner));
+        info.maximized = maximized;
+        let mut output = ctx.run_ui(input, |ui| app.end_frame(ui.ctx()));
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn a_maximized_window_is_remembered_with_the_size_it_restores_to() {
+        let (ctx, mut app, _) = app_in("app-window-maximized");
+        end_frame_in(&ctx, &mut app, egui::vec2(900.0, 600.0), Some(false));
+        assert_eq!((app.window, app.maximized), (Some([900.0, 600.0]), false), "restored: its size, not maximized");
+        end_frame_in(&ctx, &mut app, egui::vec2(1920.0, 1040.0), Some(true));
+        assert_eq!((app.window, app.maximized), (Some([900.0, 600.0]), true), "maximized: the restored size is kept");
+        end_frame_in(&ctx, &mut app, egui::vec2(1920.0, 1040.0), None);
+        assert_eq!((app.window, app.maximized), (Some([900.0, 600.0]), true), "nothing reported: as it was");
+        end_frame_in(&ctx, &mut app, egui::vec2(800.0, 500.0), Some(false));
+        assert_eq!((app.window, app.maximized), (Some([800.0, 500.0]), false), "restored again: the new size");
+    }
+
+    #[test]
+    fn closing_a_maximized_window_writes_maximized_and_the_restored_size() {
+        let (ctx, mut app, dir) = app_in("app-window-maximized-saved");
+        let path = dir.join("config");
+        app.config_path = Some(path.clone());
+        end_frame_in(&ctx, &mut app, egui::vec2(900.0, 600.0), Some(false));
+        end_frame_in(&ctx, &mut app, egui::vec2(1920.0, 1040.0), Some(true));
+        app.save_settings(true);
+        let written = Config::load(&path).unwrap();
+        assert_eq!((written.window, written.maximized), (Some([900.0, 600.0]), true));
+        assert!(app.saved.window.is_some() && app.saved.maximized, "what was written is what is saved");
     }
 
     #[test]
@@ -10724,6 +10786,111 @@ mod tests {
         app.handle_menu(&ctx, AppMenuEvent::Setup);
         let commands = finish_setup(&ctx, &mut app, ui::setup_view::Outcome::Close);
         assert!(commands.contains(&egui::ViewportCommand::Close), "{commands:?}");
+    }
+
+    /// One window frame with `events`, and what it asked of the window.
+    fn window_commands(ctx: &egui::Context, app: &mut LumenApp, events: Vec<egui::Event>) -> Vec<egui::ViewportCommand> {
+        window_commands_in(ctx, app, events, false)
+    }
+
+    /// `window_commands`, with the window maximized or not.
+    fn window_commands_in(ctx: &egui::Context, app: &mut LumenApp, events: Vec<egui::Event>, maximized: bool) -> Vec<egui::ViewportCommand> {
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut input = egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        input.viewports.entry(egui::ViewportId::ROOT).or_default().maximized = Some(maximized);
+        let mut output = ctx.run_ui(input, |ui| eframe::App::ui(app, ui, &mut frame));
+        output.textures_delta.clear();
+        output.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.commands.clone()).unwrap_or_default()
+    }
+
+    /// Presses at `at`, then drags a little, and gathers what the window was asked.
+    fn drag_from(ctx: &egui::Context, app: &mut LumenApp, at: egui::Pos2) -> Vec<egui::ViewportCommand> {
+        let press = egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE };
+        window_commands(ctx, app, vec![egui::Event::PointerMoved(at)]);
+        let mut commands = window_commands(ctx, app, vec![press]);
+        commands.extend(window_commands(ctx, app, vec![egui::Event::PointerMoved(at + egui::vec2(20.0, 0.0))]));
+        commands
+    }
+
+    #[test]
+    fn the_empty_space_of_the_tab_row_moves_the_window_and_so_does_the_setup_strip() {
+        for setup in [false, true] {
+            let (ctx, mut app, _) = if setup { app_with_setup("app-caption-setup") } else { app_in("app-caption-tabs") };
+            for _ in 0..3 {
+                window_commands(&ctx, &mut app, vec![]);
+            }
+            // Far right of the top bar, past the tabs and before the window buttons: nothing is drawn there.
+            let commands = drag_from(&ctx, &mut app, egui::pos2(crate::ui::testing::SCREEN.right() - 200.0, 12.0));
+            assert!(commands.contains(&egui::ViewportCommand::StartDrag), "setup {setup}: {commands:?}");
+        }
+    }
+
+    #[test]
+    fn the_windows_edges_resize_it_on_every_screen() {
+        for setup in [false, true] {
+            let (ctx, mut app, _) = if setup { app_with_setup("app-edges-setup") } else { app_in("app-edges-tabs") };
+            for _ in 0..3 {
+                window_commands(&ctx, &mut app, vec![]);
+            }
+            let commands = drag_from(&ctx, &mut app, egui::pos2(1.0, 300.0));
+            assert!(commands.contains(&egui::ViewportCommand::BeginResize(egui::viewport::ResizeDirection::West)), "setup {setup}: {commands:?}");
+        }
+    }
+
+    #[test]
+    fn the_window_buttons_are_on_every_screen_and_ask_the_window_for_their_command() {
+        use ui::caption::Button;
+        for setup in [false, true] {
+            for (button, maximized, wanted) in [
+                (Button::Minimize, false, egui::ViewportCommand::Minimized(true)),
+                (Button::Maximize, false, egui::ViewportCommand::Maximized(true)),
+                (Button::Maximize, true, egui::ViewportCommand::Maximized(false)),
+                (Button::Close, false, egui::ViewportCommand::Close),
+            ] {
+                let (ctx, mut app, _) = if setup { app_with_setup("app-window-buttons-setup") } else { app_in("app-window-buttons-tabs") };
+                for _ in 0..3 {
+                    window_commands_in(&ctx, &mut app, vec![], maximized);
+                }
+                let at = ctx.read_response(button.id()).unwrap_or_else(|| panic!("setup {setup}: {button:?} was not drawn")).rect.center();
+                let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+                window_commands_in(&ctx, &mut app, vec![egui::Event::PointerMoved(at)], maximized);
+                let mut commands = window_commands_in(&ctx, &mut app, vec![press(true)], maximized);
+                commands.extend(window_commands_in(&ctx, &mut app, vec![press(false)], maximized));
+                assert_eq!(commands, [wanted], "setup {setup}, {button:?}, maximized {maximized}");
+            }
+        }
+    }
+
+    #[test]
+    fn alt_m_and_f11_minimize_and_toggle_maximized_on_every_screen_and_type_nothing() {
+        let alt = egui::Modifiers::ALT;
+        for setup in [false, true] {
+            for maximized in [false, true] {
+                let (ctx, mut app, _) = if setup { app_with_setup("app-window-keys-setup") } else { app_in("app-window-keys-tabs") };
+                window_commands_in(&ctx, &mut app, vec![], maximized);
+                let mut events = vec![egui::Event::ModifiersChanged(alt)];
+                events.extend(key_press(egui::Key::M, alt));
+                events.push(egui::Event::Text("m".into()));
+                let commands = window_commands_in(&ctx, &mut app, events, maximized);
+                assert_eq!(commands, [egui::ViewportCommand::Minimized(true)], "Alt+M, setup {setup}");
+                assert_eq!(app.tab.view.filter(), "", "Alt+M types nothing into the filter");
+
+                window_commands_in(&ctx, &mut app, vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)], maximized);
+                let commands = window_commands_in(&ctx, &mut app, key_press(egui::Key::F11, egui::Modifiers::NONE), maximized);
+                assert_eq!(commands, [egui::ViewportCommand::Maximized(!maximized)], "F11, setup {setup}, maximized {maximized}");
+            }
+        }
+    }
+
+    #[test]
+    fn f11_works_while_the_path_box_holds_the_keyboard() {
+        let (ctx, mut app, _) = app_in("app-window-keys-typing");
+        window_commands(&ctx, &mut app, vec![]);
+        app.handle_action(&ctx, Action::FocusPathBar);
+        window_commands(&ctx, &mut app, vec![]);
+        assert!(app.overlay_open());
+        let commands = window_commands(&ctx, &mut app, key_press(egui::Key::F11, egui::Modifiers::NONE));
+        assert_eq!(commands, [egui::ViewportCommand::Maximized(true)]);
     }
 
     #[test]
