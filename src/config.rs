@@ -21,6 +21,8 @@ pub struct Config {
     pub preview: bool,
     /// Inner size of the window in points; `None` for the default size.
     pub window: Option<[f32; 2]>,
+    /// Whether the window was maximized; `window` then stays its restored size.
+    pub maximized: bool,
     pub bookmarks: Vec<PathBuf>,
     /// The view slider's position: Details, Tree, List or the icon size.
     pub view: ViewSize,
@@ -52,6 +54,7 @@ impl Default for Config {
             sidebar: true,
             preview: false,
             window: None,
+            maximized: false,
             bookmarks: Vec::new(),
             view: ViewSize::default(),
             tabs: Vec::new(),
@@ -86,6 +89,7 @@ impl Config {
                 "sidebar" => config.sidebar = parse_bool(value).unwrap_or(config.sidebar),
                 "preview" => config.preview = parse_bool(value).unwrap_or(config.preview),
                 "window" => config.window = parse_window(value),
+                "maximized" => config.maximized = parse_bool(value).unwrap_or(config.maximized),
                 "view" => config.view = value.parse::<u16>().map(|p| ViewSize::new(p.min(100) as u8)).unwrap_or(config.view),
                 "bookmark" if !value.is_empty() => config.bookmarks.push(PathBuf::from(value)),
                 "tab" if !value.is_empty() => config.tabs.push(PathBuf::from(value)),
@@ -123,6 +127,7 @@ impl Config {
         if let Some([w, h]) = self.window {
             text += &format!("window = {}x{}\n", w.round(), h.round());
         }
+        text += &format!("maximized = {}\n", self.maximized);
         text += &format!("view = {}\n", self.view.percent());
         let columns: Vec<String> = self.columns.iter().map(|w| w.round().to_string()).collect();
         text += &format!("columns = {}\n", columns.join(" "));
@@ -226,6 +231,9 @@ impl Config {
         }
         if before.window != after.window {
             merged.window = after.window;
+        }
+        if before.maximized != after.maximized {
+            merged.maximized = after.maximized;
         }
         if before.view != after.view {
             merged.view = after.view;
@@ -519,6 +527,7 @@ mod tests {
             sidebar: false,
             preview: true,
             window: Some([1200.0, 800.0]),
+            maximized: true,
             bookmarks: vec![PathBuf::from("/home/u/Descargas"), PathBuf::from("/srv/my files")],
             view: ViewSize::new(65),
             tabs: vec![PathBuf::from("/home/u"), PathBuf::from("/srv/my files")],
@@ -604,7 +613,7 @@ mod tests {
         let text = sample().to_text();
         assert!(text.contains("sort = size desc\n"), "{text}");
         assert!(text.contains("show_hidden = true\n"), "{text}");
-        assert!(text.contains("window = 1200x800\n"), "{text}");
+        assert!(text.contains("window = 1200x800\nmaximized = true\n"), "{text}");
         assert!(text.contains("view = 65\n"), "{text}");
         assert!(!text.contains("list_zoom"), "{text}");
         assert!(text.contains("columns = 250 90 140 55 60 95\n"), "{text}");
@@ -648,6 +657,10 @@ bookmark =
         assert_eq!(config, Config { preview: true, ..Config::default() });
         assert_eq!(Config::parse("window = 100x2000").window, None, "below the window minimum");
         assert_eq!(Config::parse("window = 800x600").window, Some([800.0, 600.0]));
+        assert!(!Config::parse("window = 800x600\nsidebar = false\n").maximized, "a file from before the key: not maximized");
+        assert!(!Config::parse("maximized = maybe").maximized, "an unknown value is ignored");
+        assert!(Config::parse("maximized = true").maximized);
+        assert!(Config::parse("maximized = true\nmaximized = x").maximized, "a bad later line keeps the earlier value");
         assert_eq!(Config::parse("  sort=name   asc ").sort, Sort::default(), "spaces are tolerated");
     }
 
@@ -840,6 +853,12 @@ bookmark =
         assert_eq!(merged.sort.column, SortColumn::Size, "untouched here: the other window's sort stays");
         let resized = Config { window: Some([900.0, 600.0]), ..before.clone() };
         assert_eq!(Config::merge(&disk, &before, &resized).window, Some([900.0, 600.0]));
+        let maximized = Config { maximized: true, ..before.clone() };
+        assert!(Config::merge(&disk, &before, &maximized).maximized, "maximized here");
+        let other_maximized = Config { maximized: true, ..disk.clone() };
+        assert!(Config::merge(&other_maximized, &before, &after).maximized, "maximized in another window, untouched here");
+        let restored_here = Config { maximized: false, ..other_maximized.clone() };
+        assert!(!Config::merge(&other_maximized, &other_maximized, &restored_here).maximized, "restored here");
         let columns = Config { columns: [200.0, 90.0, 140.0, 55.0, 60.0, 95.0], ..before.clone() };
         assert_eq!(Config::merge(&disk, &before, &columns).columns, columns.columns, "resized here");
         let other = Config { columns: [500.0, 90.0, 140.0, 55.0, 60.0, 95.0], ..disk.clone() };
