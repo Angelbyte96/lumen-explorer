@@ -188,6 +188,52 @@ pub fn paint_side_panel(painter: &egui::Painter, rect: Rect, color: Color32) {
     painter.line_segment([pos2(x, frame.top()), pos2(x, frame.bottom())], stroke);
 }
 
+/// The glyph box of a window button's icon: a square of 40% of `rect`'s side.
+fn window_glyph(rect: Rect) -> Rect {
+    Rect::from_center_size(rect.center(), vec2(1.0, 1.0) * rect.width().min(rect.height()) * 0.4)
+}
+
+/// A thin line, whatever the scale: the stroke of the window buttons' icons.
+fn window_stroke(color: Color32) -> Stroke {
+    Stroke::new(1.0, color)
+}
+
+/// The minimize button: a line across the glyph box.
+pub fn paint_minimize(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let g = window_glyph(rect);
+    let y = g.center().y.round() + 0.5;
+    painter.line_segment([pos2(g.left(), y), pos2(g.right(), y)], window_stroke(color));
+}
+
+/// The maximize button: a square.
+pub fn paint_maximize(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let g = window_glyph(rect);
+    painter.rect_stroke(g, 0, window_stroke(color), egui::StrokeKind::Inside);
+}
+
+/// The restore button, for a maximized window: two overlapping squares, the
+/// one behind showing only its top and right sides.
+pub fn paint_restore(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let g = window_glyph(rect);
+    let side = g.width() * 0.75;
+    let front = Rect::from_min_size(pos2(g.left(), g.bottom() - side), vec2(side, side));
+    let back = Rect::from_min_size(pos2(g.right() - side, g.top()), vec2(side, side));
+    let stroke = window_stroke(color);
+    painter.rect_stroke(front, 0, stroke, egui::StrokeKind::Inside);
+    painter.add(Shape::line(
+        vec![pos2(back.left(), front.top()), back.left_top(), back.right_top(), back.right_bottom(), pos2(front.right(), back.bottom())],
+        stroke,
+    ));
+}
+
+/// The close button: an ×.
+pub fn paint_close(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let g = window_glyph(rect);
+    let stroke = window_stroke(color);
+    painter.line_segment([g.left_top(), g.right_bottom()], stroke);
+    painter.line_segment([g.right_top(), g.left_bottom()], stroke);
+}
+
 /// A folder icon, for rows that are not entries (the side panel).
 pub fn folder(ui: &mut egui::Ui) -> egui::Response {
     let side = ui.text_style_height(&egui::TextStyle::Body);

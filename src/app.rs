@@ -3058,7 +3058,7 @@ impl LumenApp {
     fn show_setup(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let Some(screen) = self.setup.as_mut() else { return };
         // No tab row here: a bare strip stands in for the title bar, so the window still moves.
-        egui::Panel::top("setup_caption").show_separator_line(false).show(ui, |ui| ui::caption::show(ui, |ui| ui.add_space(24.0)));
+        egui::Panel::top("setup_caption").frame(ui::caption::frame(ui.style())).show_separator_line(false).show(ui, |ui| ui::caption::show(ui, |ui| ui.add_space(24.0)));
         let event = egui::CentralPanel::default_margins().show(ui, |ui| screen.show(ui)).inner;
         let outcome = match (event, self.system.as_deref()) {
             (Some(event), Some(system)) => screen.handle(system, event),
@@ -3667,6 +3667,8 @@ impl LumenApp {
             Action::ToggleSidebar => self.handle_menu(ctx, AppMenuEvent::ToggleSidebar),
             Action::AppMenu => ui::app_menu::toggle(ctx),
             Action::Options => self.handle_menu(ctx, AppMenuEvent::Options),
+            Action::Minimize => ui::caption::minimize(ctx),
+            Action::ToggleMaximize => ui::caption::toggle_maximized(ctx),
             Action::ToggleHidden => self.tab.view.toggle_hidden(),
             Action::ToggleFlat => self.toggle_flat(ctx),
             // The drives or the bins are read again there, as the menu's Refresh does.
@@ -3849,6 +3851,11 @@ impl eframe::App for LumenApp {
             ui::shift_tab_from_list(&ctx);
         }
 
+        // The window's own keys (Alt+M, F11) work on every screen, a dialog or a text field included.
+        for action in input::read_window_actions(&ctx) {
+            self.handle_action(&ctx, action);
+        }
+
         // An open dialog takes the keyboard; the list must not react underneath.
         if self.setup.is_some() {
             // Setup reads its own keys when drawn; the list under it reads none.
@@ -3882,7 +3889,7 @@ impl eframe::App for LumenApp {
             return;
         }
 
-        egui::Panel::top("tabs").show(ui, |ui| {
+        egui::Panel::top("tabs").frame(ui::caption::frame(ui.style())).show(ui, |ui| {
             // The tab row is the window's title bar: its empty space moves the window.
             ui::caption::show(ui, |ui| {
                 ui.add_space(3.0);
@@ -10736,8 +10743,14 @@ mod tests {
 
     /// One window frame with `events`, and what it asked of the window.
     fn window_commands(ctx: &egui::Context, app: &mut LumenApp, events: Vec<egui::Event>) -> Vec<egui::ViewportCommand> {
+        window_commands_in(ctx, app, events, false)
+    }
+
+    /// `window_commands`, with the window maximized or not.
+    fn window_commands_in(ctx: &egui::Context, app: &mut LumenApp, events: Vec<egui::Event>, maximized: bool) -> Vec<egui::ViewportCommand> {
         let mut frame = eframe::Frame::_new_kittest();
-        let input = egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        let mut input = egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+        input.viewports.entry(egui::ViewportId::ROOT).or_default().maximized = Some(maximized);
         let mut output = ctx.run_ui(input, |ui| eframe::App::ui(app, ui, &mut frame));
         output.textures_delta.clear();
         output.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.commands.clone()).unwrap_or_default()
@@ -10759,8 +10772,8 @@ mod tests {
             for _ in 0..3 {
                 window_commands(&ctx, &mut app, vec![]);
             }
-            // Far right of the top bar, past the tabs: nothing is drawn there.
-            let commands = drag_from(&ctx, &mut app, egui::pos2(crate::ui::testing::SCREEN.right() - 100.0, 12.0));
+            // Far right of the top bar, past the tabs and before the window buttons: nothing is drawn there.
+            let commands = drag_from(&ctx, &mut app, egui::pos2(crate::ui::testing::SCREEN.right() - 200.0, 12.0));
             assert!(commands.contains(&egui::ViewportCommand::StartDrag), "setup {setup}: {commands:?}");
         }
     }
@@ -10775,6 +10788,62 @@ mod tests {
             let commands = drag_from(&ctx, &mut app, egui::pos2(1.0, 300.0));
             assert!(commands.contains(&egui::ViewportCommand::BeginResize(egui::viewport::ResizeDirection::West)), "setup {setup}: {commands:?}");
         }
+    }
+
+    #[test]
+    fn the_window_buttons_are_on_every_screen_and_ask_the_window_for_their_command() {
+        use ui::caption::Button;
+        for setup in [false, true] {
+            for (button, maximized, wanted) in [
+                (Button::Minimize, false, egui::ViewportCommand::Minimized(true)),
+                (Button::Maximize, false, egui::ViewportCommand::Maximized(true)),
+                (Button::Maximize, true, egui::ViewportCommand::Maximized(false)),
+                (Button::Close, false, egui::ViewportCommand::Close),
+            ] {
+                let (ctx, mut app, _) = if setup { app_with_setup("app-window-buttons-setup") } else { app_in("app-window-buttons-tabs") };
+                for _ in 0..3 {
+                    window_commands_in(&ctx, &mut app, vec![], maximized);
+                }
+                let at = ctx.read_response(button.id()).unwrap_or_else(|| panic!("setup {setup}: {button:?} was not drawn")).rect.center();
+                let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+                window_commands_in(&ctx, &mut app, vec![egui::Event::PointerMoved(at)], maximized);
+                let mut commands = window_commands_in(&ctx, &mut app, vec![press(true)], maximized);
+                commands.extend(window_commands_in(&ctx, &mut app, vec![press(false)], maximized));
+                assert_eq!(commands, [wanted], "setup {setup}, {button:?}, maximized {maximized}");
+            }
+        }
+    }
+
+    #[test]
+    fn alt_m_and_f11_minimize_and_toggle_maximized_on_every_screen_and_type_nothing() {
+        let alt = egui::Modifiers::ALT;
+        for setup in [false, true] {
+            for maximized in [false, true] {
+                let (ctx, mut app, _) = if setup { app_with_setup("app-window-keys-setup") } else { app_in("app-window-keys-tabs") };
+                window_commands_in(&ctx, &mut app, vec![], maximized);
+                let mut events = vec![egui::Event::ModifiersChanged(alt)];
+                events.extend(key_press(egui::Key::M, alt));
+                events.push(egui::Event::Text("m".into()));
+                let commands = window_commands_in(&ctx, &mut app, events, maximized);
+                assert_eq!(commands, [egui::ViewportCommand::Minimized(true)], "Alt+M, setup {setup}");
+                assert_eq!(app.tab.view.filter(), "", "Alt+M types nothing into the filter");
+
+                window_commands_in(&ctx, &mut app, vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)], maximized);
+                let commands = window_commands_in(&ctx, &mut app, key_press(egui::Key::F11, egui::Modifiers::NONE), maximized);
+                assert_eq!(commands, [egui::ViewportCommand::Maximized(!maximized)], "F11, setup {setup}, maximized {maximized}");
+            }
+        }
+    }
+
+    #[test]
+    fn f11_works_while_the_path_box_holds_the_keyboard() {
+        let (ctx, mut app, _) = app_in("app-window-keys-typing");
+        window_commands(&ctx, &mut app, vec![]);
+        app.handle_action(&ctx, Action::FocusPathBar);
+        window_commands(&ctx, &mut app, vec![]);
+        assert!(app.overlay_open());
+        let commands = window_commands(&ctx, &mut app, key_press(egui::Key::F11, egui::Modifiers::NONE));
+        assert_eq!(commands, [egui::ViewportCommand::Maximized(true)]);
     }
 
     #[test]
