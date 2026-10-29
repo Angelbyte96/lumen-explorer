@@ -261,6 +261,21 @@ const CURRENT: &str = "•";
 const CHROME: f32 = 140.0;
 const FOOTER: &str = "Up Down to navigate · Enter to use · Ctrl+R to reset · Escape to dismiss";
 
+/// The footer: faint hints, the separators between them in plain text
+/// color (a faint middle dot is barely visible).
+fn footer(style: &egui::Style) -> egui::text::LayoutJob {
+    let font = egui::TextStyle::Body.resolve(style);
+    let format = |color| egui::TextFormat::simple(font.clone(), color);
+    let mut job = egui::text::LayoutJob::default();
+    for (index, hint) in FOOTER.split(" · ").enumerate() {
+        if index > 0 {
+            job.append(" · ", 0.0, format(style.visuals.text_color()));
+        }
+        job.append(hint, 0.0, format(style.visuals.weak_text_color()));
+    }
+    job
+}
+
 fn field_id() -> egui::Id {
     egui::Id::new("lumen_options_field")
 }
@@ -428,7 +443,7 @@ impl Options {
                 }
             }
             ui.separator();
-            ui.weak(FOOTER);
+            ui.label(footer(ui.style()));
         });
         if typed {
             self.picked = 0;
@@ -689,6 +704,22 @@ mod tests {
         }
         assert!(painted(&texts, FOOTER), "the footer stays");
         assert_eq!(FOOTER, "Up Down to navigate · Enter to use · Ctrl+R to reset · Escape to dismiss", "File Pilot's footer, with Lumen's reset key");
+    }
+
+    #[test]
+    fn the_footers_separators_stand_out_from_its_faint_hints() {
+        for scheme in Scheme::ALL {
+            let style = egui::Style { visuals: scheme.visuals(egui::Theme::Dark), ..Default::default() };
+            let job = footer(&style);
+            assert_eq!(job.text, FOOTER, "{scheme:?}");
+            let (weak, text) = (style.visuals.weak_text_color(), style.visuals.text_color());
+            for section in &job.sections {
+                let part = &job.text[section.byte_range.start.0..section.byte_range.end.0];
+                let color = if part.trim() == "·" { text } else { weak };
+                assert_eq!(section.format.color, color, "{scheme:?}: {part:?}");
+            }
+            assert_eq!(job.sections.iter().filter(|s| job.text[s.byte_range.start.0..s.byte_range.end.0].trim() == "·").count(), 3, "{scheme:?}");
+        }
     }
 
     #[test]
