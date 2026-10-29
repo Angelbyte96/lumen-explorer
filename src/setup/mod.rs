@@ -128,6 +128,15 @@ pub trait System {
     /// Removes the installed copy, its menu entry and every switch. The
     /// settings (bookmarks, tabs) stay.
     fn uninstall(&self) -> Result<(), String>;
+    /// A script for the user to run that does what [`Self::install`] would:
+    /// what Setup offers while Install is held ([`INSTALL_HELD`]).
+    fn install_script(&self, _dir: &Path, _want: Switches) -> Result<String, String> {
+        Err("Lumen installs itself here".into())
+    }
+    /// A script for the user to run that does what [`Self::apply`] would.
+    fn apply_script(&self, _want: Switches) -> Result<String, String> {
+        Err("Lumen changes the switches itself here".into())
+    }
 }
 
 /// Writes `bytes` to `path` through a temporary file beside it, so a failed
