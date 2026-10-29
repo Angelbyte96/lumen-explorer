@@ -290,9 +290,15 @@ pub fn is_this_pc(path: &Path) -> bool {
     path == Path::new(THIS_PC)
 }
 
-/// Whether typed text names This PC (on Windows, where it exists).
+/// Whether typed text names This PC (on Windows, where it exists), in
+/// English or in the interface's language.
 pub fn names_this_pc(text: &str) -> bool {
-    cfg!(windows) && text.trim().eq_ignore_ascii_case(THIS_PC)
+    cfg!(windows) && names(text, THIS_PC, tr!("This PC"))
+}
+
+fn names(text: &str, english: &str, shown: &str) -> bool {
+    let text = text.trim();
+    text.eq_ignore_ascii_case(english) || text.to_lowercase() == shown.to_lowercase()
 }
 
 /// What a tab shows for the Recycle Bin (Windows): the entries of every
@@ -314,12 +320,13 @@ pub fn is_marker(path: &Path) -> bool {
     is_this_pc(path) || is_recycle_bin(path)
 }
 
-/// The title a marker shows in a tab, the path bar and the crumbs.
+/// The title a marker shows in a tab, the path bar and the crumbs, in the
+/// interface's language.
 pub fn marker_label(path: &Path) -> Option<&'static str> {
     if is_this_pc(path) {
-        Some(THIS_PC)
+        Some(tr!("This PC"))
     } else {
-        is_recycle_bin(path).then_some(RECYCLE_BIN)
+        is_recycle_bin(path).then(|| tr!("Recycle Bin"))
     }
 }
 
@@ -328,7 +335,7 @@ pub fn named_marker(text: &str) -> Option<PathBuf> {
     if names_this_pc(text) {
         Some(this_pc())
     } else {
-        (cfg!(windows) && text.trim().eq_ignore_ascii_case(RECYCLE_BIN)).then(recycle_bin)
+        (cfg!(windows) && names(text, RECYCLE_BIN, tr!("Recycle Bin"))).then(recycle_bin)
     }
 }
 
@@ -1093,6 +1100,18 @@ mod this_pc_tests {
         for text in ["This", "This PC\\", "C:\\"] {
             assert!(!names_this_pc(text), "{text:?}");
         }
+    }
+
+    #[test]
+    fn in_spanish_the_markers_show_and_are_typed_in_spanish_and_english_still_works() {
+        crate::i18n::set(crate::i18n::Lang::Es);
+        let shown = (marker_label(&this_pc()), marker_label(&recycle_bin()));
+        let typed = ["este equipo", "This PC", "Papelera de reciclaje", "recycle bin"].map(named_marker);
+        crate::i18n::set(crate::i18n::Lang::En);
+        assert_eq!(shown, (Some("Este equipo"), Some("Papelera de reciclaje")));
+        let want = |marker: PathBuf| cfg!(windows).then_some(marker);
+        assert_eq!(typed, [want(this_pc()), want(this_pc()), want(recycle_bin()), want(recycle_bin())]);
+        assert_eq!(marker_label(&this_pc()), Some("This PC"), "English as before");
     }
 
     #[test]
