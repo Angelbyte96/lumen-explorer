@@ -100,12 +100,30 @@ pub fn translate(english: &'static str) -> &'static str {
 }
 
 /// `template` with `{0}`, `{1}`… replaced by `values`, in any order.
+/// One pass over the template: braces inside a value (a file named
+/// `x{1}.txt`) are left as they are; `{n}` without a value stays too.
 pub fn fill(template: &str, values: &[&dyn Display]) -> String {
-    let mut out = template.to_owned();
-    for (index, value) in values.iter().enumerate() {
-        out = out.replace(&format!("{{{index}}}"), &value.to_string());
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out += &rest[..open];
+        let after = &rest[open + 1..];
+        let value = after
+            .find('}')
+            .and_then(|close| after[..close].parse::<usize>().ok().map(|index| (close, index)))
+            .and_then(|(close, index)| values.get(index).map(|value| (close, value)));
+        match value {
+            Some((close, value)) => {
+                out += &value.to_string();
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push('{');
+                rest = after;
+            }
+        }
     }
-    out
+    out + rest
 }
 
 /// `tr!("Move {0} items to the trash?", count)`: the translated template filled in.
@@ -121,6 +139,10 @@ pub(crate) use tr;
 
 /// The system's language: Spanish when the user's is, else English.
 fn system() -> Lang {
+    // Tests never depend on the language of the machine they run on.
+    if cfg!(test) {
+        return Lang::En;
+    }
     if system_tags().iter().any(|tag| is_spanish(tag)) { Lang::Es } else { Lang::En }
 }
 
@@ -181,6 +203,8 @@ mod tests {
     fn tr_fills_numbered_values_in_the_translations_order() {
         assert_eq!(tr!("Folder: {0}", "/srv"), "Folder: /srv");
         assert_eq!(fill("{1} then {0}, {1}", &[&"a", &2]), "2 then a, 2");
+        assert_eq!(fill("Cannot restore {0}: {1}", &[&"x{1}.txt", &"gone"]), "Cannot restore x{1}.txt: gone", "a value's own braces stay");
+        assert_eq!(fill("{0} and {7}", &[&"a"]), "a and {7}", "a number without a value stays");
         set(Lang::Es);
         assert_eq!(tr!("Folder: {0}", "/srv"), "Carpeta: /srv");
         set(Lang::En);
@@ -192,6 +216,7 @@ mod tests {
             assert_eq!(Language::from_key(language.key()), Some(language));
         }
         assert_eq!(Language::from_key("klingon"), None);
+        assert_eq!(Language::System.resolve(), Lang::En, "tests run in English whatever the machine's language");
         assert_eq!(Language::default(), Language::System);
         assert_eq!((Language::English.resolve(), Language::Spanish.resolve()), (Lang::En, Lang::Es));
         assert_eq!([Language::English.name(), Language::Spanish.name()], ["English", "Español"], "each by its own name");
@@ -255,12 +280,13 @@ mod tests {
     /// The string literals right after `tr!(` in `text`, unescaped.
     fn literals(text: &str) -> Vec<String> {
         let mut out = Vec::new();
-        for (at, _) in text.match_indices("tr!(\"") {
+        for (at, _) in text.match_indices("tr!(") {
             let before = text[..at].chars().next_back();
             if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
                 continue;
             }
-            let rest = &text[at + 5..];
+            // rustfmt may put the literal on the next line.
+            let Some(rest) = text[at + 4..].trim_start().strip_prefix('"') else { continue };
             let mut literal = String::new();
             let mut chars = rest.chars();
             while let Some(c) = chars.next() {
@@ -292,6 +318,7 @@ mod tests {
 
     #[test]
     fn the_catalog_scanner_reads_literals_after_tr_only() {
+        assert_eq!(literals("tr!(\n    \"Next line {0}\",\n    n)"), ["Next line {0}"]);
         let text = r#"tr!("A \"b\"") str!("no") tr("no") x(tr!("C {0}", 1)) tr!("D\u{2026}") ltr!("no")"#;
         assert_eq!(literals(text), ["A \"b\"", "C {0}", "D…"]);
         let file = "/// tr!(\"doc\")\nlet a = tr!(\"code\");\n    // tr!(\"comment\")\n#[cfg(test)]\nmod tests {\n    tr!(\"test\")\n}";
