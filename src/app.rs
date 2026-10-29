@@ -1721,6 +1721,7 @@ impl LumenApp {
         app.schemes = config.schemes;
         app.schemes.apply(ctx);
         app.behavior = config.behavior;
+        app.behavior.language.apply();
         app.saved = app.settings(true);
         app.config_path = path;
         app
@@ -4128,7 +4129,7 @@ impl eframe::App for LumenApp {
         if let Some(event) = self.path_popup.show(&ctx, list.response.rect, &current, home.as_deref(), shown, || self.visits.scores(unix_now())) {
             self.handle_popup(&ctx, event);
         }
-        // A scheme chosen shows from now on; end_frame saves it with the other settings.
+        // A scheme or a language chosen shows from now on; end_frame saves it with the other settings.
         self.options.show(&ctx, &mut self.schemes, &mut self.behavior, &current);
         if let Some(i) = self.tab_search.show(&ctx, &self.tab_entries(Instant::now())) {
             self.select_tab(&ctx, i);
@@ -7486,6 +7487,8 @@ mod tests {
         window_frame(&ctx, &mut app, vec![]);
         window_frame(&ctx, &mut app, vec![]);
         let press = |ctx: &egui::Context, app: &mut LumenApp, key| window_frame(ctx, app, key_press(key, egui::Modifiers::NONE));
+        // Past Language and the system switch.
+        press(&ctx, &mut app, egui::Key::ArrowDown);
         press(&ctx, &mut app, egui::Key::ArrowDown);
         let list = press(&ctx, &mut app, egui::Key::Enter);
         assert!(list.iter().any(|t| t == "Dracula"), "the list of schemes: {list:?}");
