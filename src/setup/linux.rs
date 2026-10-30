@@ -183,7 +183,9 @@ impl Linux {
     /// removed only if Setup wrote it, so the system's file manager comes back.
     fn set_dbus_service(&self, on: bool, target: &Path) -> Result<(), String> {
         let file = self.dbus_service();
-        if on {
+        if on && self.dbus_service_is(target) {
+            return Ok(());
+        } else if on {
             write_file(&file, &dbus_service_file(target)?)?;
         } else if std::fs::read_to_string(&file).is_ok_and(|text| text.starts_with(SERVICE_MARK)) {
             super::remove_file(&file).map_err(|err| tr!("Cannot remove {0}: {1}", file.display(), err))?;
@@ -243,8 +245,7 @@ impl System for Linux {
         let mimeapps = std::fs::read_to_string(self.mimeapps()).unwrap_or_default();
         Switches {
             desktop_shortcut: self.desktop_shortcut().is_some_and(|file| file.is_file()),
-            // Both halves: folders open with Lumen and files are shown in it.
-            default: folder_default(&mimeapps).as_deref() == Some(ENTRY) && self.dbus_service_is(&target),
+            default: folder_default(&mimeapps).as_deref() == Some(ENTRY),
             right_click: self.script().is_file(),
             // /usr/bin is always on the PATH.
             path: self.packaged() || self.link_is_ours(&target),
@@ -263,11 +264,9 @@ impl System for Linux {
         if want.desktop_shortcut != now.desktop_shortcut {
             step(self.set_desktop_shortcut(want.desktop_shortcut, &target));
         }
-        // Off always runs: half set (folders but no service file, as before
-        // the service file existed) reads off and still has a half to remove.
-        if !(want.default && now.default) {
-            step(self.set_default(want.default, &target));
-        }
+        // Always: each half changes only when it differs, so an install from
+        // before the service file gets it on the next Modify that keeps default on.
+        step(self.set_default(want.default, &target));
         if want.right_click != now.right_click {
             step(self.set_right_click(want.right_click, &target));
         }
@@ -515,14 +514,15 @@ mod tests {
     }
 
     #[test]
-    fn an_install_from_before_the_service_file_reads_default_off_until_set_again() {
+    fn an_install_from_before_the_service_file_keeps_default_on_and_gets_it_on_the_next_modify() {
         let (linux, home) = installed("setup-linux-default-upgrade");
         std::fs::create_dir_all(home.join(".config")).unwrap();
         std::fs::write(home.join(".config/mimeapps.list"), "[Default Applications]\ninode/directory=lumen.desktop;\n").unwrap();
-        assert!(!linux.read().default, "folders open with Lumen, but showing a file in its folder does not");
-        linux.apply(Switches { default: true, ..Switches::default() }).unwrap();
-        assert!(linux.read().default);
-        assert!(home.join(SERVICE).is_file());
+        assert!(linux.read().default, "folders still open with Lumen");
+        // Modify for another switch, the shown default left as it is.
+        linux.apply(Switches { desktop_shortcut: true, ..linux.read() }).unwrap();
+        assert!(linux.read().default && linux.read().desktop_shortcut);
+        assert!(std::fs::read_to_string(home.join(SERVICE)).unwrap().contains("--file-manager1"), "the service file is added");
         assert_eq!(std::fs::read_to_string(home.join(".config/mimeapps.list")).unwrap(), "[Default Applications]\ninode/directory=lumen.desktop;\n");
     }
 
@@ -735,7 +735,7 @@ mod tests {
         let before = "[Default Applications]\ninode/directory=lumen.desktop;org.gnome.Nautilus.desktop;\n";
         std::fs::create_dir_all(home.join(".config")).unwrap();
         std::fs::write(home.join(".config/mimeapps.list"), before).unwrap();
-        assert!(!linux.read().default, "half set: no service file");
+        assert!(linux.read().default);
         linux.apply(Switches::default()).unwrap();
         assert_eq!(std::fs::read_to_string(home.join(".config/mimeapps.list")).unwrap(), "[Default Applications]\ninode/directory=org.gnome.Nautilus.desktop;\n");
     }
