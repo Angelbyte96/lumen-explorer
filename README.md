@@ -64,8 +64,12 @@ rights and touches only your user's registry (HKCU) and folders. It does what
 Install or Modify would do, with the same keys and files, and Add to PATH keeps
 the `%VARIABLES%` already in your `Path` (it never uses `setx`). Reopen Setup
 afterwards to see the switches as the machine has them. Uninstall still works
-from Lumen itself, and the first start opens Setup. Windows SmartScreen may
-warn before the first run: More info ▸ Run anyway.
+from Lumen itself. Windows SmartScreen may warn before the first run: More
+info ▸ Run anyway.
+
+Lumen opens on Setup by itself only on its first start (before it has saved
+any settings) when it is not installed; any other time, open it with ☰ (F10)
+▸ Lumen Setup or `lumen --setup`.
 
 To install a release:
 
@@ -79,14 +83,19 @@ To install a release:
 
   ```sh
   tar xzf lumen-<version>-linux-x86_64.tar.gz
-  ./lumen/lumen     # opens Setup; Install copies it to ~/.local/share/lumen
+  ./lumen/lumen     # first start: opens Setup; Install copies it to ~/.local/share/lumen
   ```
 
   From then on Lumen is in the app menu.
 
+Install never replaces another `lumen` (`lumen.exe` on Windows) already in the
+chosen folder: it asks for another folder instead. Only Lumen's own install
+there is replaced, by a newer one.
+
 With the `.deb` (below) apt owns Lumen: Setup changes the switches but neither
 installs nor uninstalls; it shows `sudo apt remove lumen` instead, and Add to
-PATH is always on (`/usr/bin`).
+PATH is always on (`/usr/bin`). A `lumen` in `/usr/local` is not apt's: Setup
+offers to install it like a download.
 
 ## Install from source (Linux)
 
