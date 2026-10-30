@@ -1,6 +1,6 @@
 //! The ⋮ at the right end of the toolbar, like File Pilot's: what can be done
 //! with the folder on screen. Each row shows its shortcut, and a box when it
-//! is a setting that is on or off. Rows Lumen does not have yet are greyed.
+//! is a setting that is on or off. Rows that cannot run here are greyed.
 
 use eframe::egui;
 
@@ -18,6 +18,10 @@ pub enum FolderMenuEvent {
     CloseTab,
     /// Hidden files (Ctrl+H).
     ToggleHidden,
+    /// The system's terminal in the folder.
+    OpenConsole,
+    /// The system's file manager on the folder.
+    OpenFileExplorer,
 }
 
 /// What the rows show for the folder on screen.
@@ -30,6 +34,9 @@ pub struct FolderState {
     pub hidden: bool,
     /// More than one tab is open: Close Tab has one to close.
     pub can_close_tab: bool,
+    /// A real folder is on screen (not This PC nor the Recycle Bin): a
+    /// terminal or file manager can open there.
+    pub here: bool,
 }
 
 /// One row: its name, shortcut, box (on or off) when it is a setting, and
@@ -53,8 +60,10 @@ fn groups(state: &FolderState) -> [Vec<Item>; 4] {
         ],
         vec![item(tr!("New Tab"), "Ctrl+T", None, Some(FolderMenuEvent::NewTab)), item(tr!("Close Tab"), "Ctrl+W", None, close_tab)],
         vec![item(tr!("Hidden Files"), "Ctrl+H", Some(state.hidden), Some(FolderMenuEvent::ToggleHidden))],
-        // Their own card adds them: greyed until then, as the ☰ menu's rows.
-        vec![item(tr!("Open Console"), "", None, None), item(tr!("Open File Explorer"), "", None, None)],
+        vec![
+            item(tr!("Open Console"), "", None, state.here.then_some(FolderMenuEvent::OpenConsole)),
+            item(tr!("Open File Explorer"), "", None, state.here.then_some(FolderMenuEvent::OpenFileExplorer)),
+        ],
     ]
 }
 
@@ -171,8 +180,8 @@ pub fn show(ui: &mut egui::Ui, state: &FolderState) -> Option<FolderMenuEvent> {
 mod tests {
     use super::*;
 
-    const ALL_ON: FolderState = FolderState { subfolders: Some(true), preview: true, hidden: true, can_close_tab: true };
-    const ALL_OFF: FolderState = FolderState { subfolders: Some(false), preview: false, hidden: false, can_close_tab: true };
+    const ALL_ON: FolderState = FolderState { subfolders: Some(true), preview: true, hidden: true, can_close_tab: true, here: true };
+    const ALL_OFF: FolderState = FolderState { subfolders: Some(false), preview: false, hidden: false, can_close_tab: true, here: true };
 
     /// One frame of the button at the right of a bar, with `events`; what it
     /// returned, the texts painted and the filled rects.
@@ -277,6 +286,8 @@ mod tests {
             ("New Tab", FolderMenuEvent::NewTab),
             ("Close Tab", FolderMenuEvent::CloseTab),
             ("Hidden Files", FolderMenuEvent::ToggleHidden),
+            ("Open Console", FolderMenuEvent::OpenConsole),
+            ("Open File Explorer", FolderMenuEvent::OpenFileExplorer),
         ] {
             assert_eq!(choose(&ALL_OFF, row), Some(event), "{row}");
         }
@@ -284,15 +295,15 @@ mod tests {
 
     #[test]
     fn rows_that_cannot_run_are_greyed_without_their_shortcut() {
+        let on_this_pc = FolderState { subfolders: None, here: false, ..ALL_OFF };
         for row in ["Open Console", "Open File Explorer"] {
-            assert_eq!(choose(&ALL_OFF, row), None, "{row} does nothing yet");
+            assert_eq!(choose(&on_this_pc, row), None, "{row}: This PC is no folder to open");
         }
         let one_tab = FolderState { can_close_tab: false, ..ALL_OFF };
         assert_eq!(choose(&one_tab, "Close Tab"), None, "the last tab stays");
         let ctx = egui::Context::default();
         let (texts, _) = open(&ctx, &one_tab);
         assert!(!texts.iter().any(|(t, _)| t == "Ctrl+W"), "a greyed row shows no shortcut");
-        let on_this_pc = FolderState { subfolders: None, ..ALL_OFF };
         assert_eq!(choose(&on_this_pc, "Toggle Subfolders"), None, "This PC has no subfolders to list");
     }
 

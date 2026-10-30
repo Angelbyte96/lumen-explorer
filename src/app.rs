@@ -3213,6 +3213,16 @@ impl LumenApp {
             FolderMenuEvent::NewTab => self.handle_action(ctx, Action::NewTab),
             FolderMenuEvent::CloseTab => self.handle_action(ctx, Action::CloseTab),
             FolderMenuEvent::ToggleHidden => self.handle_action(ctx, Action::ToggleHidden),
+            FolderMenuEvent::OpenConsole | FolderMenuEvent::OpenFileExplorer => {
+                let folder = self.tab.view.current.clone();
+                if places::is_marker(&folder) {
+                    return;
+                }
+                let opened = if row == FolderMenuEvent::OpenConsole { crate::open_here::open_console(&folder) } else { crate::open_here::open_file_manager(&folder) };
+                if let Err(err) = opened {
+                    self.tab.view.error = Some(err);
+                }
+            }
         }
     }
 
@@ -3223,6 +3233,7 @@ impl LumenApp {
             preview: self.preview_open,
             hidden: self.tab.view.show_hidden,
             can_close_tab: self.tabs.len() > 1,
+            here: !self.on_marker(),
         }
     }
 
@@ -4692,14 +4703,14 @@ mod tests {
         use ui::toolbar::{FolderMenuEvent, FolderState};
         let (ctx, mut app, dir) = app_in("app-folder-menu");
         std::fs::write(dir.join(".hidden"), "H").unwrap();
-        assert_eq!(app.folder_state(), FolderState { subfolders: Some(false), preview: false, hidden: false, can_close_tab: false });
+        assert_eq!(app.folder_state(), FolderState { subfolders: Some(false), preview: false, hidden: false, can_close_tab: false, here: true });
         app.handle_toolbar(&ctx, ToolbarEvent::Folder(FolderMenuEvent::TogglePreview));
         assert!(app.preview_open, "Preview Panel, as Space");
         app.handle_toolbar(&ctx, ToolbarEvent::Folder(FolderMenuEvent::ToggleHidden));
         assert!(app.tab.view.show_hidden, "Hidden Files, as Ctrl+H");
         app.handle_toolbar(&ctx, ToolbarEvent::Folder(FolderMenuEvent::NewTab));
         assert_eq!(app.tabs.len(), 2, "New Tab, as Ctrl+T");
-        assert_eq!(app.folder_state(), FolderState { subfolders: Some(false), preview: true, hidden: true, can_close_tab: true });
+        assert_eq!(app.folder_state(), FolderState { subfolders: Some(false), preview: true, hidden: true, can_close_tab: true, here: true });
         app.handle_toolbar(&ctx, ToolbarEvent::Folder(FolderMenuEvent::CloseTab));
         assert_eq!(app.tabs.len(), 1, "Close Tab, as Ctrl+W");
         app.handle_toolbar(&ctx, ToolbarEvent::Folder(FolderMenuEvent::ToggleSubfolders));
@@ -4711,9 +4722,10 @@ mod tests {
     }
 
     #[test]
-    fn on_this_pc_the_folder_menu_greys_toggle_subfolders() {
+    fn on_this_pc_the_folder_menu_greys_toggle_subfolders_and_the_open_rows() {
         let (_, app, _) = app_on_this_pc("app-folder-menu-this-pc");
         assert_eq!(app.folder_state().subfolders, None);
+        assert!(!app.folder_state().here, "no terminal or file manager opens on This PC");
     }
 
     #[test]

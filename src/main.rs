@@ -5,6 +5,7 @@
 mod app;
 #[cfg(not(windows))]
 mod apps;
+mod open_here;
 mod behavior;
 mod config;
 mod drag;
