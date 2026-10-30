@@ -48,6 +48,7 @@ pub const ENTRIES: &[(&str, &str)] = &[
     ("Cannot restore {0}: {1}", "No se puede restaurar {0}: {1}"),
     ("Cannot restore {0}: every free name was taken", "No se puede restaurar {0}: todos los nombres libres están ocupados"),
     ("Cannot delete {0}: {1}", "No se puede eliminar {0}: {1}"),
+    ("Not a trash folder: {0}", "No es una carpeta de papelera: {0}"),
     ("1 item restored", "1 elemento restaurado"),
     ("{0} items restored", "{0} elementos restaurados"),
     // apps.rs
