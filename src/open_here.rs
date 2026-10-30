@@ -32,25 +32,30 @@ pub fn open_file_manager(folder: &Path) -> Result<(), String> {
 /// Windows' consoles to try, in order, with their arguments and creation
 /// flags: Windows Terminal in the folder it starts in (`-d .`: its own
 /// argument parsing would split a folder holding `;`), then PowerShell in a
-/// console of its own (Lumen has none to share).
+/// console of its own (Lumen has none to share). By full path, from
+/// `%LOCALAPPDATA%` and `%SystemRoot%`: Windows looks for a bare name in the
+/// running exe's folder first, and a downloaded Lumen runs from Downloads.
 #[cfg(windows)]
-fn consoles() -> [(&'static str, &'static [&'static str], u32); 2] {
+fn consoles(local_app_data: Option<std::path::PathBuf>, system_root: Option<std::path::PathBuf>) -> Vec<(std::path::PathBuf, &'static [&'static str], u32)> {
     use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
-    [("wt.exe", &["-d", "."], 0), ("powershell.exe", &[], CREATE_NEW_CONSOLE)]
+    let terminal = local_app_data.map(|dir| (dir.join(r"Microsoft\WindowsApps\wt.exe"), &["-d", "."][..], 0));
+    let powershell = system_root.map(|dir| (dir.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"), &[][..], CREATE_NEW_CONSOLE));
+    terminal.into_iter().chain(powershell).collect()
 }
 
 #[cfg(windows)]
 pub fn open_console(folder: &Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
-    for (program, args, flags) in consoles() {
-        match std::process::Command::new(program).args(args).current_dir(folder).creation_flags(flags).spawn() {
+    let env_dir = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(std::path::PathBuf::from).filter(|p| p.is_absolute());
+    for (program, args, flags) in consoles(env_dir("LOCALAPPDATA"), env_dir("SystemRoot")) {
+        match std::process::Command::new(&program).args(args).current_dir(folder).creation_flags(flags).spawn() {
             Ok(mut child) => {
                 // Reaped in the background so no handle is left behind.
                 std::thread::spawn(move || child.wait());
                 return Ok(());
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(tr!("Cannot open {0}: {1}", program, e)),
+            Err(e) => return Err(tr!("Cannot open {0}: {1}", program.display(), e)),
         }
     }
     Err(tr!("No console found").into())
@@ -118,8 +123,18 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_terminal_first_then_powershell_in_a_console_of_its_own() {
+    fn windows_terminal_first_then_powershell_in_a_console_of_its_own_by_full_path() {
+        use std::path::PathBuf;
         const CREATE_NEW_CONSOLE: u32 = 0x10;
-        assert_eq!(consoles(), [("wt.exe", &["-d", "."][..], 0), ("powershell.exe", &[][..], CREATE_NEW_CONSOLE)]);
+        let found = consoles(Some(r"C:\Users\u\AppData\Local".into()), Some(r"C:\Windows".into()));
+        assert_eq!(
+            found,
+            [
+                (PathBuf::from(r"C:\Users\u\AppData\Local\Microsoft\WindowsApps\wt.exe"), &["-d", "."][..], 0),
+                (PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"), &[][..], CREATE_NEW_CONSOLE),
+            ],
+            "full paths: a powershell.exe beside lumen.exe (in Downloads) is never run"
+        );
+        assert!(consoles(None, None).is_empty(), "without those folders, none");
     }
 }
