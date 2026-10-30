@@ -3070,6 +3070,11 @@ impl LumenApp {
         }
     }
 
+    /// Selects the entry `name` once the folder Lumen started in lists (`--select=`).
+    pub fn select_at_start(&mut self, name: String) {
+        self.tab.select_after_load = Some(name);
+    }
+
     /// Shows the Setup screen, when this machine has a system to set up.
     pub fn open_setup(&mut self) {
         if let Some(system) = self.system.as_deref() {
@@ -4254,7 +4259,7 @@ pub fn start(args: &[String]) -> Start {
 }
 
 fn start_from(args: &[String], cwd: Option<PathBuf>, home: Option<PathBuf>, windows: bool, terminal: bool) -> Start {
-    let folder = args.iter().find(|a| *a != RESTORE && *a != SETUP).cloned();
+    let folder = args.iter().find(|a| *a != RESTORE && *a != SETUP && !a.starts_with(SELECT)).cloned();
     if folder.is_none() && (windows || !terminal || args.iter().any(|a| a == RESTORE)) {
         return Start::Restore;
     }
@@ -4272,6 +4277,15 @@ const SETUP: &str = "--setup";
 /// Whether the command line asks for the Setup screen.
 pub fn wants_setup(args: &[String]) -> bool {
     args.iter().any(|a| a == SETUP)
+}
+
+/// The flag that names the entry to select in the folder Lumen opens with:
+/// `--select=report.pdf`. Showing a file in its folder (FileManager1) passes it.
+pub const SELECT: &str = "--select=";
+
+/// The entry the command line asks to select, if any.
+pub fn selected_at_start(args: &[String]) -> Option<String> {
+    args.iter().find_map(|a| a.strip_prefix(SELECT)).filter(|name| !name.is_empty()).map(str::to_owned)
 }
 
 /// This machine's Setup: `record_file` is where Install remembers its folder.
@@ -4356,6 +4370,33 @@ mod tests {
         assert_eq!(start(&[], false), Start::Folder("/srv/work".into()), "a terminal on Linux");
         assert_eq!(start(&["--restore", "docs"], false), Start::Folder("/srv/work/docs".into()), "a folder opened with Lumen");
         assert_eq!(start(&["docs"], true), Start::Folder("/srv/work/docs".into()));
+    }
+
+    #[test]
+    fn select_names_the_entry_to_select_and_is_never_the_folder() {
+        let cwd = Some(PathBuf::from("/srv/work"));
+        let home = Some(PathBuf::from("/home/u"));
+        let start = |list: &[&str]| start_from(&args(list), cwd.clone(), home.clone(), false, false);
+        assert_eq!(start(&["/tmp", "--select=a b.pdf"]), Start::Folder("/tmp".into()));
+        assert_eq!(start(&["--select=a.pdf", "/tmp"]), Start::Folder("/tmp".into()), "in any order");
+        assert_eq!(start(&["--select=a.pdf"]), Start::Restore, "alone it is no folder");
+        assert_eq!(selected_at_start(&args(&["/tmp", "--select=a b.pdf"])).as_deref(), Some("a b.pdf"));
+        assert_eq!(selected_at_start(&args(&["/tmp", "--select="])), None, "an empty name");
+        assert_eq!(selected_at_start(&args(&["/tmp"])), None);
+    }
+
+    #[test]
+    fn an_entry_to_select_at_start_is_selected_once_the_folder_lists() {
+        let dir = crate::fs::ops::tests::fresh_fixture("app-select-at-start");
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        std::fs::write(dir.join("report.pdf"), "r").unwrap();
+        let ctx = egui::Context::default();
+        let settings = Settings { config: Config::default(), path: None, error: None };
+        let mut app = LumenApp::start(&ctx, Start::Folder(dir.clone()), &dir, false, settings);
+        app.select_at_start("report.pdf".into());
+        assert_eq!(app.tab.lister.last_requested(), Some(dir));
+        land(&mut app);
+        assert_eq!(app.tab.view.selected_entry().map(|e| e.name.as_str()), Some("report.pdf"));
     }
 
     #[test]
