@@ -117,6 +117,7 @@ pub const ENTRIES: &[(&str, &str)] = &[
     ("Installed with apt: there is nothing to install", "Instalado con apt: no hay nada que instalar"),
     ("Installed with apt: sudo apt remove lumen", "Instalado con apt: sudo apt remove lumen"),
     ("{0} is another file (scripts/install-desktop.sh puts one there): remove it to add Lumen to the PATH", "{0} es otro archivo (scripts/install-desktop.sh coloca uno ahí): quítalo para añadir Lumen al PATH"),
+    ("{0} is another file: choose another folder or remove it", "{0} es otro archivo: elige otra carpeta o quítalo"),
     ("Lumen cannot start from a path holding \" ` $ \\ or %: {0}", "Lumen no puede iniciarse desde una ruta que contenga \" ` $ \\ o %: {0}"),
     ("A folder with a ; in its name cannot be on the PATH: {0}", "Una carpeta con un ; en su nombre no puede estar en el PATH: {0}"),
     ("Cannot move {0} out of its folder: {1}. Delete it after closing Lumen.", "No se puede sacar {0} de su carpeta: {1}. Elimínalo después de cerrar Lumen."),

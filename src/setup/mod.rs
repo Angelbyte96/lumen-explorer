@@ -139,6 +139,7 @@ pub trait System {
 /// Writes `bytes` to `path` through a temporary file beside it, so a failed
 /// write leaves the old file. A symlink at `path` is followed: its target is
 /// replaced, not the link (~/.config/mimeapps.list is often one into dotfiles).
+/// The replaced file's mode stays (a private 0600 file stays private).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if let Some(dir) = path.parent() {
@@ -147,10 +148,35 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut tmp = path.clone().into_os_string();
     tmp.push(".lumen-tmp");
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, &path).inspect_err(|_| {
+    let written = std::fs::write(&tmp, bytes).and_then(|()| keep_mode(&path, &tmp)).and_then(|()| std::fs::rename(&tmp, &path));
+    written.inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// Gives `tmp` the mode of the file at `path`, when there is one.
+#[cfg(unix)]
+fn keep_mode(path: &Path, tmp: &Path) -> std::io::Result<()> {
+    match std::fs::metadata(path) {
+        Ok(old) => std::fs::set_permissions(tmp, old.permissions()),
+        Err(_) => Ok(()),
+    }
+}
+
+/// Windows has no mode to keep: only the read-only flag, which would stop the rename.
+#[cfg(not(unix))]
+fn keep_mode(_path: &Path, _tmp: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Whether Install may copy Lumen into `dir`: a `name` already there must be
+/// Lumen's own install (the record's folder) or the running file itself.
+pub fn check_free(exe: &Path, dir: &Path, name: &str, record: Option<&Record>) -> Result<(), String> {
+    let to = dir.join(name);
+    if to.symlink_metadata().is_err() || same_file(exe, &to) || record.is_some_and(|record| same_file(&record.dir, dir)) {
+        return Ok(());
+    }
+    Err(tr!("{0} is another file: choose another folder or remove it", to.display()))
 }
 
 /// Removes `path`; a file that is already gone is no error.
@@ -238,6 +264,42 @@ mod tests {
         write_atomic(&dir.join("link"), b"new").unwrap();
         assert!(dir.join("link").symlink_metadata().unwrap().file_type().is_symlink(), "still a link");
         assert_eq!(std::fs::read_to_string(dir.join("real")).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writing_keeps_the_mode_of_the_file_it_replaces() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = fresh_fixture("setup-write-mode");
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        std::fs::write(dir.join("private"), "old").unwrap();
+        std::fs::set_permissions(dir.join("private"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic(&dir.join("private"), b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("private")).unwrap(), "new");
+        assert_eq!(mode(&dir.join("private")), 0o600, "the old file's mode stays");
+        // A new file gets the mode any new file gets.
+        std::fs::write(dir.join("plain"), "x").unwrap();
+        write_atomic(&dir.join("fresh"), b"new").unwrap();
+        assert_eq!(mode(&dir.join("fresh")), mode(&dir.join("plain")));
+    }
+
+    #[test]
+    fn install_may_replace_only_lumens_own_copy() {
+        let dir = fresh_fixture("setup-check-free");
+        std::fs::create_dir_all(dir.join("to")).unwrap();
+        let (exe, to) = (dir.join("download"), dir.join("to"));
+        std::fs::write(&exe, "v2").unwrap();
+        assert_eq!(check_free(&exe, &to, "lumen", None), Ok(()), "an empty folder");
+        std::fs::write(to.join("lumen"), "someone else's").unwrap();
+        assert_eq!(
+            check_free(&exe, &to, "lumen", None),
+            Err(format!("{} is another file: choose another folder or remove it", to.join("lumen").display()))
+        );
+        let elsewhere = Record { dir: dir.join("other"), version: "0.7.0".into() };
+        assert!(check_free(&exe, &to, "lumen", Some(&elsewhere)).is_err(), "a record of another folder");
+        let here = Record { dir: to.clone(), version: "0.7.0".into() };
+        assert_eq!(check_free(&exe, &to, "lumen", Some(&here)), Ok(()), "the recorded install upgrades");
+        assert_eq!(check_free(&to.join("lumen"), &to, "lumen", None), Ok(()), "the running file itself");
     }
 
     #[test]

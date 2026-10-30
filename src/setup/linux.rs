@@ -56,9 +56,10 @@ impl Linux {
         })
     }
 
-    /// apt's copy: a binary under /usr.
+    /// apt's copy: a binary under /usr. Not /usr/local: apt never puts
+    /// anything there, it is the admin's own.
     fn packaged(&self) -> bool {
-        self.exe.starts_with("/usr/")
+        self.exe.starts_with("/usr/") && !self.exe.starts_with("/usr/local/")
     }
 
     fn record(&self) -> Option<Record> {
@@ -284,6 +285,7 @@ impl System for Linux {
             return Err(tr!("Choose a full path, not {0}", dir.display()));
         }
         let record_file = self.record_file.as_deref().ok_or(tr!("Lumen has no settings folder to remember the install in"))?;
+        super::check_free(&self.exe, dir, BINARY, self.record().as_ref())?;
         let binary = super::copy_binary(&self.exe, dir, BINARY).map_err(|err| tr!("Cannot copy Lumen to {0}: {1}", dir.display(), err))?;
         set_executable(&binary)?;
         write_file(&self.menu_entry(), &desktop_entry(&binary)?)?;
@@ -663,6 +665,39 @@ mod tests {
         assert!(!home.join(".local/share/applications/lumen.desktop").exists(), "apt's own entry is used");
         linux.apply(Switches { path: false, ..Switches::default() }).unwrap();
         assert!(linux.read().path, "Add to PATH stays on");
+    }
+
+    #[test]
+    fn a_lumen_in_usr_local_is_not_apts() {
+        let (mut linux, home) = system("setup-linux-usr-local", "Downloads/lumen");
+        // apt's /usr/bin stays apt's.
+        linux.exe = PathBuf::from("/usr/bin/lumen");
+        assert_eq!(linux.origin(), Origin::Package { exe: PathBuf::from("/usr/bin/lumen") });
+        linux.exe = PathBuf::from("/usr/local/bin/lumen");
+        assert_eq!(linux.origin(), Origin::NotInstalled { default_dir: home.join(".local/share/lumen") });
+        assert!(!linux.read().path, "not installed: no switch is on");
+        assert_eq!(linux.uninstall(), Err("Lumen is not installed".into()));
+    }
+
+    #[test]
+    fn install_leaves_another_lumen_in_the_folder_alone() {
+        let (linux, home) = system("setup-linux-install-other", "Downloads/lumen");
+        let dir = home.join("bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lumen"), "another program").unwrap();
+        let err = linux.install(&dir, Switches::INSTALL).unwrap_err();
+        assert_eq!(err, format!("{} is another file: choose another folder or remove it", dir.join("lumen").display()));
+        assert_eq!(std::fs::read_to_string(dir.join("lumen")).unwrap(), "another program");
+        assert!(!home.join(".config").exists() && !home.join(".local").exists(), "nothing recorded or switched on");
+    }
+
+    #[test]
+    fn install_again_over_the_recorded_copy_upgrades_it() {
+        let (linux, home) = installed("setup-linux-install-upgrade");
+        let dir = home.join(".local/share/lumen");
+        std::fs::write(dir.join("lumen"), "older").unwrap();
+        linux.install(&dir, Switches::default()).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("lumen")).unwrap(), "#!/bin/sh\n");
     }
 
     #[test]
