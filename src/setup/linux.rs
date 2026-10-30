@@ -2,7 +2,9 @@
 //!   `~/.local/share/lumen/lumen`                    the installed binary (by default)
 //!   `~/.local/share/applications/lumen.desktop`     its app menu entry, and the icon
 //!   desktop shortcut   `lumen.desktop` in the desktop folder, marked trusted
-//!   set as default     `inode/directory=lumen.desktop` in `~/.config/mimeapps.list`
+//!   set as default     `inode/directory=lumen.desktop` in `~/.config/mimeapps.list`,
+//!                      and `~/.local/share/dbus-1/services/org.freedesktop.FileManager1.service`
+//!                      ("show in folder" from browsers and editors, see file_manager1.rs)
 //!   right-click        the Nautilus script "Open in Lumen"
 //!   add to PATH        the link `~/.local/bin/lumen`
 //! From the `.deb` (/usr/bin/lumen) apt owns the binary and its menu entry:
@@ -22,6 +24,8 @@ const ENTRY: &str = "lumen.desktop";
 const SCRIPT: &str = "Open in Lumen";
 /// The key of a folder's default app in mimeapps.list.
 const FOLDER_MIME: &str = "inode/directory";
+/// The first line of the D-Bus service file Setup writes: only that one is removed.
+const SERVICE_MARK: &str = "# Added by Lumen Setup: shows files in their folder with Lumen.";
 
 pub struct Linux {
     /// The running binary.
@@ -101,6 +105,18 @@ impl Linux {
         self.config_home.join("mimeapps.list")
     }
 
+    /// The user's own D-Bus service file for FileManager1: it wins over the
+    /// system's (Nautilus, Dolphin).
+    fn dbus_service(&self) -> PathBuf {
+        self.data_home.join("dbus-1/services").join(format!("{}.service", crate::file_manager1::NAME))
+    }
+
+    /// Whether the service file starts `target`.
+    fn dbus_service_is(&self, target: &Path) -> bool {
+        let text = std::fs::read_to_string(self.dbus_service()).unwrap_or_default();
+        dbus_service_file(target).is_ok_and(|want| text == want)
+    }
+
     fn path_link(&self) -> PathBuf {
         self.home.join(".local/bin").join(BINARY)
     }
@@ -145,7 +161,12 @@ impl Linux {
         Ok(())
     }
 
-    fn set_default(&self, on: bool) -> Result<(), String> {
+    fn set_default(&self, on: bool, target: &Path) -> Result<(), String> {
+        self.set_folder_default(on)?;
+        self.set_dbus_service(on, target)
+    }
+
+    fn set_folder_default(&self, on: bool) -> Result<(), String> {
         let file = self.mimeapps();
         let text = std::fs::read_to_string(&file).unwrap_or_default();
         let ours = folder_default(&text).as_deref() == Some(ENTRY);
@@ -156,6 +177,31 @@ impl Linux {
             _ => return Ok(()),
         };
         super::write_atomic(&file, changed.as_bytes()).map_err(|err| tr!("Cannot write {0}: {1}", file.display(), err))
+    }
+
+    /// On: Lumen's service file, over any other in the user's folder. Off:
+    /// removed only if Setup wrote it, so the system's file manager comes back.
+    fn set_dbus_service(&self, on: bool, target: &Path) -> Result<(), String> {
+        let file = self.dbus_service();
+        if on {
+            write_file(&file, &dbus_service_file(target)?)?;
+        } else if std::fs::read_to_string(&file).is_ok_and(|text| text.starts_with(SERVICE_MARK)) {
+            super::remove_file(&file).map_err(|err| tr!("Cannot remove {0}: {1}", file.display(), err))?;
+        } else {
+            return Ok(());
+        }
+        // dbus-daemon notices on its own; dbus-broker only when told.
+        self.run(
+            "dbus-send",
+            &[
+                "--session".as_ref(),
+                "--type=method_call".as_ref(),
+                "--dest=org.freedesktop.DBus".as_ref(),
+                "/org/freedesktop/DBus".as_ref(),
+                "org.freedesktop.DBus.ReloadConfig".as_ref(),
+            ],
+        );
+        Ok(())
     }
 
     fn set_right_click(&self, on: bool, target: &Path) -> Result<(), String> {
@@ -197,7 +243,8 @@ impl System for Linux {
         let mimeapps = std::fs::read_to_string(self.mimeapps()).unwrap_or_default();
         Switches {
             desktop_shortcut: self.desktop_shortcut().is_some_and(|file| file.is_file()),
-            default: folder_default(&mimeapps).as_deref() == Some(ENTRY),
+            // Both halves: folders open with Lumen and files are shown in it.
+            default: folder_default(&mimeapps).as_deref() == Some(ENTRY) && self.dbus_service_is(&target),
             right_click: self.script().is_file(),
             // /usr/bin is always on the PATH.
             path: self.packaged() || self.link_is_ours(&target),
@@ -216,8 +263,10 @@ impl System for Linux {
         if want.desktop_shortcut != now.desktop_shortcut {
             step(self.set_desktop_shortcut(want.desktop_shortcut, &target));
         }
-        if want.default != now.default {
-            step(self.set_default(want.default));
+        // Off always runs: half set (folders but no service file, as before
+        // the service file existed) reads off and still has a half to remove.
+        if !(want.default && now.default) {
+            step(self.set_default(want.default, &target));
         }
         if want.right_click != now.right_click {
             step(self.set_right_click(want.right_click, &target));
@@ -270,9 +319,7 @@ impl System for Linux {
 /// assets/lumen.desktop starting `binary` by its full path: ~/.local/bin is
 /// not always on the PATH GNOME starts apps with.
 fn desktop_entry(binary: &Path) -> Result<String, String> {
-    let shown = binary.to_str().filter(|p| !p.contains(['"', '`', '$', '\\', '%', '\n', '\r']));
-    // Inside a quoted Exec argument these would need escaping; refuse them instead.
-    let shown = shown.ok_or_else(|| tr!("Lumen cannot start from a path holding \" ` $ \\ or %: {0}", binary.display()))?;
+    let shown = exec_path(binary)?;
     Ok(include_str!("../../assets/lumen.desktop")
         .lines()
         .map(|line| match line.strip_prefix("Exec=lumen ") {
@@ -280,6 +327,20 @@ fn desktop_entry(binary: &Path) -> Result<String, String> {
             None => format!("{line}\n"),
         })
         .collect())
+}
+
+/// `binary` as it goes inside a quoted Exec argument. Characters that would
+/// need escaping there are refused instead.
+fn exec_path(binary: &Path) -> Result<&str, String> {
+    let shown = binary.to_str().filter(|p| !p.contains(['"', '`', '$', '\\', '%', '\n', '\r']));
+    shown.ok_or_else(|| tr!("Lumen cannot start from a path holding \" ` $ \\ or %: {0}", binary.display()))
+}
+
+/// The D-Bus service file that starts `binary` to serve FileManager1.
+fn dbus_service_file(binary: &Path) -> Result<String, String> {
+    let shown = exec_path(binary)?;
+    let (name, flag) = (crate::file_manager1::NAME, crate::file_manager1::FLAG);
+    Ok(format!("{SERVICE_MARK}\n[D-BUS Service]\nName={name}\nExec=\"{shown}\" {flag}\n"))
 }
 
 /// Nautilus runs a script with the selected entries, or none, in the shown
@@ -433,6 +494,49 @@ mod tests {
         let shortcut = std::fs::read_to_string(home.join("Desktop/lumen.desktop")).unwrap();
         assert!(shortcut.contains(&format!("Exec=\"{}\"", binary.display())));
         assert_eq!(std::fs::read_to_string(home.join(".config/mimeapps.list")).unwrap(), "[Default Applications]\ninode/directory=lumen.desktop;\n");
+    }
+
+    const SERVICE: &str = ".local/share/dbus-1/services/org.freedesktop.FileManager1.service";
+
+    #[test]
+    fn default_also_makes_lumen_the_file_manager_that_shows_items_in_their_folder() {
+        let (linux, home) = system("setup-linux-default-dbus", "Downloads/lumen");
+        linux.install(&home.join("Apps/Lumen"), Switches { default: true, ..Switches::default() }).unwrap();
+        let service = std::fs::read_to_string(home.join(SERVICE)).unwrap();
+        let binary = home.join("Apps/Lumen/lumen");
+        assert_eq!(
+            service,
+            format!("# Added by Lumen Setup: shows files in their folder with Lumen.\n[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec=\"{}\" --file-manager1\n", binary.display())
+        );
+        assert!(linux.read().default);
+        linux.apply(Switches::default()).unwrap();
+        assert!(!home.join(SERVICE).exists(), "off removes it");
+        assert!(!linux.read().default);
+    }
+
+    #[test]
+    fn an_install_from_before_the_service_file_reads_default_off_until_set_again() {
+        let (linux, home) = installed("setup-linux-default-upgrade");
+        std::fs::create_dir_all(home.join(".config")).unwrap();
+        std::fs::write(home.join(".config/mimeapps.list"), "[Default Applications]\ninode/directory=lumen.desktop;\n").unwrap();
+        assert!(!linux.read().default, "folders open with Lumen, but showing a file in its folder does not");
+        linux.apply(Switches { default: true, ..Switches::default() }).unwrap();
+        assert!(linux.read().default);
+        assert!(home.join(SERVICE).is_file());
+        assert_eq!(std::fs::read_to_string(home.join(".config/mimeapps.list")).unwrap(), "[Default Applications]\ninode/directory=lumen.desktop;\n");
+    }
+
+    #[test]
+    fn another_file_managers_service_file_is_left_alone() {
+        let (linux, home) = installed("setup-linux-default-dbus-other");
+        let other = "[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec=/usr/bin/nemo\n";
+        std::fs::create_dir_all(home.join(SERVICE).parent().unwrap()).unwrap();
+        std::fs::write(home.join(SERVICE), other).unwrap();
+        assert!(!linux.read().default);
+        linux.apply(Switches::default()).unwrap();
+        assert_eq!(std::fs::read_to_string(home.join(SERVICE)).unwrap(), other, "default off keeps it");
+        linux.apply(Switches { default: true, ..Switches::default() }).unwrap();
+        assert!(std::fs::read_to_string(home.join(SERVICE)).unwrap().contains("--file-manager1"), "default on replaces it");
     }
 
     #[test]
@@ -631,7 +735,7 @@ mod tests {
         let before = "[Default Applications]\ninode/directory=lumen.desktop;org.gnome.Nautilus.desktop;\n";
         std::fs::create_dir_all(home.join(".config")).unwrap();
         std::fs::write(home.join(".config/mimeapps.list"), before).unwrap();
-        assert!(linux.read().default);
+        assert!(!linux.read().default, "half set: no service file");
         linux.apply(Switches::default()).unwrap();
         assert_eq!(std::fs::read_to_string(home.join(".config/mimeapps.list")).unwrap(), "[Default Applications]\ninode/directory=org.gnome.Nautilus.desktop;\n");
     }

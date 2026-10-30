@@ -8,6 +8,8 @@ mod apps;
 mod behavior;
 mod config;
 mod drag;
+#[cfg(not(windows))]
+mod file_manager1;
 mod folder_views;
 mod format;
 #[cfg(not(windows))]
@@ -36,7 +38,18 @@ fn main() -> eframe::Result {
     // LUMEN_LOG=1 prints how long every folder listing takes to stderr.
     let log = std::env::var_os("LUMEN_LOG").is_some_and(|v| v != "0");
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    // Started by D-Bus to show files in their folder: no window of its own.
+    #[cfg(target_os = "linux")]
+    if args.iter().any(|a| a == file_manager1::FLAG) {
+        let served = std::env::current_exe().map_err(|err| err.to_string()).and_then(|exe| file_manager1::serve(&exe));
+        if let Err(err) = served {
+            eprintln!("[lumen] {err}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let start = app::start(&args);
+    let select = app::selected_at_start(&args);
     // `--setup` (Windows' Apps & features "Uninstall") opens Lumen Setup.
     let setup = app::wants_setup(&args);
     let home = fs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
@@ -62,6 +75,9 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let mut app = app::LumenApp::start(&cc.egui_ctx, start, &home, log, settings);
+            if let Some(name) = select {
+                app.select_at_start(name);
+            }
             if setup {
                 app.open_setup();
             }
