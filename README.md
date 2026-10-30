@@ -36,13 +36,22 @@ and folder and four switches; Modify applies them:
 | Switch | Windows | Linux |
 |---|---|---|
 | Desktop shortcut | `Lumen.lnk` on the desktop | `lumen.desktop` in the desktop folder, marked trusted |
-| Set as default | folders, drives and Win+E open in Lumen (HKCU) | `inode/directory=lumen.desktop` in `~/.config/mimeapps.list` |
+| Set as default | folders, drives and Win+E open in Lumen (HKCU) | `inode/directory=lumen.desktop` in `~/.config/mimeapps.list`, and the D-Bus service `~/.local/share/dbus-1/services/org.freedesktop.FileManager1.service` (see below) |
 | Right-click entries | "Open in Lumen" on folders, drives and a folder's background | the Nautilus script "Open in Lumen" (right click ▸ Scripts) |
 | Add to PATH | the install folder in your user `Path` | the link `~/.local/bin/lumen` |
 
 Uninstall removes Lumen, its menu entry and every switch; your settings
 (bookmarks, tabs) stay. Turning Set as default off gives folders back to the
 desktop's own file manager.
+
+On Linux, "Show in folder" in browsers and editors (a download's folder icon
+in Firefox, Zen or Chrome) does not use `inode/directory`: it calls
+`org.freedesktop.FileManager1` on the session bus. Set as default installs a
+D-Bus service file that starts `lumen --file-manager1` for it; that opens the
+folder in a Lumen window with the file selected (`lumen <folder>
+--select=<name>`) and leaves after 10 idle seconds. A file manager already
+running keeps the name until it quits: if Dolphin's daemon holds it, run
+`systemctl --user stop plasma-dolphin.service` once, or log out and in.
 
 On Windows, until the release `.exe` is code-signed, Setup does not install or
 change anything itself: Microsoft Defender flags an unsigned program that
