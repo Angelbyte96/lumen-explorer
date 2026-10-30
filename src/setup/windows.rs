@@ -54,6 +54,10 @@ const SCRIPT_HELPERS: &str = r#"    $ErrorActionPreference = 'Stop'
     function Set-Text([string]$key, [string]$name, [string]$value) { $k = $hkcu.CreateSubKey($key); $k.SetValue($name, $value, 'String'); $k.Close() }
     function Set-Dword([string]$key, [string]$name, [int]$value) { $k = $hkcu.CreateSubKey($key); $k.SetValue($name, $value, 'DWord'); $k.Close() }
     function Remove-Key([string]$key) { $hkcu.DeleteSubKeyTree($key, $false) }
+    function Remove-KeyIfOurs([string]$key, [string]$command, [string]$value) {
+        $k = $hkcu.OpenSubKey($command)
+        if ($k) { $v = $k.GetValue(''); $k.Close(); if ($v -ceq $value) { Remove-Key $key } }
+    }
     function Remove-Default([string]$key, [string]$verb) {
         $k = $hkcu.OpenSubKey($key, $true)
         if ($k) { if ($k.GetValue('') -eq $verb) { $k.DeleteValue('') }; $k.Close() }
@@ -89,7 +93,9 @@ const SCRIPT_HELPERS: &str = r#"    $ErrorActionPreference = 'Stop'
             foreach ($e in $entries) { if ((& $plain $e) -ne (& $plain $dir)) { $kept.Add($e) } }
             $entries = $kept
         } else { $k.Close(); return }
-        $k.SetValue('Path', ($entries -join ';'), $kind)
+        $joined = $entries -join ';'
+        # Lumen's was the last entry: no empty value stays behind.
+        if ($joined -eq '' -and -not $on) { $k.DeleteValue('Path') } else { $k.SetValue('Path', $joined, $kind) }
         $k.Close()
     }
 "#;
@@ -158,6 +164,24 @@ impl Windows {
         format!(r"{}\Classes\{rest}", self.software)
     }
 
+    /// The command Win+E runs: Lumen's while it is the default, or another app's.
+    fn win_e_command(&self) -> String {
+        self.classes(&format!(r"CLSID\{EXPLORER_CLSID}\shell\opennewwindow\command"))
+    }
+
+    /// Whether Win+E starts `target`.
+    fn win_e_is(&self, target: &Path) -> bool {
+        let Ok(exe) = quotable(target) else { return false };
+        matches!(read_value(&self.win_e_command(), ""), Ok(Some((command, _))) if command == format!("\"{exe}\""))
+    }
+
+    /// Whether Set as default left keys of Lumen's behind: another app took
+    /// the folders' default, so the switch reads off, but Lumen's verbs and
+    /// Win+E key are still there.
+    fn default_leftovers(&self, target: &Path) -> bool {
+        ["Directory", "Drive"].iter().any(|kind| key_exists(&self.classes(&format!(r"{kind}\shell\{DEFAULT_VERB}")))) || self.win_e_is(target)
+    }
+
     fn uninstall_key(&self) -> String {
         format!(r"{}\Microsoft\Windows\CurrentVersion\Uninstall\Lumen", self.software)
     }
@@ -207,7 +231,10 @@ impl Windows {
                 }
                 errors.extend(delete_tree(&format!(r"{shell}\{DEFAULT_VERB}")).err());
             }
-            errors.extend(delete_tree(&self.classes(&format!(r"CLSID\{EXPLORER_CLSID}"))).err());
+            // Only Lumen's Win+E: another app may have taken it since.
+            if self.win_e_is(target) {
+                errors.extend(delete_tree(&self.classes(&format!(r"CLSID\{EXPLORER_CLSID}"))).err());
+            }
             return if errors.is_empty() { Ok(()) } else { Err(errors.join("\n")) };
         }
         let exe = quotable(target)?;
@@ -219,7 +246,7 @@ impl Windows {
             write_value(&format!(r"{shell}\{DEFAULT_VERB}\command"), "", REG_SZ, &format!("\"{exe}\" \"%1\""))?;
         }
         // Win+E opens a new window through this class's verb.
-        let verb = self.classes(&format!(r"CLSID\{EXPLORER_CLSID}\shell\opennewwindow\command"));
+        let verb = self.win_e_command();
         write_value(&verb, "", REG_SZ, &format!("\"{exe}\""))?;
         write_value(&verb, "DelegateExecute", REG_SZ, "")
     }
@@ -255,7 +282,12 @@ impl Windows {
         if after == before {
             return Ok(());
         }
-        write_value(&self.environment, "Path", kind, &after)?;
+        if after.is_empty() && !on {
+            // Lumen's was the last entry: no empty value stays behind.
+            delete_value(&self.environment, "Path")?;
+        } else {
+            write_value(&self.environment, "Path", kind, &after)?;
+        }
         self.refresh_environment();
         Ok(())
     }
@@ -290,6 +322,7 @@ impl System for Windows {
         }
         let record_file = self.record_file.as_deref().ok_or(tr!("Lumen has no settings folder to remember the install in"))?;
         let shown = quotable(&dir.join(BINARY))?;
+        super::check_free(&self.exe, dir, BINARY, self.record().as_ref())?;
         let binary = dir.join(BINARY);
         let kb = std::fs::metadata(&self.exe).map(|meta| meta.len().div_ceil(1024)).unwrap_or(0);
         let mut body = vec!["# Copy Lumen, add it to the Start menu and to Settings > Apps".to_owned()];
@@ -339,7 +372,7 @@ impl System for Windows {
             step(self.set_desktop_shortcut(want.desktop_shortcut, &target));
         }
         let mut associations = false;
-        if want.default != now.default {
+        if want.default != now.default || (!want.default && self.default_leftovers(&target)) {
             step(self.set_default(want.default, &target));
             associations = true;
         }
@@ -363,6 +396,7 @@ impl System for Windows {
         let record_file = self.record_file.as_deref().ok_or(tr!("Lumen has no settings folder to remember the install in"))?;
         // Before anything is copied: the paths go quoted into the registry.
         let shown = quotable(&dir.join(BINARY))?;
+        super::check_free(&self.exe, dir, BINARY, self.record().as_ref())?;
         let binary = super::copy_binary(&self.exe, dir, BINARY).map_err(|err| tr!("Cannot copy Lumen to {0}: {1}", dir.display(), err))?;
         write_shortcut(&self.start_menu_link(), &binary)?;
         self.register_uninstall(dir, &shown, &binary)?;
@@ -425,7 +459,7 @@ impl Windows {
                 (Some(link), false) => lines.push(vec![format!("Remove-File {}", ps(&text(&link)?))]),
             }
         }
-        if want.default != now.default {
+        if want.default != now.default || (!want.default && self.default_leftovers(&dir.join(BINARY))) {
             step("Set as default", want.default);
             let mut part = Vec::new();
             for kind in ["Directory", "Drive"] {
@@ -446,7 +480,9 @@ impl Windows {
                 part.push(format!("Set-Text {verb} '' {}", ps(&format!("\"{target}\""))));
                 part.push(format!("Set-Text {verb} 'DelegateExecute' ''"));
             } else {
-                part.push(format!("Remove-Key {}", ps(&self.classes(&format!(r"CLSID\{EXPLORER_CLSID}")))));
+                // Only Lumen's Win+E, as Modify.
+                let clsid = ps(&self.classes(&format!(r"CLSID\{EXPLORER_CLSID}")));
+                part.push(format!("Remove-KeyIfOurs {clsid} {} {}", ps(&self.win_e_command()), ps(&format!("\"{target}\""))));
             }
             lines.push(part);
         }
@@ -782,7 +818,18 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = delete_tree(&self.windows.software);
+            // The last fixture to go takes the parent with it.
+            delete_if_empty(TEST_ROOT);
         }
+    }
+
+    /// The key every fixture's own subkey is under.
+    const TEST_ROOT: &str = r"Software\LumenTest";
+
+    /// Removes `HKCU\<path>` unless it has keys under it.
+    fn delete_if_empty(path: &str) {
+        // SAFETY: the path is nul-terminated. Windows refuses a key that has subkeys.
+        unsafe { windows_sys::Win32::System::Registry::RegDeleteKeyW(HKEY_CURRENT_USER, wide(path).as_ptr()) };
     }
 
     /// A system started from `exe` in the fixture.
@@ -792,7 +839,7 @@ mod tests {
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
         std::fs::write(&exe, "MZ").unwrap();
         std::fs::create_dir_all(home.join(r"AppData\Local\Temp")).unwrap();
-        let software = format!(r"Software\LumenTest\{name}");
+        let software = format!(r"{TEST_ROOT}\{name}");
         delete_tree(&software).unwrap();
         let windows = Windows {
             exe,
@@ -1089,6 +1136,103 @@ mod tests {
         assert_eq!(path_with(r"C:\A;c:\l\;C:\B", r"C:\L", true), r"C:\A;c:\l\;C:\B", "already there");
         assert_eq!(path_with(r"C:\A;c:\l\;;C:\B", r"C:\L", false), r"C:\A;;C:\B");
         assert_eq!(path_with(r"C:\A;;C:\B", r"C:\L", false), r"C:\A;;C:\B", "not there");
+    }
+
+    #[test]
+    fn install_leaves_another_lumen_exe_in_the_folder_alone() {
+        let win = system("setup-windows-install-other", r"Downloads\lumen.exe");
+        let dir = win.home.join("bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lumen.exe"), "another program").unwrap();
+        let refused = format!("{} is another file: choose another folder or remove it", dir.join("lumen.exe").display());
+        assert_eq!(win.install(&dir, all()), Err(refused.clone()));
+        assert_eq!(win.install_script(&dir, all()), Err(refused));
+        assert_eq!(std::fs::read_to_string(dir.join("lumen.exe")).unwrap(), "another program");
+        assert!(!win.start_menu.join("Lumen.lnk").exists());
+        assert!(!exists(&win, r"Microsoft\Windows\CurrentVersion\Uninstall\Lumen"));
+        assert!(!win.home.join(r"AppData\Roaming\lumen\install").exists(), "nothing recorded");
+        assert_eq!(win.read(), Switches::default());
+    }
+
+    #[test]
+    fn install_again_over_the_recorded_copy_upgrades_it() {
+        let win = installed("setup-windows-install-upgrade");
+        std::fs::write(win.default_dir.join("lumen.exe"), "older").unwrap();
+        win.install(&win.default_dir, Switches::default()).unwrap();
+        assert_eq!(std::fs::read(win.default_dir.join("lumen.exe")).unwrap(), b"MZ");
+        assert!(win.install_script(&win.default_dir, Switches::default()).is_ok());
+    }
+
+    const WIN_E: &str = r"CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow\command";
+
+    #[test]
+    fn default_off_leaves_a_win_e_key_another_app_took() {
+        let win = installed("setup-windows-win-e-other");
+        win.apply(Switches { default: true, ..Switches::default() }).unwrap();
+        write_value(&win.classes(WIN_E), "", REG_SZ, r#""C:\FileMan\fileman.exe""#).unwrap();
+        win.apply(Switches::default()).unwrap();
+        assert_eq!(class_value(&win, WIN_E, "").as_deref(), Some(r#""C:\FileMan\fileman.exe""#), "Modify keeps it");
+        assert!(!class_exists(&win, r"Directory\shell\lumen"));
+        // The script too.
+        win.apply(Switches { default: true, ..Switches::default() }).unwrap();
+        write_value(&win.classes(WIN_E), "", REG_SZ, r#""C:\FileMan\fileman.exe""#).unwrap();
+        run_setup_script("setup-windows-win-e-other-run", &win.apply_script(Switches::default()).unwrap());
+        assert_eq!(class_value(&win, WIN_E, "").as_deref(), Some(r#""C:\FileMan\fileman.exe""#), "the script keeps it");
+        assert!(!class_exists(&win, r"Directory\shell\lumen"));
+    }
+
+    #[test]
+    fn another_app_taking_the_folders_default_leaves_no_lumen_keys_behind() {
+        let win = installed("setup-windows-default-taken");
+        let lumens = [r"Directory\shell\lumen", r"Drive\shell\lumen", r"CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}"];
+        let take = |win: &Windows| {
+            win.apply(Switches { default: true, ..Switches::default() }).unwrap();
+            write_value(&win.classes(r"Directory\shell"), "", REG_SZ, "FileMan").unwrap();
+            write_value(&win.classes(r"Drive\shell"), "", REG_SZ, "FileMan").unwrap();
+            assert!(!win.read().default, "folders open in FileMan");
+        };
+        take(&win);
+        let script = win.apply_script(Switches::default()).unwrap();
+        assert!(script.contains("# Set as default: off"), "{script}");
+        run_setup_script("setup-windows-default-taken-run", &script);
+        for key in lumens {
+            assert!(!class_exists(&win, key), "the script left {key}");
+        }
+        take(&win);
+        win.uninstall().unwrap();
+        for key in lumens {
+            assert!(!class_exists(&win, key), "uninstall left {key}");
+        }
+        assert_eq!(class_value(&win, r"Directory\shell", "").as_deref(), Some("FileMan"));
+        assert_eq!(class_value(&win, r"Drive\shell", "").as_deref(), Some("FileMan"));
+    }
+
+    #[test]
+    fn removing_lumens_only_path_entry_removes_the_value() {
+        let win = installed("setup-windows-path-only");
+        let dir = win.default_dir.to_str().unwrap().to_owned();
+        win.apply(Switches { path: true, ..Switches::default() }).unwrap();
+        assert_eq!(value(&win, "Environment", "Path"), Some(dir.clone()));
+        win.apply(Switches::default()).unwrap();
+        assert_eq!(value(&win, "Environment", "Path"), None, "Modify");
+        win.apply(Switches { path: true, ..Switches::default() }).unwrap();
+        run_setup_script("setup-windows-path-only-run", &win.apply_script(Switches::default()).unwrap());
+        assert_eq!(value(&win, "Environment", "Path"), None, "the script");
+        write_value(&win.environment, "Path", REG_EXPAND_SZ, &format!("{dir};")).unwrap();
+        win.uninstall().unwrap();
+        assert_eq!(value(&win, "Environment", "Path"), None, "Uninstall");
+    }
+
+    #[test]
+    fn the_tests_parent_key_goes_only_when_empty() {
+        let parent = format!(r"{TEST_ROOT}\parent-probe");
+        write_value(&format!(r"{parent}\child"), "x", REG_SZ, "y").unwrap();
+        delete_if_empty(&parent);
+        assert!(key_exists(&format!(r"{parent}\child")), "a key under it keeps it");
+        delete_tree(&format!(r"{parent}\child")).unwrap();
+        delete_if_empty(&parent);
+        assert!(!key_exists(&parent));
+        delete_if_empty(TEST_ROOT);
     }
 
     /// The installed copy of `fixture`, as if it were the one running.
