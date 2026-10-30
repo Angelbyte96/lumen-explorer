@@ -6,6 +6,7 @@ pub mod dnd;
 pub mod drives_view;
 pub mod file_icons;
 pub mod file_list;
+pub mod folder_menu;
 pub mod grid;
 pub mod icon_grid;
 pub mod icons;

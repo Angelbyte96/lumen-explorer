@@ -3199,6 +3199,30 @@ impl LumenApp {
             ToolbarEvent::SaveView(None) => self.folder_views.remove(&self.tab.view.current),
             ToolbarEvent::SetDefaultView => self.default_look = self.shown_look(),
             ToolbarEvent::EmptyTrash => self.ask_empty_trash(),
+            ToolbarEvent::Folder(row) => self.run_folder_menu(ctx, row),
+        }
+    }
+
+    /// A row of the folder menu: what its shortcut does.
+    fn run_folder_menu(&mut self, ctx: &egui::Context, row: ui::toolbar::FolderMenuEvent) {
+        use ui::toolbar::FolderMenuEvent;
+        match row {
+            FolderMenuEvent::ToggleSubfolders => self.handle_action(ctx, Action::ToggleFlat),
+            // Space's own toggle, whatever the filter holds: the row names the panel.
+            FolderMenuEvent::TogglePreview => self.preview_open = !self.preview_open,
+            FolderMenuEvent::NewTab => self.handle_action(ctx, Action::NewTab),
+            FolderMenuEvent::CloseTab => self.handle_action(ctx, Action::CloseTab),
+            FolderMenuEvent::ToggleHidden => self.handle_action(ctx, Action::ToggleHidden),
+        }
+    }
+
+    /// What the folder menu's rows show for the tab on screen.
+    fn folder_state(&self) -> ui::toolbar::FolderState {
+        ui::toolbar::FolderState {
+            subfolders: (!self.on_marker()).then(|| self.tab.view.is_flat()),
+            preview: self.preview_open,
+            hidden: self.tab.view.show_hidden,
+            can_close_tab: self.tabs.len() > 1,
         }
     }
 
@@ -3975,8 +3999,8 @@ impl eframe::App for LumenApp {
             }
         } else if self.overlay_open() {
             // The path box, the Options window, Search Tabs and the menu read their own keys when drawn.
-        } else if ui::toolbar::close_lock_menu_on_escape(&ctx) || ui::app_menu::close_on_escape(&ctx) {
-            // That Escape closed the lock's menu or the app menu and did nothing else.
+        } else if ui::toolbar::close_lock_menu_on_escape(&ctx) || ui::app_menu::close_on_escape(&ctx) || ui::folder_menu::close_on_escape(&ctx) {
+            // That Escape closed the lock's menu, the app menu or the folder menu and did nothing else.
         } else {
             for action in input::read_actions(&ctx) {
                 self.handle_action(&ctx, action);
@@ -4033,6 +4057,7 @@ impl eframe::App for LumenApp {
                 bookmarked: self.bookmarks.contains(&current),
                 saved_view: self.saved_view(),
                 empty_trash: self.empty_trash_button(),
+                folder: self.folder_state(),
             };
             if let Some(event) = ui::toolbar::show(ui, &nav) {
                 self.handle_toolbar(&ctx, event);
@@ -4660,6 +4685,35 @@ mod tests {
         app.tab.shown_id = app.tab.lister.latest_id();
         app.tab.look_for = Some((dir.clone(), Look::default()));
         (ctx, app, dir)
+    }
+
+    #[test]
+    fn the_folder_menu_rows_do_what_their_shortcuts_do_and_show_the_state() {
+        use ui::toolbar::{FolderMenuEvent, FolderState};
+        let (ctx, mut app, dir) = app_in("app-folder-menu");
+        std::fs::write(dir.join(".hidden"), "H").unwrap();
+        assert_eq!(app.folder_state(), FolderState { subfolders: Some(false), preview: false, hidden: false, can_close_tab: false });
+        app.handle_toolbar(&ctx, ToolbarEvent::Folder(FolderMenuEvent::TogglePreview));
+        assert!(app.preview_open, "Preview Panel, as Space");
+        app.handle_toolbar(&ctx, ToolbarEvent::Folder(FolderMenuEvent::ToggleHidden));
+        assert!(app.tab.view.show_hidden, "Hidden Files, as Ctrl+H");
+        app.handle_toolbar(&ctx, ToolbarEvent::Folder(FolderMenuEvent::NewTab));
+        assert_eq!(app.tabs.len(), 2, "New Tab, as Ctrl+T");
+        assert_eq!(app.folder_state(), FolderState { subfolders: Some(false), preview: true, hidden: true, can_close_tab: true });
+        app.handle_toolbar(&ctx, ToolbarEvent::Folder(FolderMenuEvent::CloseTab));
+        assert_eq!(app.tabs.len(), 1, "Close Tab, as Ctrl+W");
+        app.handle_toolbar(&ctx, ToolbarEvent::Folder(FolderMenuEvent::ToggleSubfolders));
+        land_flat(&ctx, &mut app);
+        assert!(app.tab.view.is_flat(), "Toggle Subfolders, as Ctrl+E");
+        assert_eq!(app.folder_state().subfolders, Some(true));
+        app.handle_toolbar(&ctx, ToolbarEvent::Folder(FolderMenuEvent::TogglePreview));
+        assert!(!app.preview_open, "the same row turns it off");
+    }
+
+    #[test]
+    fn on_this_pc_the_folder_menu_greys_toggle_subfolders() {
+        let (_, app, _) = app_on_this_pc("app-folder-menu-this-pc");
+        assert_eq!(app.folder_state().subfolders, None);
     }
 
     #[test]
@@ -10904,7 +10958,7 @@ mod tests {
         let (ctx, mut app, _) = app_in("app-tab-order");
         window_frame(&ctx, &mut app, vec![]);
         let mut stops = Vec::new();
-        for _ in 0..16 {
+        for _ in 0..17 {
             window_frame(&ctx, &mut app, key_press(egui::Key::Tab, egui::Modifiers::NONE));
             window_frame(&ctx, &mut app, vec![]);
             let id = ctx.memory(|m| m.focused()).expect("Tab always lands somewhere");
@@ -10914,16 +10968,17 @@ mod tests {
         assert_eq!(ids[..3], [ui::app_menu::button_id(), ui::app_menu::panel_button_id(), ui::tabs::tab_id(0)], "☰, the panel button, the tab");
         let (tab, plus) = (stops[2].1, stops[3].1);
         assert!(plus.left() > tab.right() && plus.top() < tab.bottom(), "then + after the tabs");
-        // With no history ← and → are greyed, so no stops: ↑, the lock, ☆, the path bar.
-        let bar = &stops[4..8];
+        // With no history ← and → are greyed, so no stops: ↑, the lock, ☆, the path bar, the folder menu's ⋮.
+        let bar = &stops[4..9];
         assert!(bar.iter().all(|(_, r)| r.top() >= tab.bottom()), "the toolbar, under the tabs");
         assert!(bar.windows(2).all(|w| w[0].1.right() <= w[1].1.left()), "left to right: {bar:?}");
         assert_eq!(bar[1].0, ui::toolbar::lock_id(), "the lock between ↑ and ☆");
-        assert!(bar[3].1.width() > 100.0, "the path bar last: {bar:?}");
-        assert_eq!(ids[8..10], [ui::sidebar::focus_id(), ui::file_list::focus_id()], "then the side panel, then the list");
+        assert!(bar[3].1.width() > 100.0, "then the path bar: {bar:?}");
+        assert_eq!(bar[4].0, ui::folder_menu::button_id(), "the ⋮ last: {bar:?}");
+        assert_eq!(ids[9..11], [ui::sidebar::focus_id(), ui::file_list::focus_id()], "then the side panel, then the list");
         // The view button's parts at the bottom, then round again.
-        let again = ids[10..].iter().position(|&id| id == ui::app_menu::button_id()).expect("back to ☰") + 10;
-        assert!(stops[10..again].iter().all(|(_, r)| r.top() > stops[9].1.center().y), "the bottom bar: {:?}", &stops[10..again]);
+        let again = ids[11..].iter().position(|&id| id == ui::app_menu::button_id()).expect("back to ☰") + 11;
+        assert!(stops[11..again].iter().all(|(_, r)| r.top() > stops[10].1.center().y), "the bottom bar: {:?}", &stops[11..again]);
         assert_eq!(ids[again..again + 3], ids[..3], "the same ring again");
     }
 

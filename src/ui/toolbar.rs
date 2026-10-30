@@ -1,6 +1,6 @@
 //! The bar above the list: back, forward and up buttons, the saved view
-//! lock, the bookmark star, and the current path as clickable crumbs
-//! ("angelbyte › Descargas").
+//! lock, the bookmark star, the current path as clickable crumbs
+//! ("angelbyte › Descargas"), and the folder menu's ⋮ at the end.
 //! Ctrl+L or a click on the empty part turns the crumbs into a text field.
 
 use std::path::{Path, PathBuf};
@@ -9,6 +9,7 @@ use eframe::egui;
 
 use crate::folder_views::Scope;
 use crate::i18n::tr;
+pub use crate::ui::folder_menu::{FolderMenuEvent, FolderState};
 
 
 pub const BACK: &str = "⏴";
@@ -29,6 +30,8 @@ pub struct Nav<'a> {
     /// The Empty Trash button: shown while the trash is on screen, enabled
     /// while something is in it; `None` elsewhere.
     pub empty_trash: Option<bool>,
+    /// What the folder menu's rows show.
+    pub folder: FolderState,
 }
 
 /// The folder's saved view settings, as the lock's menu shows them.
@@ -59,6 +62,8 @@ pub enum ToolbarEvent {
     SetDefaultView,
     /// Empty Trash: everything in the trash on screen goes for good, after a question.
     EmptyTrash,
+    /// A row of the folder menu (the ⋮ at the bar's end).
+    Folder(FolderMenuEvent),
 }
 
 /// One clickable piece of the path.
@@ -135,13 +140,25 @@ pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
         }
         ui.separator();
         let Some(enabled) = nav.empty_trash else {
-            if let Some(go) = crumb_bar(ui, nav) {
-                event = Some(go);
+            // The crumbs, then the folder menu's ⋮ at the right end: in that
+            // order, so Tab reaches the ⋮ after the address bar.
+            let menu = ui.spacing().interact_size.y + 4.0 + ui.spacing().item_spacing.x;
+            let size = egui::vec2((ui.available_width() - menu).max(0.0), ui.spacing().interact_size.y);
+            ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                if let Some(go) = crumb_bar(ui, nav) {
+                    event = Some(go);
+                }
+            });
+            if let Some(chosen) = crate::ui::folder_menu::show(ui, &nav.folder) {
+                event = Some(ToolbarEvent::Folder(chosen));
             }
             return;
         };
-        // Empty Trash at the right end; the crumbs take what is left of the bar.
+        // The ⋮ and Empty Trash at the right end; the crumbs take what is left of the bar.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(chosen) = crate::ui::folder_menu::show(ui, &nav.folder) {
+                event = Some(ToolbarEvent::Folder(chosen));
+            }
             let button = ui.add_enabled(enabled, egui::Button::new(tr!("Empty Trash")));
             crate::ui::focus_ring(ui, &button);
             let button = button.on_disabled_hover_text(tr!("The trash is empty"));
@@ -309,6 +326,7 @@ mod tests {
             bookmarked: false,
             saved_view: SavedView::default(),
             empty_trash: None,
+            folder: FolderState::default(),
         };
         frame(&ctx, vec![], |ui| show(ui, &nav));
         assert_eq!(click(&ctx, egui::pos2(700.0, 18.0), |ui| show(ui, &nav)), Some(ToolbarEvent::EditPath));
@@ -326,6 +344,7 @@ mod tests {
             bookmarked: false,
             saved_view: SavedView::default(),
             empty_trash,
+            folder: FolderState::default(),
         };
         let button = |shapes: &[egui::epaint::ClippedShape]| {
             shapes.iter().find_map(|s| match &s.shape {
@@ -349,6 +368,43 @@ mod tests {
         let (_, shapes) = run(&ctx, vec![], |ui| show(ui, &nav(Some(false))));
         let at = button(&shapes).expect("an empty trash still shows it");
         assert_eq!(click(&ctx, at.center(), |ui| show(ui, &nav(Some(false)))), None, "disabled while the trash is empty");
+    }
+
+    #[test]
+    fn the_folder_menu_button_ends_the_bar_right_of_the_crumbs_and_of_empty_trash() {
+        use crate::ui::testing::{click, frame, run};
+        let menu = |ctx: &egui::Context| ctx.read_response(crate::ui::folder_menu::button_id()).expect("⋮ drawn").rect;
+        let ctx = egui::Context::default();
+        let nav = nav_with(SavedView::default());
+        frame(&ctx, vec![], |ui| show(ui, &nav));
+        let button = menu(&ctx);
+        assert!(button.right() > 780.0, "at the right end of the bar: {button:?}");
+        let crumb = egui::pos2(button.left() - 30.0, button.center().y);
+        assert_eq!(click(&ctx, crumb, |ui| show(ui, &nav)), Some(ToolbarEvent::EditPath), "the crumb bar takes the rest, left of it");
+
+        let ctx = egui::Context::default();
+        let trash = Nav { current: Path::new("/home/u/.local/share/Trash/files"), empty_trash: Some(true), ..nav_with(SavedView::default()) };
+        let (_, shapes) = run(&ctx, vec![], |ui| show(ui, &trash));
+        let empty = shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == "Empty Trash" => Some(t.galley.rect.translate(t.pos.to_vec2())),
+                _ => None,
+            })
+            .expect("Empty Trash drawn");
+        assert!(menu(&ctx).left() > empty.right(), "⋮ right of Empty Trash");
+    }
+
+    #[test]
+    fn a_row_of_the_folder_menu_is_a_toolbar_event() {
+        let ctx = egui::Context::default();
+        let nav = Nav { folder: FolderState { subfolders: Some(false), can_close_tab: true, ..FolderState::default() }, ..nav_with(SavedView::default()) };
+        bar(&ctx, &nav, vec![]);
+        let button = ctx.read_response(crate::ui::folder_menu::button_id()).expect("⋮ drawn").rect;
+        assert_eq!(bar(&ctx, &nav, pointer_click(button.center())).0, None, "opening chooses nothing");
+        let (_, texts) = bar(&ctx, &nav, vec![]);
+        let (event, _) = bar(&ctx, &nav, pointer_click(at(&texts, "Hidden Files").center()));
+        assert_eq!(event, Some(ToolbarEvent::Folder(FolderMenuEvent::ToggleHidden)));
     }
 
     #[test]
@@ -425,6 +481,7 @@ mod tests {
             bookmarked: false,
             saved_view: SavedView::default(),
             empty_trash: None,
+            folder: FolderState { subfolders: Some(false), ..FolderState::default() },
         };
         let (_, shapes) = window(&ctx, &nav, vec![]);
         assert_eq!(rings(&ctx, &shapes), 0, "no ring before Tab");
@@ -439,6 +496,8 @@ mod tests {
             Pressed::Bar(ToolbarEvent::SaveView(None)),
             Pressed::Bar(ToolbarEvent::ToggleBookmark),
             Pressed::Bar(ToolbarEvent::EditPath),
+            // The folder menu's ⋮, which opens a menu instead.
+            Pressed::Bar(ToolbarEvent::Folder(FolderMenuEvent::ToggleSubfolders)),
         ];
         for (n, stop) in stops.into_iter().enumerate() {
             let (pressed, shapes) = tap(&ctx, &nav, egui::Key::Tab, egui::Modifiers::NONE);
@@ -448,14 +507,26 @@ mod tests {
             if stop == Pressed::Bar(ToolbarEvent::SaveView(None)) {
                 continue; // The lock opens its menu: see the next test.
             }
+            if let Pressed::Bar(ToolbarEvent::Folder(_)) = stop {
+                // Enter opens the menu on its first row, and Enter again runs it.
+                assert_eq!(tap(&ctx, &nav, egui::Key::Enter, egui::Modifiers::NONE).0, None, "opening chooses nothing");
+                assert!(crate::ui::folder_menu::is_open(&ctx));
+                window(&ctx, &nav, vec![]);
+                window(&ctx, &nav, vec![]);
+                assert_eq!(tap(&ctx, &nav, egui::Key::Enter, egui::Modifiers::NONE).0, Some(stop), "Enter runs its first row");
+                continue;
+            }
             assert_eq!(tap(&ctx, &nav, key, egui::Modifiers::NONE).0, Some(stop), "{key:?} on stop {n}");
         }
-        // Past the address bar it starts again; Shift+Tab goes back.
+        // Past the ⋮ it starts again; Shift+Tab goes back.
+        ctx.memory_mut(|m| m.request_focus(crate::ui::folder_menu::button_id()));
+        window(&ctx, &nav, vec![]);
         tap(&ctx, &nav, egui::Key::Tab, egui::Modifiers::NONE);
         assert_eq!(tap(&ctx, &nav, egui::Key::Enter, egui::Modifiers::NONE).0, Some(Pressed::Tab(TabEvent::Select(0))));
         tap(&ctx, &nav, egui::Key::Tab, egui::Modifiers::SHIFT);
         window(&ctx, &nav, vec![]);
-        assert_eq!(tap(&ctx, &nav, egui::Key::Enter, egui::Modifiers::NONE).0, Some(Pressed::Bar(ToolbarEvent::EditPath)));
+        assert_eq!(tap(&ctx, &nav, egui::Key::Space, egui::Modifiers::NONE).0, None, "the ⋮: its menu opens");
+        assert!(crate::ui::folder_menu::is_open(&ctx));
     }
     #[test]
     fn enter_or_space_on_the_lock_opens_its_menu_and_escape_closes_it() {
@@ -541,7 +612,7 @@ mod tests {
     }
 
     fn nav_with(saved_view: SavedView) -> Nav<'static> {
-        Nav { current: Path::new("/home/u/Fotos"), home: Some(Path::new("/home/u")), can_back: false, can_forward: false, bookmarked: false, saved_view, empty_trash: None }
+        Nav { current: Path::new("/home/u/Fotos"), home: Some(Path::new("/home/u")), can_back: false, can_forward: false, bookmarked: false, saved_view, empty_trash: None, folder: FolderState::default() }
     }
 
     /// One frame of the bar with `events`; what it returned and the texts painted.

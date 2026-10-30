@@ -17,6 +17,15 @@ pub const ENTRIES: &[(&str, &str)] = &[
     ("Minimize Window", "Minimizar ventana"),
     ("Toggle Fullscreen", "Alternar pantalla completa"),
     ("Close Window", "Cerrar ventana"),
+    // folder_menu.rs
+    ("Toggle Subfolders", "Mostrar u ocultar subcarpetas"),
+    ("Preview Panel", "Panel de vista previa"),
+    ("New Tab", "Nueva pestaña"),
+    ("Close Tab", "Cerrar pestaña"),
+    ("Hidden Files", "Archivos ocultos"),
+    ("Open Console", "Abrir consola"),
+    ("Open File Explorer", "Abrir explorador de archivos"),
+    ("Folder options", "Opciones de la carpeta"),
     // confirm.rs
     ("Original Location", "Ubicación original"),
     ("Date Deleted", "Fecha de eliminación"),
