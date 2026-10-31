@@ -290,6 +290,12 @@ pub fn desktop_name(text: &str, lang: &str) -> Option<String> {
         .find_map(|key| entry.get(key).cloned())
 }
 
+/// Whether a .desktop file's `Categories` hold `FileManager`: an editor that
+/// also opens folders (VS Code and its forks) does not.
+pub fn is_file_manager(text: &str) -> bool {
+    parse_entry(text).get("Categories").is_some_and(|list| list.split(';').any(|c| c.trim() == "FileManager"))
+}
+
 /// The `[Desktop Entry]` group of a .desktop file, key by key.
 fn parse_entry(text: &str) -> HashMap<String, String> {
     let mut entry = HashMap::new();
