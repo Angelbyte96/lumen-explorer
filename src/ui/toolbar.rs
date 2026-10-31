@@ -26,6 +26,9 @@ pub struct Nav<'a> {
     pub can_forward: bool,
     pub bookmarked: bool,
     pub saved_view: SavedView,
+    /// The Empty Trash button: shown while the trash is on screen, enabled
+    /// while something is in it; `None` elsewhere.
+    pub empty_trash: Option<bool>,
 }
 
 /// The folder's saved view settings, as the lock's menu shows them.
@@ -54,6 +57,8 @@ pub enum ToolbarEvent {
     SaveView(Option<Scope>),
     /// The lock's menu: the view and order shown become the default.
     SetDefaultView,
+    /// Empty Trash: everything in the trash on screen goes for good, after a question.
+    EmptyTrash,
 }
 
 /// One clickable piece of the path.
@@ -129,9 +134,27 @@ pub fn show(ui: &mut egui::Ui, nav: &Nav<'_>) -> Option<ToolbarEvent> {
             event = Some(ToolbarEvent::ToggleBookmark);
         }
         ui.separator();
-        if let Some(go) = crumb_bar(ui, nav) {
-            event = Some(go);
-        }
+        let Some(enabled) = nav.empty_trash else {
+            if let Some(go) = crumb_bar(ui, nav) {
+                event = Some(go);
+            }
+            return;
+        };
+        // Empty Trash at the right end; the crumbs take what is left of the bar.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let button = ui.add_enabled(enabled, egui::Button::new(tr!("Empty Trash")));
+            crate::ui::focus_ring(ui, &button);
+            let button = button.on_disabled_hover_text(tr!("The trash is empty"));
+            if button.on_hover_text(tr!("Delete everything in the trash for good")).clicked() {
+                event = Some(ToolbarEvent::EmptyTrash);
+            }
+            ui.separator();
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                if let Some(go) = crumb_bar(ui, nav) {
+                    event = Some(go);
+                }
+            });
+        });
     });
     event
 }
@@ -285,9 +308,47 @@ mod tests {
             can_forward: false,
             bookmarked: false,
             saved_view: SavedView::default(),
+            empty_trash: None,
         };
         frame(&ctx, vec![], |ui| show(ui, &nav));
         assert_eq!(click(&ctx, egui::pos2(700.0, 18.0), |ui| show(ui, &nav)), Some(ToolbarEvent::EditPath));
+    }
+
+    #[test]
+    fn the_empty_trash_button_shows_only_on_the_trash_and_clicks_only_while_something_is_in_it() {
+        use crate::ui::testing::{click, run};
+        let trash = Path::new("/home/u/.local/share/Trash/files");
+        let nav = |empty_trash| Nav {
+            current: trash,
+            home: Some(Path::new("/home/u")),
+            can_back: false,
+            can_forward: false,
+            bookmarked: false,
+            saved_view: SavedView::default(),
+            empty_trash,
+        };
+        let button = |shapes: &[egui::epaint::ClippedShape]| {
+            shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == "Empty Trash" => Some(t.galley.rect.translate(t.pos.to_vec2())),
+                _ => None,
+            })
+        };
+        let ctx = egui::Context::default();
+        let (_, shapes) = run(&ctx, vec![], |ui| show(ui, &nav(None)));
+        assert_eq!(button(&shapes), None, "not on the trash: no button");
+
+        let ctx = egui::Context::default();
+        let (_, shapes) = run(&ctx, vec![], |ui| show(ui, &nav(Some(true))));
+        let at = button(&shapes).expect("on the trash: the button");
+        assert!(at.left() > 600.0, "at the right end of the bar: {at:?}");
+        assert_eq!(click(&ctx, at.center(), |ui| show(ui, &nav(Some(true)))), Some(ToolbarEvent::EmptyTrash));
+        let crumb = egui::pos2(at.left() - 30.0, at.center().y);
+        assert_eq!(click(&ctx, crumb, |ui| show(ui, &nav(Some(true)))), Some(ToolbarEvent::EditPath), "the crumb bar still takes the rest");
+
+        let ctx = egui::Context::default();
+        let (_, shapes) = run(&ctx, vec![], |ui| show(ui, &nav(Some(false))));
+        let at = button(&shapes).expect("an empty trash still shows it");
+        assert_eq!(click(&ctx, at.center(), |ui| show(ui, &nav(Some(false)))), None, "disabled while the trash is empty");
     }
 
     #[test]
@@ -363,6 +424,7 @@ mod tests {
             can_forward: true,
             bookmarked: false,
             saved_view: SavedView::default(),
+            empty_trash: None,
         };
         let (_, shapes) = window(&ctx, &nav, vec![]);
         assert_eq!(rings(&ctx, &shapes), 0, "no ring before Tab");
@@ -479,7 +541,7 @@ mod tests {
     }
 
     fn nav_with(saved_view: SavedView) -> Nav<'static> {
-        Nav { current: Path::new("/home/u/Fotos"), home: Some(Path::new("/home/u")), can_back: false, can_forward: false, bookmarked: false, saved_view }
+        Nav { current: Path::new("/home/u/Fotos"), home: Some(Path::new("/home/u")), can_back: false, can_forward: false, bookmarked: false, saved_view, empty_trash: None }
     }
 
     /// One frame of the bar with `events`; what it returned and the texts painted.

@@ -4,6 +4,9 @@ pub const ENTRIES: &[(&str, &str)] = &[
     // app.rs: the confirmation dialogs.
     ("Move to Trash", "Mover a la papelera"),
     ("Delete Permanently", "Eliminar permanentemente"),
+    ("Empty Trash", "Vaciar papelera"),
+    ("Permanently delete the 1 item in the trash? This cannot be undone.", "¿Eliminar permanentemente el único elemento de la papelera? Esta acción no se puede deshacer."),
+    ("Permanently delete all {0} items in the trash? This cannot be undone.", "¿Eliminar permanentemente los {0} elementos de la papelera? Esta acción no se puede deshacer."),
     ("Delete", "Eliminar"),
     ("Replace", "Reemplazar"),
     ("Skip", "Omitir"),

@@ -22,6 +22,54 @@ pub fn delete_forever(path: &Path) -> Result<(), String> {
     result.map_err(|e| tr!("Cannot delete {0}: {1}", path.display(), e))
 }
 
+/// How many entries the trash place `files` (a freedesktop `Trash/files`) holds, hidden ones too.
+pub fn trash_count(files: &Path) -> usize {
+    std::fs::read_dir(files).map_or(0, |read| read.flatten().count())
+}
+
+/// Empties a freedesktop trash for good: every entry of `files` (its
+/// `Trash/files`), every `*.trashinfo` record of `Trash/info` and the
+/// `Trash/directorysizes` cache. A folder that is no `Trash/files`, or a link
+/// to one, is refused whole. One failure does not stop the rest; the first one is reported.
+pub fn empty_trash(files: &Path) -> crate::recycle_bin::Done {
+    let mut done = crate::recycle_bin::Done::default();
+    let is_trash = |trash: &&Path| files.file_name() == Some("files".as_ref()) && trash.file_name() == Some("Trash".as_ref());
+    // A linked `files` would empty whatever it points to.
+    let linked = std::fs::symlink_metadata(files).is_ok_and(|m| m.file_type().is_symlink());
+    let Some(trash) = files.parent().filter(is_trash).filter(|_| !linked) else {
+        done.error = Some(tr!("Not a trash folder: {0}", files.display()));
+        return done;
+    };
+    for entry in std::fs::read_dir(files).into_iter().flatten().flatten() {
+        match delete_forever(&entry.path()) {
+            Ok(()) => done.count += 1,
+            Err(err) => {
+                done.error.get_or_insert(err);
+            }
+        }
+    }
+    // A record goes with its entry: one whose entry could not be deleted stays,
+    // so the entry can still be restored.
+    for entry in std::fs::read_dir(trash.join("info")).into_iter().flatten().flatten() {
+        let record = entry.path();
+        // By the raw name: a name that is no UTF-8 still has its record.
+        let Some(name) = record.file_stem().filter(|_| record.extension() == Some("trashinfo".as_ref())) else { continue };
+        if entry.file_type().is_ok_and(|t| t.is_dir()) || std::fs::symlink_metadata(files.join(name)).is_ok() {
+            continue;
+        }
+        if let Err(err) = std::fs::remove_file(&record) {
+            done.error.get_or_insert(tr!("Cannot delete {0}: {1}", record.display(), err));
+        }
+    }
+    let sizes = trash.join("directorysizes");
+    if let Err(err) = std::fs::remove_file(&sizes)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        done.error.get_or_insert(tr!("Cannot delete {0}: {1}", sizes.display(), err));
+    }
+    done
+}
+
 /// Opens a file with its default app, without waiting for it.
 #[cfg(not(windows))]
 pub fn open_with_default_app(path: &Path) -> Result<(), String> {
@@ -410,6 +458,139 @@ pub(crate) mod tests {
         let dir = fresh_fixture("trash-missing");
         let err = trash(&dir.join("ghost.txt")).unwrap_err();
         assert!(err.contains("ghost.txt"), "error names the item: {err}");
+    }
+
+    /// A freedesktop trash in `dir`: three entries (one hidden, one folder),
+    /// their records, an orphan record, a stray file in `info`, the size cache,
+    /// and a file outside the trash that a link inside points to.
+    pub(crate) fn fake_trash(dir: &Path) -> PathBuf {
+        let (files, info) = (dir.join("Trash/files"), dir.join("Trash/info"));
+        std::fs::create_dir_all(files.join("folder/inner")).unwrap();
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(files.join("a.txt"), "A").unwrap();
+        std::fs::write(files.join(".hidden"), "H").unwrap();
+        std::fs::write(files.join("folder/inner/deep.txt"), "D").unwrap();
+        for name in ["a.txt", ".hidden", "folder", "orphan"] {
+            std::fs::write(info.join(format!("{name}.trashinfo")), "[Trash Info]\n").unwrap();
+        }
+        std::fs::write(info.join("notes"), "not a record").unwrap();
+        std::fs::write(dir.join("Trash/directorysizes"), "12 0 folder\n").unwrap();
+        std::fs::write(dir.join("outside.txt"), "O").unwrap();
+        files
+    }
+
+    #[test]
+    fn emptying_the_trash_deletes_its_entries_and_records_and_nothing_outside() {
+        let dir = fresh_fixture("empty-trash");
+        let files = fake_trash(&dir);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("outside.txt"), files.join("link")).unwrap();
+        let entries = if cfg!(unix) { 4 } else { 3 };
+        assert_eq!(trash_count(&files), entries, "hidden entries count");
+
+        let done = empty_trash(&files);
+
+        assert_eq!(done, crate::recycle_bin::Done { count: entries, error: None });
+        assert!(files.is_dir() && std::fs::read_dir(&files).unwrap().next().is_none(), "files is kept, empty");
+        let info: Vec<String> = std::fs::read_dir(dir.join("Trash/info")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(info, ["notes"], "every record went, a stray file is not touched");
+        assert!(!dir.join("Trash/directorysizes").exists(), "the size cache went");
+        assert_eq!(std::fs::read_to_string(dir.join("outside.txt")).unwrap(), "O", "a link is removed, never what it points to");
+        assert_eq!(trash_count(&files), 0);
+        assert_eq!(empty_trash(&files), crate::recycle_bin::Done::default(), "an empty trash: nothing to do");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_that_cannot_be_deleted_keeps_its_record_and_the_rest_still_goes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = fresh_fixture("empty-trash-blocked");
+        let files = fake_trash(&dir);
+        let inner = files.join("folder/inner");
+        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let done = empty_trash(&files);
+
+        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(done.count, 2, "a.txt and .hidden went");
+        assert!(done.error.as_deref().is_some_and(|e| e.starts_with("Cannot delete") && e.contains("folder")), "{:?}", done.error);
+        assert!(files.join("folder/inner/deep.txt").exists());
+        assert!(dir.join("Trash/info/folder.trashinfo").exists(), "its record stays: it can still be restored");
+        assert!(!dir.join("Trash/info/a.txt.trashinfo").exists() && !dir.join("Trash/info/orphan.trashinfo").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn emptying_unlinks_symlinked_entries_records_and_cache_never_their_targets() {
+        use std::os::unix::fs::symlink;
+        let dir = fresh_fixture("empty-trash-links");
+        let files = fake_trash(&dir);
+        let victim = dir.join("victim");
+        std::fs::create_dir_all(victim.join("deep")).unwrap();
+        std::fs::write(victim.join("deep/keep.txt"), "K").unwrap();
+        symlink(&victim, files.join("dlink")).unwrap();
+        symlink(&victim, dir.join("Trash/info/dirlink.trashinfo")).unwrap();
+        std::fs::remove_file(dir.join("Trash/directorysizes")).unwrap();
+        symlink(victim.join("deep/keep.txt"), dir.join("Trash/directorysizes")).unwrap();
+        assert_eq!(empty_trash(&files).error, None);
+        assert_eq!(std::fs::read_to_string(victim.join("deep/keep.txt")).unwrap(), "K");
+        assert_eq!(trash_count(&files), 0);
+        assert!(std::fs::symlink_metadata(dir.join("Trash/info/dirlink.trashinfo")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn emptying_removes_a_record_whose_name_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = fresh_fixture("empty-trash-raw-name");
+        let files = fake_trash(&dir);
+        let raw = std::ffi::OsStr::from_bytes(b"bad\xff name");
+        std::fs::write(files.join(raw), "x").unwrap();
+        let mut record = raw.to_os_string();
+        record.push(".trashinfo");
+        std::fs::write(dir.join("Trash/info").join(&record), "r").unwrap();
+        assert_eq!(empty_trash(&files).error, None);
+        assert!(!dir.join("Trash/info").join(&record).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_trash_that_is_a_link_is_not_emptied() {
+        let dir = fresh_fixture("empty-trash-linked");
+        let victim = dir.join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep.txt"), "K").unwrap();
+        std::fs::create_dir_all(dir.join("Trash")).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("Trash/files")).unwrap();
+        let files = dir.join("Trash/files");
+        let done = empty_trash(&files);
+        assert_eq!(done.count, 0);
+        assert_eq!(done.error.as_deref(), Some(format!("Not a trash folder: {}", files.display()).as_str()));
+        assert!(victim.join("keep.txt").exists(), "what the link points to is kept");
+    }
+
+    #[test]
+    fn a_misspelled_or_relative_trash_is_refused() {
+        let dir = fresh_fixture("empty-trash-refused-more");
+        let files = fake_trash(&dir);
+        for wrong in [PathBuf::from("files"), PathBuf::from("/"), dir.join("trash/files"), dir.join("Trash/Files"), files.join("folder/inner")] {
+            assert_eq!(empty_trash(&wrong).count, 0, "{}", wrong.display());
+        }
+        assert_eq!(trash_count(&files), 3);
+    }
+
+    #[test]
+    fn a_folder_that_is_no_trash_is_not_emptied() {
+        let dir = fresh_fixture("empty-trash-refused");
+        let files = fake_trash(&dir);
+        for wrong in [dir.join("Trash"), dir.join("Trash/info"), files.join("folder"), dir.clone()] {
+            let done = empty_trash(&wrong);
+            assert_eq!(done.count, 0, "{}", wrong.display());
+            assert_eq!(done.error.as_deref(), Some(format!("Not a trash folder: {}", wrong.display()).as_str()));
+        }
+        assert_eq!(trash_count(&files), 3, "nothing deleted");
+        assert!(dir.join("Trash/info/a.txt.trashinfo").exists() && dir.join("Trash/directorysizes").exists());
+        assert_eq!(trash_count(&dir.join("missing/Trash/files")), 0, "no trash yet: empty");
     }
 
     #[test]
