@@ -16,10 +16,13 @@ pub fn open_console(folder: &Path) -> Result<(), String> {
 #[cfg(not(windows))]
 const LUMEN_ENTRY: &str = "lumen.desktop";
 
-/// The first app registered for folders that is not Lumen: Files on Ubuntu.
+/// The first file manager registered for folders that is not Lumen: Files on
+/// Ubuntu. Editors open folders too, and may come first.
 #[cfg(not(windows))]
 pub fn file_manager(dirs: &crate::apps::Dirs) -> Option<crate::apps::App> {
-    crate::apps::apps_for(dirs, "", true).into_iter().find(|app| app.desktop.file_name().is_none_or(|name| name != LUMEN_ENTRY))
+    crate::apps::apps_for(dirs, "", true).into_iter().find(|app| {
+        app.desktop.file_name().is_none_or(|name| name != LUMEN_ENTRY) && std::fs::read_to_string(&app.desktop).is_ok_and(|text| crate::apps::is_file_manager(&text))
+    })
 }
 
 /// Opens `folder` in the system's file manager.
@@ -90,17 +93,17 @@ mod tests {
 
     /// An XDG tree whose folders open with `default` first, Nautilus listed too.
     #[cfg(not(windows))]
-    fn dirs(name: &str, default: &str, apps: &[(&str, &str)]) -> crate::apps::Dirs {
+    fn dirs(name: &str, default: &str, apps: &[(&str, &str, &str)]) -> crate::apps::Dirs {
         let root = crate::fs::ops::tests::fresh_fixture(name);
         let write = |rel: &str, text: &str| {
             let path = root.join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, text).unwrap();
         };
-        let listed: Vec<&str> = apps.iter().map(|(id, _)| *id).collect();
+        let listed: Vec<&str> = apps.iter().map(|(id, _, _)| *id).collect();
         write("system/applications/mimeinfo.cache", &format!("[MIME Cache]\ninode/directory={};\n", listed.join(";")));
-        for (id, name) in apps {
-            write(&format!("system/applications/{id}"), &format!("[Desktop Entry]\nType=Application\nName={name}\n"));
+        for (id, name, categories) in apps {
+            write(&format!("system/applications/{id}"), &format!("[Desktop Entry]\nType=Application\nName={name}\nCategories={categories}\n"));
         }
         if !default.is_empty() {
             write("config/mimeapps.list", &format!("[Default Applications]\ninode/directory={default};\n"));
@@ -111,14 +114,29 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn the_file_manager_is_the_folders_app_that_is_not_lumen() {
-        let both = [("lumen.desktop", "Lumen"), ("org.gnome.Nautilus.desktop", "Files")];
+        let both = [("lumen.desktop", "Lumen", "System;FileTools;FileManager;"), ("org.gnome.Nautilus.desktop", "Files", "GNOME;GTK;Utility;Core;FileManager;")];
         let found = file_manager(&dirs("open-here-default-lumen", "lumen.desktop", &both)).map(|app| app.name);
         assert_eq!(found.as_deref(), Some("Files"), "with Lumen as the default, the one after it");
         let found = file_manager(&dirs("open-here-default-files", "", &both)).map(|app| app.name);
         assert_eq!(found.as_deref(), Some("Files"), "without a default, the first listed but Lumen");
-        let only = [("lumen.desktop", "Lumen")];
+        let only = [("lumen.desktop", "Lumen", "System;FileTools;FileManager;")];
         assert_eq!(file_manager(&dirs("open-here-only-lumen", "lumen.desktop", &only)), None, "Lumen alone is no system file manager");
         assert_eq!(file_manager(&dirs("open-here-none", "", &[])), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn an_editor_that_opens_folders_is_no_file_manager() {
+        let editor_first = [
+            ("antigravity-ide.desktop", "Antigravity", "TextEditor;Development;IDE;"),
+            ("lumen.desktop", "Lumen", "System;FileTools;FileManager;"),
+            ("org.gnome.baobab.desktop", "Disk Usage Analyzer", "GTK;GNOME;System;Filesystem;Utility;"),
+            ("org.gnome.Nautilus.desktop", "Files", "GNOME;GTK;Utility;Core;FileManager;"),
+        ];
+        let found = file_manager(&dirs("open-here-editor-first", "lumen.desktop", &editor_first)).map(|app| app.name);
+        assert_eq!(found.as_deref(), Some("Files"), "only an app in the FileManager category");
+        let editor_only = [("lumen.desktop", "Lumen", "System;FileTools;FileManager;"), ("code.desktop", "Visual Studio Code", "TextEditor;Development;IDE;")];
+        assert_eq!(file_manager(&dirs("open-here-editor-only", "lumen.desktop", &editor_only)), None, "an editor alone is no file manager");
     }
 
     #[cfg(windows)]
