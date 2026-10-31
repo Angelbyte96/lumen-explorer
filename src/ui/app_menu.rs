@@ -116,7 +116,7 @@ pub fn command_hint(response: egui::Response, name: &str, shortcut: &str) -> egu
 }
 
 /// A square button with a known id that paints itself: the hover fill, then `paint`.
-fn square(ui: &mut egui::Ui, id: egui::Id, lit: bool, paint: impl FnOnce(&egui::Painter, egui::Rect, egui::Color32)) -> egui::Response {
+pub(crate) fn square(ui: &mut egui::Ui, id: egui::Id, lit: bool, paint: impl FnOnce(&egui::Painter, egui::Rect, egui::Color32)) -> egui::Response {
     let side = ui.spacing().interact_size.y + 4.0;
     let (_, rect) = ui.allocate_space(egui::vec2(side, side));
     let response = ui.interact(rect, id, egui::Sense::click());
@@ -145,7 +145,7 @@ fn row(ui: &mut egui::Ui, icon: MenuIcon, name: &str, shortcut: &str) -> egui::R
 /// While a row has the focus, ↑/↓ move it to the next enabled row, wrapping
 /// around, and no arrow takes it out: egui would hand it to the nearest widget
 /// that way (the side panel), and the menu would close for losing it.
-fn step_through(ctx: &egui::Context, rows: &[egui::Response]) {
+pub(crate) fn step_through(ctx: &egui::Context, rows: &[egui::Response]) {
     let Some(at) = rows.iter().position(egui::Response::has_focus) else { return };
     let arrows = [egui::Key::ArrowDown, egui::Key::ArrowUp, egui::Key::ArrowLeft, egui::Key::ArrowRight];
     if ctx.input(|i| arrows.iter().any(|&k| i.key_pressed(k))) {
