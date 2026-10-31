@@ -1191,6 +1191,16 @@ enum Dialog {
     Paste { source: PathBuf, target: PathBuf, mode: Mode },
     /// The Recycle Bin view's Delete: the picked entries, gone for good.
     Purge { items: Vec<Recycled>, subject: ui::confirm::Subject },
+    /// Empty Trash: the `count` entries of the trash on screen, gone for good.
+    EmptyTrash { count: usize, bin: TrashBin },
+}
+
+/// The trash Empty Trash empties.
+enum TrashBin {
+    /// Linux: the trash place, a freedesktop `Trash/files`.
+    Trash(PathBuf),
+    /// Windows: the Recycle Bin view's entries, as listed when asked.
+    Recycled(Vec<Recycled>),
 }
 
 impl Dialog {
@@ -1198,6 +1208,7 @@ impl Dialog {
         match self {
             Self::Trash { .. } => tr!("Move to Trash"),
             Self::Delete { .. } | Self::Purge { .. } => tr!("Delete Permanently"),
+            Self::EmptyTrash { .. } => tr!("Empty Trash"),
             Self::Replace(_) | Self::Paste { .. } => tr!("Replace"),
         }
     }
@@ -1206,13 +1217,13 @@ impl Dialog {
     fn subject(&self) -> Option<&ui::confirm::Subject> {
         match self {
             Self::Trash { subject, .. } | Self::Delete { subject, .. } | Self::Purge { subject, .. } => Some(subject),
-            Self::Replace(_) | Self::Paste { .. } => None,
+            Self::Replace(_) | Self::Paste { .. } | Self::EmptyTrash { .. } => None,
         }
     }
 
     /// It cannot be undone.
     fn danger(&self) -> bool {
-        matches!(self, Self::Delete { .. } | Self::Purge { .. })
+        matches!(self, Self::Delete { .. } | Self::Purge { .. } | Self::EmptyTrash { .. })
     }
 
     fn message(&self) -> String {
@@ -1229,6 +1240,8 @@ impl Dialog {
                 [one] => tr!("Permanently delete “{0}”? This cannot be undone.", one.name),
                 many => tr!("Permanently delete {0} items? This cannot be undone.", many.len()),
             },
+            Self::EmptyTrash { count: 1, .. } => tr!("Permanently delete the 1 item in the trash? This cannot be undone.").to_owned(),
+            Self::EmptyTrash { count, .. } => tr!("Permanently delete all {0} items in the trash? This cannot be undone.", count),
             Self::Replace(edit) => tr!("“{0}” already exists. Replace it? The existing one goes to the trash.", edit.text),
             Self::Paste { target, .. } => {
                 tr!("“{0}” already exists here. Replace it? The existing one goes to the trash.", file_name(target).unwrap_or_default())
@@ -1240,6 +1253,7 @@ impl Dialog {
         match self {
             Self::Trash { .. } => tr!("Move to Trash"),
             Self::Delete { .. } | Self::Purge { .. } => tr!("Delete"),
+            Self::EmptyTrash { .. } => tr!("Empty Trash"),
             Self::Replace(_) | Self::Paste { .. } => tr!("Replace"),
         }
     }
@@ -1248,7 +1262,7 @@ impl Dialog {
     fn hint(&self) -> &'static str {
         match self {
             Self::Paste { .. } => tr!("Enter to replace · Esc to skip"),
-            Self::Delete { .. } | Self::Purge { .. } => tr!("Enter to delete · Esc to cancel"),
+            Self::Delete { .. } | Self::Purge { .. } | Self::EmptyTrash { .. } => tr!("Enter to delete · Esc to cancel"),
             Self::Trash { .. } | Self::Replace(_) => tr!("Enter to confirm · Esc to cancel"),
         }
     }
@@ -1257,7 +1271,7 @@ impl Dialog {
     fn no_label(&self) -> &'static str {
         match self {
             Self::Paste { .. } => tr!("Skip"),
-            Self::Trash { .. } | Self::Delete { .. } | Self::Purge { .. } | Self::Replace(_) => tr!("Cancel"),
+            Self::Trash { .. } | Self::Delete { .. } | Self::Purge { .. } | Self::EmptyTrash { .. } | Self::Replace(_) => tr!("Cancel"),
         }
     }
 }
@@ -1905,6 +1919,37 @@ impl LumenApp {
     /// Whether the tab shows the Recycle Bin, whose location is no folder either.
     fn on_recycle_bin(&self) -> bool {
         places::is_recycle_bin(&self.tab.view.current)
+    }
+
+    /// The toolbar's Empty Trash button: `Some(enabled)` while the trash is on screen.
+    fn empty_trash_button(&self) -> Option<bool> {
+        if self.on_recycle_bin() {
+            return Some(!self.recycled.is_empty());
+        }
+        self.on_trash().then_some(!self.tab.view.entries.is_empty())
+    }
+
+    /// Whether the tab shows the trash place itself (not a folder inside it).
+    fn on_trash(&self) -> bool {
+        self.trash.as_deref() == Some(self.tab.view.current.as_path())
+    }
+
+    /// Empty Trash: asks before the trash on screen is emptied, unless nothing is in it.
+    fn ask_empty_trash(&mut self) {
+        let bin = if self.on_recycle_bin() {
+            TrashBin::Recycled(self.recycled.clone())
+        } else if self.on_trash() {
+            TrashBin::Trash(self.tab.view.current.clone())
+        } else {
+            return;
+        };
+        let count = match &bin {
+            TrashBin::Recycled(items) => items.len(),
+            TrashBin::Trash(files) => fs::ops::trash_count(files),
+        };
+        if count > 0 {
+            self.dialog = Some(Dialog::EmptyTrash { count, bin });
+        }
     }
 
     /// Whether the tab shows a marker (This PC, the Recycle Bin), where no folder action applies.
@@ -2928,7 +2973,7 @@ impl LumenApp {
                     self.rename = Some(edit);
                 }
                 Dialog::Paste { .. } => self.next_paste(ctx),
-                Dialog::Trash { .. } | Dialog::Delete { .. } | Dialog::Purge { .. } => {}
+                Dialog::Trash { .. } | Dialog::Delete { .. } | Dialog::Purge { .. } | Dialog::EmptyTrash { .. } => {}
             }
             return;
         }
@@ -2940,6 +2985,12 @@ impl LumenApp {
                 self.start_job(ctx, source, target, mode, true);
             }
             Dialog::Purge { items, .. } => self.purge_recycled(&items),
+            Dialog::EmptyTrash { bin: TrashBin::Recycled(items), .. } => self.purge_recycled(&items),
+            Dialog::EmptyTrash { bin: TrashBin::Trash(files), .. } => {
+                self.tab.error_after_load = fs::ops::empty_trash(&files).error;
+                self.path_popup.mark_stale();
+                self.reload(ctx, None);
+            }
         }
     }
 
@@ -3147,6 +3198,7 @@ impl LumenApp {
             }
             ToolbarEvent::SaveView(None) => self.folder_views.remove(&self.tab.view.current),
             ToolbarEvent::SetDefaultView => self.default_look = self.shown_look(),
+            ToolbarEvent::EmptyTrash => self.ask_empty_trash(),
         }
     }
 
@@ -3980,6 +4032,7 @@ impl eframe::App for LumenApp {
                 can_forward: self.tab.history.forward_target().is_some(),
                 bookmarked: self.bookmarks.contains(&current),
                 saved_view: self.saved_view(),
+                empty_trash: self.empty_trash_button(),
             };
             if let Some(event) = ui::toolbar::show(ui, &nav) {
                 self.handle_toolbar(&ctx, event);
@@ -8440,6 +8493,77 @@ mod tests {
         app.answer_dialog(&ctx, Confirm::Yes);
         load_recycle(&ctx, &mut app);
         assert!(app.recycled.is_empty() && read_bins(&dir).is_empty(), "every bin is empty now");
+    }
+
+    #[test]
+    fn empty_trash_in_the_recycle_bin_asks_then_deletes_every_entry_of_every_bin() {
+        let (ctx, mut app, dir) = app_on_recycle_bin("app-bin-empty");
+        assert_eq!(app.empty_trash_button(), Some(true), "the bin is on screen, with entries");
+        app.handle_toolbar(&ctx, ToolbarEvent::EmptyTrash);
+        let dialog = app.dialog.as_ref().expect("Empty Trash asks first");
+        assert_eq!(dialog.title(), "Empty Trash");
+        assert_eq!(dialog.message(), "Permanently delete all 3 items in the trash? This cannot be undone.");
+        assert!(dialog.danger() && dialog.subject().is_none());
+        assert_eq!((dialog.yes_label(), dialog.no_label(), dialog.hint()), ("Empty Trash", "Cancel", "Enter to delete · Esc to cancel"));
+        app.answer_dialog(&ctx, Confirm::No);
+        assert_eq!(read_bins(&dir).len(), 3, "No: nothing deleted");
+
+        app.handle_toolbar(&ctx, ToolbarEvent::EmptyTrash);
+        app.answer_dialog(&ctx, Confirm::Yes);
+        assert_eq!(app.tab.view.error, None);
+        load_recycle(&ctx, &mut app);
+        assert!(app.recycled.is_empty() && read_bins(&dir).is_empty(), "every bin is empty now");
+        assert!(!dir.join("Work").exists() && !dir.join("pic.png").exists(), "deleted, not restored");
+        assert_eq!(app.empty_trash_button(), Some(false), "nothing left: disabled");
+        app.handle_toolbar(&ctx, ToolbarEvent::EmptyTrash);
+        assert!(app.dialog.is_none(), "nothing to ask about");
+    }
+
+    #[test]
+    fn empty_trash_on_the_trash_place_asks_then_empties_it_and_its_records() {
+        let (ctx, mut app, dir) = app_in("app-trash-empty");
+        let files = crate::fs::ops::tests::fake_trash(&dir);
+        app.trash = Some(files.clone());
+        assert_eq!(app.empty_trash_button(), None, "a folder: no button");
+        app.handle_toolbar(&ctx, ToolbarEvent::EmptyTrash);
+        assert!(app.dialog.is_none(), "nothing asked off the trash");
+
+        app.handle_sidebar(&ctx, SidebarEvent::Open(files.join("folder")));
+        land(&mut app);
+        assert_eq!(app.empty_trash_button(), None, "a folder inside the trash: no button");
+        app.handle_sidebar(&ctx, SidebarEvent::Open(files.clone()));
+        land(&mut app);
+        assert_eq!(app.empty_trash_button(), Some(true));
+        app.handle_toolbar(&ctx, ToolbarEvent::EmptyTrash);
+        let dialog = app.dialog.as_ref().expect("Empty Trash asks first");
+        assert_eq!(dialog.title(), "Empty Trash");
+        assert_eq!(dialog.message(), "Permanently delete all 3 items in the trash? This cannot be undone.", "the hidden one counts");
+        assert!(dialog.danger());
+        app.answer_dialog(&ctx, Confirm::No);
+        assert_eq!(crate::fs::ops::trash_count(&files), 3, "No: nothing deleted");
+
+        app.handle_toolbar(&ctx, ToolbarEvent::EmptyTrash);
+        app.answer_dialog(&ctx, Confirm::Yes);
+        land(&mut app);
+        assert_eq!(app.tab.view.error, None);
+        assert_eq!(crate::fs::ops::trash_count(&files), 0);
+        assert!(!dir.join("Trash/info/a.txt.trashinfo").exists() && !dir.join("Trash/directorysizes").exists(), "the records went too");
+        assert!(app.tab.view.entries.is_empty() && app.tab.view.current == files, "the list shows the empty trash");
+        assert_eq!(names_in(&dir), ["Trash", "a.txt", "b.txt", "outside.txt", "sub"], "nothing outside the trash");
+        assert_eq!(app.empty_trash_button(), Some(false), "nothing left: disabled");
+    }
+
+    #[test]
+    fn empty_trash_names_a_single_item() {
+        let (ctx, mut app, dir) = app_in("app-trash-empty-one");
+        let files = dir.join("Trash/files");
+        std::fs::create_dir_all(&files).unwrap();
+        std::fs::write(files.join("only.txt"), "x").unwrap();
+        app.trash = Some(files.clone());
+        app.handle_sidebar(&ctx, SidebarEvent::Open(files));
+        land(&mut app);
+        app.handle_toolbar(&ctx, ToolbarEvent::EmptyTrash);
+        assert_eq!(app.dialog.as_ref().map(|d| d.message()), Some("Permanently delete the 1 item in the trash? This cannot be undone.".to_owned()));
     }
 
     /// What the fixture's two bins hold.

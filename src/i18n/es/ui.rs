@@ -92,6 +92,8 @@ pub const ENTRIES: &[(&str, &str)] = &[
     ("Close tab (Ctrl+W)", "Cerrar pestaña (Ctrl+W)"),
     ("New tab (Ctrl+T)", "Nueva pestaña (Ctrl+T)"),
     // toolbar.rs
+    ("The trash is empty", "La papelera está vacía"),
+    ("Delete everything in the trash for good", "Eliminar para siempre todo lo que hay en la papelera"),
     ("Back (Alt+Left)", "Atrás (Alt+Left)"),
     ("Forward (Alt+Right)", "Adelante (Alt+Right)"),
     ("Up to the parent folder (Alt+Up)", "Subir a la carpeta superior (Alt+Up)"),
