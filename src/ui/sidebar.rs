@@ -15,6 +15,9 @@ pub const DISK: &str = "🖴";
 pub const COMPUTER: &str = "🖥";
 pub const TRASH: &str = "🗑";
 
+/// Air between a row's highlight and its icon.
+const ROW_AIR: f32 = 6.0;
+
 pub struct Sidebar<'a> {
     pub current: &'a Path,
     pub bookmarks: &'a [PathBuf],
@@ -305,11 +308,17 @@ fn item(ui: &mut egui::Ui, icon: ItemIcon, theme: &'static str, label: &str, hin
     // Senses clicks below the name button, so the button keeps its own.
     // Clicks only: the panel is one Tab stop and the arrows walk its rows.
     let row = egui::UiBuilder::new().sense(egui::Sense::CLICK);
-    // Behind the row, filled once its size is known: the hover highlight.
+    // Behind the row, filled once its size is known: the accent for the folder
+    // on screen, the hover highlight for the others.
     let backdrop = ui.painter().add(egui::Shape::Noop);
     let inner = ui.scope_builder(row, |ui| {
         // The row lights up as a whole (below): the name's button draws no box
-        // of its own on hover or click; the folder on screen keeps its fill.
+        // of its own on hover or click. The folder on screen fills the whole
+        // row with the accent, so its icon and name take the accent's text colour.
+        if selected {
+            let on_accent = crate::ui::theme::on_accent(ui.visuals());
+            ui.visuals_mut().override_text_color = Some(on_accent);
+        }
         let widgets = &mut ui.visuals_mut().widgets;
         for state in [&mut widgets.hovered, &mut widgets.active] {
             state.bg_stroke = egui::Stroke::NONE;
@@ -318,6 +327,7 @@ fn item(ui: &mut egui::Ui, icon: ItemIcon, theme: &'static str, label: &str, hin
         }
         ui.horizontal(|ui| {
             ui.set_min_width(ui.available_width());
+            ui.add_space(ROW_AIR);
             match (own, icon) {
                 (Some(texture), _) if cfg!(windows) => {
                     icons::image(ui, texture);
@@ -333,14 +343,18 @@ fn item(ui: &mut egui::Ui, icon: ItemIcon, theme: &'static str, label: &str, hin
                     ui.add(egui::Label::new(glyph).selectable(false));
                 }
             }
-            ui.add(egui::Button::selectable(selected, label).frame_when_inactive(false).sense(egui::Sense::CLICK))
+            ui.add(egui::Button::new(label).frame(false).sense(egui::Sense::CLICK))
         })
         .inner
     });
     let response = inner.response.union(inner.inner);
     // The whole row, as the file rows do, also where the name's button is.
-    if response.contains_pointer() && !selected {
-        let fill = crate::ui::theme::row_hover(ui.visuals());
+    let fill = if selected {
+        Some(crate::ui::theme::accent(ui.visuals()))
+    } else {
+        response.contains_pointer().then(|| crate::ui::theme::row_hover(ui.visuals()))
+    };
+    if let Some(fill) = fill {
         ui.painter().set(backdrop, egui::Shape::rect_filled(response.rect, egui::CornerRadius::same(3), fill));
     }
     response.on_hover_text(hint)
@@ -449,6 +463,75 @@ mod tests {
         let glyphs = shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Text(t) if [DISK, TRASH].contains(&t.galley.text()))).count();
         assert_eq!(glyphs, 0, "no glyphs once the icons are in");
         assert!(icons.wanted_symbolic().contains(&"folder-music"), "Music, still loading, was asked for");
+    }
+
+    #[test]
+    fn the_icon_keeps_some_air_from_the_rows_start() {
+        let ctx = egui::Context::default();
+        let icons = FileIcons::default();
+        let (mut row, mut shapes) = (egui::Rect::NOTHING, Vec::new());
+        for _ in 0..2 {
+            let input = egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+            let mut output = ctx.run_ui(input, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    row = item(ui, ItemIcon::Glyph(COMPUTER), "computer", "This PC", "hint", Path::new("/"), Path::new("/"), &icons).rect;
+                });
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let glyph = shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == COMPUTER => Some(t.galley.rect.translate(t.pos.to_vec2())),
+                _ => None,
+            })
+            .expect("the glyph drawn");
+        assert!(glyph.min.x - row.min.x >= ROW_AIR - 0.5, "the icon off the highlight's edge: {glyph:?} in {row:?}");
+    }
+
+    #[test]
+    fn the_folder_on_screen_fills_its_whole_row_with_the_accent_and_reads_on_it_hovered_or_not() {
+        let ctx = egui::Context::default();
+        let icons = FileIcons::default();
+        let draw = |ctx: &egui::Context, events| {
+            let mut row = egui::Rect::NOTHING;
+            let input = egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+            let mut output = ctx.run_ui(input, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    row = item(ui, ItemIcon::Glyph(COMPUTER), "computer", "This PC", "hint", Path::new("/"), Path::new("/"), &icons).rect;
+                });
+            });
+            output.textures_delta.clear();
+            (output.shapes, row)
+        };
+        let visuals = ctx.global_style().visuals.clone();
+        let (accent, on_accent) = (crate::ui::theme::accent(&visuals), crate::ui::theme::on_accent(&visuals));
+        let check = |shapes: &[egui::epaint::ClippedShape], row: egui::Rect, when: &str| {
+            let fills: Vec<egui::Rect> = shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Rect(r) if r.fill == accent => Some(r.rect),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(fills.len(), 1, "{when}: one accent fill, none behind the name alone: {fills:?}");
+            assert!(fills[0].width() >= row.width() - 1.0, "{when}: the whole row: {fills:?} for {row:?}");
+            for text in ["This PC", COMPUTER] {
+                let shown = shapes.iter().find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.text() == text => Some(t.override_text_color.unwrap_or(t.fallback_color)),
+                    _ => None,
+                });
+                let shown = shown.unwrap_or_else(|| panic!("{when}: {text} drawn"));
+                assert_eq!(shown, on_accent, "{when}: {text} reads on the accent");
+            }
+        };
+        draw(&ctx, vec![]);
+        let (still, row) = draw(&ctx, vec![]);
+        check(&still, row, "still");
+        draw(&ctx, vec![egui::Event::PointerMoved(row.left_center() + egui::vec2(40.0, 0.0))]);
+        let (over_name, row) = draw(&ctx, vec![]);
+        check(&over_name, row, "over the name");
     }
 
     #[test]
