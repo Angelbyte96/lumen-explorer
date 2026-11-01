@@ -225,7 +225,7 @@ pub fn fit_width(ctx: &egui::Context, rows: &[Recycled], column: usize) -> f32 {
             if column == 0 { icon + gap + text } else { text }
         })
         .fold(file_list::header_width(ctx, COLUMNS[column].0), f32::max);
-    file_list::fitted(widest)
+    file_list::fitted(widest + file_list::leading_edge(column))
 }
 
 /// What the view asks of the app.
@@ -291,7 +291,7 @@ pub fn show(ui: &mut egui::Ui, rows: &[Recycled], look: &Look) -> Option<Recycle
                     header.col(|ui| {
                         cell_rects[i] = ui.max_rect();
                         let direction = look.sort.filter(|sort| sort.column == column).map(|sort| sort.descending);
-                        match file_list::header_cell(ui, i, label, direction) {
+                        match file_list::edge_cell(ui, i, COLUMNS.len(), |ui| file_list::header_cell(ui, i, label, direction)) {
                             Some(file_list::HeaderClick::Sort) => event = Some(RecycleEvent::Sort(column)),
                             Some(file_list::HeaderClick::Menu) => event = Some(RecycleEvent::HeaderMenu(i)),
                             // The columns are fixed: there is none to close.
@@ -308,20 +308,24 @@ pub fn show(ui: &mut egui::Ui, rows: &[Recycled], look: &Look) -> Option<Recycle
                     let texts = cells(item);
                     row.set_selected(look.picks.is_picked(item));
                     row.col(|ui| {
-                        if item.is_dir {
-                            icons::folder(ui);
-                        } else {
-                            icons::file(ui);
-                        }
-                        // Not selectable, or the text would take the row's click.
-                        ui.add(egui::Label::new(&texts[0]).selectable(false).truncate());
-                    });
-                    for (text, (_, column)) in texts.iter().zip(COLUMNS).skip(1) {
-                        row.col(|ui| match column {
-                            RecycleColumn::Size => file_list::number_cell(ui, text),
-                            _ => {
-                                ui.add(egui::Label::new(text).selectable(false).truncate());
+                        file_list::edge_cell(ui, 0, COLUMNS.len(), |ui| {
+                            if item.is_dir {
+                                icons::folder(ui);
+                            } else {
+                                icons::file(ui);
                             }
+                            // Not selectable, or the text would take the row's click.
+                            ui.add(egui::Label::new(&texts[0]).selectable(false).truncate());
+                        });
+                    });
+                    for (position, (text, (_, column))) in texts.iter().zip(COLUMNS).enumerate().skip(1) {
+                        row.col(|ui| {
+                            file_list::edge_cell(ui, position, COLUMNS.len(), |ui| match column {
+                                RecycleColumn::Size => file_list::number_cell(ui, text),
+                                _ => {
+                                    ui.add(egui::Label::new(text).selectable(false).truncate());
+                                }
+                            });
                         });
                     }
                     let response = row.response();

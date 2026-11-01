@@ -194,11 +194,12 @@ pub fn show(
 
         table
             .header(header_height, |mut header| {
-                for &i in &shown {
+                for (position, &i) in shown.iter().enumerate() {
                     let (label, column) = COLUMNS[i];
                     header.col(|ui| {
                         cells[i] = ui.max_rect();
-                        match header_cell(ui, i, label, (sort.column == column).then_some(sort.descending)) {
+                        let direction = (sort.column == column).then_some(sort.descending);
+                        match edge_cell(ui, position, shown.len(), |ui| header_cell(ui, i, label, direction)) {
                             Some(HeaderClick::Sort) => event = Some(ListEvent::Sort(column)),
                             Some(HeaderClick::Menu) => event = Some(ListEvent::HeaderMenu(i)),
                             Some(HeaderClick::Close) if i != 0 => event = Some(ListEvent::CloseColumn(i)),
@@ -244,10 +245,10 @@ pub fn show(
                     // Behind the row's content: where a folder taking a drop is lit.
                     let mut lit_slot = None;
                     let counts = count_cells(entry, totals.get(&entry.path));
-                    for &column in &shown {
+                    for (position, &column) in shown.iter().enumerate() {
                         let (cell, _) = row.col(|ui| {
                             lit_slot.get_or_insert_with(|| ui.painter().add(egui::Shape::Noop));
-                            match column {
+                            edge_cell(ui, position, shown.len(), |ui| match column {
                                 0 => {
                                     // Icon and name on one line as tall as the row, centred in it:
                                     // a plain `horizontal` is one text line tall, so a taller icon
@@ -289,7 +290,7 @@ pub fn show(
                                     ui.add(egui::Label::new(date).selectable(false));
                                 }
                                 _ => count_cell(ui, column - 3, &counts[column - 3]),
-                            }
+                            });
                         });
                         // Where the row is this frame: `row.response()` holds the last frame's place.
                         first_drawn.get_or_insert((i, cell.top()));
@@ -481,7 +482,7 @@ pub fn fit_width(ctx: &egui::Context, view: &View, column: usize) -> f32 {
             }
         })
         .fold(header, f32::max);
-    fitted(widest)
+    fitted(widest + leading_edge(column))
 }
 
 /// How wide `text` is in the body font.
@@ -498,6 +499,32 @@ pub fn header_width(ctx: &egui::Context, label: &str) -> f32 {
 /// The column width for a `widest` cell: some air, whole points (the config keeps them so).
 pub fn fitted(widest: f32) -> f32 {
     (widest + FIT_MARGIN).max(MIN_WIDTH).ceil()
+}
+
+/// Air between a row's ends and the content of its first and last cells.
+pub const ROW_EDGE: f32 = 8.0;
+
+/// Draws the content of the cell at `position` of `count` columns: the
+/// first and the last keep [`ROW_EDGE`] from the row's ends, so the icon and
+/// the size do not touch the highlight's edges.
+pub fn edge_cell<R>(ui: &mut egui::Ui, position: usize, count: usize, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let whole = ui.max_rect();
+    let mut rect = whole;
+    if position == 0 {
+        rect.min.x = (rect.min.x + ROW_EDGE).min(rect.max.x);
+    }
+    if position + 1 == count {
+        rect.max.x = (rect.max.x - ROW_EDGE).max(rect.min.x);
+    }
+    if rect == whole {
+        return add(ui);
+    }
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(*ui.layout()), add).inner
+}
+
+/// The air [`edge_cell`] keeps before the content of `column`: Name comes first.
+pub fn leading_edge(column: usize) -> f32 {
+    if column == 0 { ROW_EDGE } else { 0.0 }
 }
 
 /// Air left after the widest cell of a column sized to fit.
@@ -1150,6 +1177,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_first_and_last_cells_keep_some_air_from_the_rows_ends() {
+        let ctx = egui::Context::default();
+        let mut view = View::default();
+        (view.entries, view.rows) = (vec![entry("a.txt")], vec![0]);
+        let (mut list, mut shapes) = (egui::Rect::NOTHING, Vec::new());
+        for _ in 0..3 {
+            let input = egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| {
+                list = ui.max_rect();
+                show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default());
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let text = |text: &str| {
+            shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.text() == text => Some(t.galley.rect.translate(t.pos.to_vec2())),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{text:?} painted"))
+        };
+        let name = text("a.txt");
+        let icon = shapes
+            .iter()
+            .filter(|s| !matches!(s.shape, egui::Shape::Text(_)))
+            .map(|s| s.shape.visual_bounding_rect())
+            .filter(|b| b.is_finite() && b.width() < 40.0 && b.max.x <= name.min.x && (b.center().y - name.center().y).abs() < 4.0)
+            .fold(egui::Rect::NOTHING, |a, b| a.union(b));
+        assert!(icon.min.x - list.min.x >= ROW_EDGE - 0.5, "the icon off the row's start: {icon:?} in {list:?}");
+        let size = text("1 B");
+        assert!(list.max.x - size.max.x >= ROW_EDGE - 0.5, "the size off the row's end: {size:?} in {list:?}");
+    }
+
+    #[test]
     fn names_stay_level_with_the_other_columns_and_icons_are_whole() {
         let shapes = painted();
         let y = |text: &str| {
@@ -1339,7 +1402,7 @@ pub(crate) mod tests {
         let ctx = egui::Context::default();
         let mut view = listed(&["a.txt", "b.txt", "c.txt"]);
         let (first, third) = (row_rect(&ctx, &mut view, 0), row_rect(&ctx, &mut view, 2));
-        for x in [first.left() + 4.0, first.left() + 30.0] {
+        for x in [first.left() + ROW_EDGE + 4.0, first.left() + ROW_EDGE + 30.0] {
             let (events, _) = drag(&ctx, &view, egui::pos2(x, first.center().y), egui::pos2(x, third.center().y));
             assert!(events.iter().all(|e| band_rows(e).is_none()), "x = {x}");
         }

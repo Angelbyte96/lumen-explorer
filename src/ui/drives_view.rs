@@ -157,7 +157,35 @@ pub fn fit_width(ctx: &egui::Context, rows: &[DriveRow], column: usize) -> f32 {
             _ => measure(row.percent.clone()) + PERCENT_AIR,
         })
         .fold(file_list::header_width(ctx, COLUMNS[column].0), f32::max);
-    file_list::fitted(widest)
+    file_list::fitted(widest + file_list::leading_edge(column))
+}
+
+/// The Percent Full bar: the accent fills what is used. `text` is never
+/// split between the two parts, whose colours may need opposite text (a
+/// bright accent wants dark text, the dark track light text): it sits inside
+/// the filled part in the accent's text colour when it fits there, else on
+/// the empty track just past it in the plain text colour.
+fn percent_bar(ui: &mut egui::Ui, used: f32, width: f32, text: &str) {
+    let height = 14.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let visuals = ui.visuals();
+    let radius = egui::CornerRadius::from(height / 2.0);
+    let filled = egui::Rect::from_min_size(rect.min, egui::vec2((rect.width() * used.clamp(0.0, 1.0)).max(height).min(rect.width()), height));
+    let painter = ui.painter();
+    painter.rect_filled(rect, radius, visuals.extreme_bg_color);
+    painter.rect_filled(filled, radius, crate::ui::theme::accent(visuals));
+    let galley = painter.layout_no_wrap(text.to_owned(), egui::TextStyle::Button.resolve(ui.style()), egui::Color32::PLACEHOLDER);
+    let pad = ui.spacing().item_spacing.x;
+    let (x, colour) = if filled.width() >= galley.size().x + 2.0 * pad {
+        (filled.min.x + pad, crate::ui::theme::on_accent(visuals))
+    } else {
+        (filled.max.x + pad / 2.0, visuals.widgets.noninteractive.fg_stroke.color)
+    };
+    let pos = egui::pos2(x, rect.center().y - galley.size().y / 2.0);
+    painter.galley(pos, galley, colour);
 }
 
 /// What the view asks of the app.
@@ -206,7 +234,7 @@ pub fn show(ui: &mut egui::Ui, rows: &[DriveRow], selected: Option<&Path>, sort:
                     header.col(|ui| {
                         cells[i] = ui.max_rect();
                         let direction = sort.filter(|sort| sort.column == column).map(|sort| sort.descending);
-                        match file_list::header_cell(ui, i, label, direction) {
+                        match file_list::edge_cell(ui, i, COLUMNS.len(), |ui| file_list::header_cell(ui, i, label, direction)) {
                             Some(file_list::HeaderClick::Sort) => event = Some(DrivesEvent::Sort(column)),
                             Some(file_list::HeaderClick::Menu) => event = Some(DrivesEvent::HeaderMenu(i)),
                             // The columns are fixed: there is none to close.
@@ -222,9 +250,11 @@ pub fn show(ui: &mut egui::Ui, rows: &[DriveRow], selected: Option<&Path>, sort:
                     let drive = &rows[i];
                     row.set_selected(selected == Some(drive.path.as_path()));
                     row.col(|ui| {
-                        // Not selectable, or the text would take the row's click.
-                        ui.add(egui::Label::new(DISK).selectable(false));
-                        ui.add(egui::Label::new(&drive.name).selectable(false).truncate());
+                        file_list::edge_cell(ui, 0, COLUMNS.len(), |ui| {
+                            // Not selectable, or the text would take the row's click.
+                            ui.add(egui::Label::new(DISK).selectable(false));
+                            ui.add(egui::Label::new(&drive.name).selectable(false).truncate());
+                        });
                     });
                     // Only Size is right-aligned: Free Space beside it would read as one column.
                     for (text, right) in [(drive.kind, false), (&drive.fs, false), (&drive.free, false), (&drive.size, true)] {
@@ -237,10 +267,12 @@ pub fn show(ui: &mut egui::Ui, rows: &[DriveRow], selected: Option<&Path>, sort:
                         });
                     }
                     row.col(|ui| {
-                        if let Some(used) = drive.used {
-                            let width = ui.available_width();
-                            ui.add(egui::ProgressBar::new(used).desired_width(width).desired_height(14.0).text(&drive.percent));
-                        }
+                        file_list::edge_cell(ui, COLUMNS.len() - 1, COLUMNS.len(), |ui| {
+                            if let Some(used) = drive.used {
+                                let width = ui.available_width();
+                                percent_bar(ui, used, width, &drive.percent);
+                            }
+                        });
                     });
                     let response = row.response();
                     if response.secondary_clicked() {
@@ -665,6 +697,39 @@ mod tests {
         assert_eq!((fitted[1], fitted[2], fitted[5]), (content[1], content[2], content[5]), "Type, File System and Percent Full whole: {fitted:?}");
         assert!(fitted[3] < content[3] && fitted[4] < content[4], "Free Space and Size give: {fitted:?}");
         assert!(fitted[0] >= 700.0, "and Name is not cut while they can: {fitted:?}");
+    }
+
+    /// The percent is never split between the bar's two parts: inside the
+    /// filled part in the accent's text colour when it fits there, else on the
+    /// empty track in the plain text colour, also when the drive is selected.
+    #[test]
+    fn the_percent_reads_in_one_colour_inside_the_fill_or_on_the_track() {
+        let ctx = egui::Context::default();
+        let rows = two_drives();
+        let visuals = ctx.global_style().visuals.clone();
+        let on_accent = crate::ui::theme::on_accent(&visuals);
+        let plain = visuals.widgets.noninteractive.fg_stroke.color;
+        // Narrow columns before it, so the bar has room for the percent.
+        let widths = [80.0, 80.0, 60.0, 80.0, 80.0, 200.0];
+        for selected in [None, Some(Path::new("D:\\"))] {
+            draw_as(&ctx, &rows, selected, (None, widths), vec![], None);
+            let shapes = draw_as(&ctx, &rows, selected, (None, widths), vec![], None).1;
+            let shown_in = |text: &str| -> Vec<egui::Color32> {
+                shapes
+                    .iter()
+                    .filter_map(|s| match &s.shape {
+                        egui::Shape::Text(t) if t.galley.text() == text => {
+                            let rect = t.galley.rect.translate(t.pos.to_vec2());
+                            assert!(s.clip_rect.contains_rect(rect), "{text} whole, not cut: {rect:?} in {:?}", s.clip_rect);
+                            Some(t.override_text_color.unwrap_or(t.fallback_color))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            };
+            assert_eq!(shown_in("54.3%"), [on_accent], "over the filled part, selected {selected:?}");
+            assert_eq!(shown_in("0%"), [plain], "over the empty track, selected {selected:?}");
+        }
     }
 
     /// The x of the left edge of `text`'s column is the header's; its right edge is the next header's less the gap.
