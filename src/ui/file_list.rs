@@ -988,8 +988,11 @@ pub(crate) fn rename_field(ui: &mut egui::Ui, edit: &mut RenameEdit) -> Option<b
             i.events.retain(|e| !matches!(e, egui::Event::Text(t) | egui::Event::Paste(t) if t.is_empty()));
         });
     }
+    // A selected row draws its text in the colour that reads on the accent, but
+    // the field keeps its own background: its text keeps the field's colour.
     let mut output = egui::TextEdit::singleline(&mut edit.text)
         .id(id)
+        .text_color(ui.visuals().widgets.inactive.text_color())
         .desired_width(f32::INFINITY)
         .show(ui);
     let response = &output.response.response;
@@ -2358,6 +2361,39 @@ pub(crate) mod tests {
             "field centre {} should be above {first_row_bottom}",
             field.center().y
         );
+    }
+
+    #[test]
+    fn the_name_being_typed_keeps_the_fields_text_color_on_a_selected_row() {
+        // A selected table row draws its text in the selection's colour (the
+        // text on the accent); the field's own background is not the accent.
+        for scheme in crate::ui::theme::Scheme::ALL {
+            let visuals = scheme.visuals(egui::Theme::Dark);
+            let ctx = egui::Context::default();
+            ctx.set_visuals(visuals.clone());
+            let entries = vec![entry("notes.txt"), entry("other.txt")];
+            let mut edit = RenameEdit::new(entries[0].path.clone(), &entries[0].name, false);
+            let mut view = View::default();
+            (view.entries, view.rows, view.selected) = (entries, vec![0, 1], Some(0));
+            let mut shapes = Vec::new();
+            for _ in 0..2 {
+                let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() }, |ui| {
+                    show(ui, &view, &[], Sizes::default(), None, Some(&mut edit), &FileIcons::default());
+                });
+                output.textures_delta.clear();
+                shapes = output.shapes;
+            }
+            let color = shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.text() == "notes.txt" => {
+                        Some(t.override_text_color.unwrap_or(t.galley.job.sections[0].format.color))
+                    }
+                    _ => None,
+                })
+                .expect("field text drawn");
+            assert_eq!(color, visuals.widgets.inactive.text_color(), "{}", scheme.name());
+        }
     }
 
     fn tab() -> egui::Event {
