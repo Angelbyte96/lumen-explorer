@@ -22,7 +22,7 @@ pub enum AppMenuEvent {
 }
 
 /// One row of the menu: its icon, name and shortcut, and what it does once
-/// Lumen has it. the reference app other rows are kept, greyed and without their
+/// Lumen has it. The other rows are kept, greyed and without their
 /// shortcut, until then.
 type Item = (MenuIcon, &'static str, &'static str, Option<AppMenuEvent>);
 
@@ -286,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_lists_references_rows_with_their_shortcuts_and_the_version() {
+    fn the_menu_lists_its_rows_with_their_shortcuts_and_the_version() {
         let (_, menu) = choose("Go To");
         let rows = ["Go To", "Commands", "Load Layout", "Save Layout", "Options", "Lumen Setup", &version()];
         let tops: Vec<f32> = rows.iter().map(|row| at(&menu, row).top()).collect();

@@ -1,4 +1,4 @@
-//! The Lumen Setup screen, the reference app in Lumen's window: the logo, the
+//! The Lumen Setup screen: the logo, the
 //! version, where Lumen is installed, four switches, then Modify (or
 //! Install), Uninstall and Back. What the switches do is the platform's
 //! [`System`]; this only shows the machine's state and asks for changes.
@@ -709,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn the_installed_screen_shows_references_lines() {
+    fn the_installed_screen_shows_its_lines() {
         let mut screen = SetupScreen::open(&installed(true, Switches::default()));
         let shown = texts(&mut screen);
         for line in [
@@ -778,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn not_installed_it_offers_install_with_references_presets() {
+    fn not_installed_it_offers_install_with_its_presets() {
         let fake = Fake::new(
             Origin::NotInstalled {
                 default_dir: PathBuf::from("/home/me/.local/share/lumen"),

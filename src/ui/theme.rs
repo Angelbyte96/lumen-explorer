@@ -30,8 +30,8 @@ pub fn card(visuals: &Visuals) -> Color32 {
     visuals.faint_bg_color
 }
 
-/// A color scheme, chosen in the Options window. the reference app built-in
-/// schemes by name, with Lumen in Voidstar's place, then Dracula, Gentleman and Space.
+/// A color scheme, chosen in the Options window: the star-named
+/// schemes with Lumen among them, then Dracula, Gentleman and Space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scheme {
     Sirius,
@@ -96,9 +96,8 @@ impl Scheme {
 
     /// Its colors; Lumen has none of its own, it is egui's.
     ///
-    /// the reference app built-in colors are not published: Sirius, Pollux,
-    /// Eridanus, Regulus and Altair are Lumen's own take on each star until
-    /// they are read from the reference app. Dracula is draculatheme.com's palette,
+    /// Sirius, Pollux, Eridanus, Regulus and Altair are Lumen's own take on
+    /// each star. Dracula is draculatheme.com's palette,
     /// Gentleman is gentle-shell's Gentleman-Sexy on a dark plum instead of
     /// its black, Space is Lumen's purple glass. The buttons sit close to the
     /// panel, framed in a see-through accent.
@@ -350,7 +349,7 @@ impl Palette {
 }
 
 /// The schemes in use: one for both, or one per system theme when
-/// `follow_system` is on (the reference app "System Light / Dark Scheme").
+/// `follow_system` is on (the "System Light / Dark Scheme" option).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Schemes {
     pub scheme: Scheme,
@@ -402,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn the_schemes_are_references_with_lumen_for_voidstar_then_dracula_gentleman_and_space() {
+    fn the_schemes_are_the_star_named_ones_with_lumen_then_dracula_gentleman_and_space() {
         let names: Vec<&str> = Scheme::ALL.iter().map(|s| s.name()).collect();
         assert_eq!(names, ["Sirius", "Pollux", "Eridanus", "Lumen", "Regulus", "Altair", "Dracula", "Gentleman", "Space"]);
         for scheme in Scheme::ALL {

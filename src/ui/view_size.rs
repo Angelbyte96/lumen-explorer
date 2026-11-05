@@ -1,4 +1,4 @@
-//! The view slider (like the reference app): one position from 0 to 100 picks the
+//! The view slider: one position from 0 to 100 picks the
 //! view. Details, Tree, List and M Icons are steps; from M Icons up to XL Icons
 //! it is one icon grid whose icons grow smoothly with the position.
 

@@ -139,7 +139,7 @@ pub struct Place {
     pub icon: &'static str,
 }
 
-/// The XDG user folders this side panel lists, in the reference app order.
+/// The XDG user folders this side panel lists, in a fixed order.
 const USER_DIRS: [&str; 6] = ["DESKTOP", "DOWNLOAD", "DOCUMENTS", "MUSIC", "PICTURES", "VIDEOS"];
 
 /// Reads `~/.config/user-dirs.dirs` lines such as

@@ -39,7 +39,7 @@ enum Opt {
     NewTab,
 }
 
-/// The behavior rows, after the color schemes, in the reference app order.
+/// The behavior rows, after the color schemes.
 const BEHAVIOR: [Opt; 5] = [Opt::Overscroll, Opt::ReverseScroll, Opt::CharKey, Opt::Startup, Opt::NewTab];
 
 impl Opt {
@@ -723,7 +723,7 @@ mod tests {
             assert!(!painted(&texts, row), "{row} does not match");
         }
         assert!(painted(&texts, footer_text()), "the footer stays");
-        assert_eq!(footer_text(), "Up Down to navigate · Enter to use · Ctrl+R to reset · Escape to dismiss", "the reference app footer, with Lumen's reset key");
+        assert_eq!(footer_text(), "Up Down to navigate · Enter to use · Ctrl+R to reset · Escape to dismiss", "the footer, with Lumen's reset key");
     }
 
     #[test]
@@ -954,7 +954,7 @@ mod tests {
             at(&texts, text);
         }
         let tops: Vec<f32> = ["Color Scheme", OVERSCROLL, REVERSE, CHAR_KEY, STARTUP, NEW_TAB].iter().map(|t| at(&texts, t).top()).collect();
-        assert!(tops.windows(2).all(|w| w[0] < w[1]), "in the reference app order, after the schemes: {tops:?}");
+        assert!(tops.windows(2).all(|w| w[0] < w[1]), "in this order, after the schemes: {tops:?}");
         assert!(!painted(&texts, RESET), "all at their defaults");
     }
 
@@ -1039,7 +1039,7 @@ mod tests {
     }
 
     #[test]
-    fn character_key_action_offers_references_three_values() {
+    fn character_key_action_offers_three_values() {
         let mut window = Window::opened(Behavior::default());
         let list = window.click_on(CHAR_KEY);
         let names = ["Trigger Hotkey", "Type In Filter", "Select Typed Item"];

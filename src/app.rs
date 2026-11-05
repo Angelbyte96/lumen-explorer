@@ -3733,7 +3733,7 @@ impl LumenApp {
     }
 
     /// How opaque the list is at time `now`: a view just picked (Details,
-    /// Tree, List or Icons) fades in over `VIEW_FADE` quick
+    /// Tree, List or Icons) fades in over `VIEW_FADE` on a quick
     /// switch; icons growing inside the grid are the same view and never fade.
     fn list_opacity(&mut self, now: f64) -> f32 {
         let layout = self.tab.view_size.layout();

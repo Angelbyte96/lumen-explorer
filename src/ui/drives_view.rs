@@ -315,7 +315,7 @@ mod tests {
         }
     }
 
-    /// the reference app This PC on the user's machine (L3).
+    /// The This PC rows of the user's machine (L3).
     fn two_drives() -> Vec<DriveRow> {
         let disks = [
             (mount("Windows (C:)", "C:\\"), Some(usage(210.6, 461.2))),
@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn a_drive_row_reads_like_references() {
+    fn a_drive_row_shows_its_columns() {
         let rows = two_drives();
         let cells = |r: &DriveRow| [r.name.clone(), r.kind.into(), r.fs.clone(), r.free.clone(), r.size.clone(), r.percent.clone()];
         assert_eq!(cells(&rows[0]), ["Windows (C:)", "Local Disk", "NTFS", "210.6 GB", "461.2 GB", "54.3%"]);
@@ -665,9 +665,9 @@ mod tests {
         assert_eq!(second, Some(DrivesEvent::Fit(0)), "Name, the column on the border's left");
     }
 
-    /// the reference app This PC at ~1080 px (L18): Name ~270, the others ~150 each.
+    /// This PC at ~1080 px (L18): Name ~270, the others ~150 each.
     #[test]
-    fn fitting_this_pc_spreads_the_room_over_every_column_like_reference() {
+    fn fitting_this_pc_spreads_the_room_over_every_column() {
         let ctx = egui::Context::default();
         let rows = two_drives();
         draw(&ctx, &rows, None, vec![], None);

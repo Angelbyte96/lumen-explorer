@@ -1,6 +1,6 @@
 //! The right-click menu, as data: what it offers for the selection or for the
 //! folder's empty space, and how the search box and the keys walk it. Drawn by
-//! `ui::context_menu`; the reference app style, submenus open in place, indented.
+//! `ui::context_menu`; submenus open in place, indented.
 
 use std::collections::HashSet;
 

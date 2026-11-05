@@ -593,7 +593,7 @@ pub const LIST_ROLES: Roles = [Role::Name, Role::Short, Role::Short, Role::Numer
 /// `roles` says who gives room, not the columns' places.
 ///
 /// When every shown column fits, the spare room is shared over all of them in
-/// proportion to their content (like the reference app), so no column takes it all.
+/// proportion to their content, so no column takes it all.
 /// Otherwise the columns give in this order, each in proportion to what it can
 /// give: long text (`TEXT_MIN`), numbers (`SMALL_MIN`), then Name (`NAME_MIN`), then
 /// path columns (`TEXT_MIN`), and only then the text, path and short columns, which
@@ -976,8 +976,8 @@ pub fn rename_id() -> egui::Id {
 /// The text field drawn in place of the name while renaming.
 pub(crate) fn rename_field(ui: &mut egui::Ui, edit: &mut RenameEdit) -> Option<bool> {
     let id = rename_id();
-    // Characters a name cannot hold are dropped before the field reads them, as
-    // the reference app does: typing one does nothing, a pasted name keeps the rest.
+    // Characters a name cannot hold are dropped before the field reads them:
+    // typing one does nothing, a pasted name keeps the rest.
     if ui.memory(|m| m.has_focus(id)) {
         ui.input_mut(|i| {
             for event in &mut i.events {

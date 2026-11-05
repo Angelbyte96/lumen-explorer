@@ -38,7 +38,7 @@ pub const COLUMNS: [(&str, RecycleColumn); 5] = [
 /// one is unused.
 pub type Widths = file_list::Widths;
 
-/// Each column's role, in the list's six. Like the reference app bin, when the room is short
+/// Each column's role, in the list's six. When the room is short
 /// Name gives first, then Original Location (cut with "…"); Type, Date Deleted and Size
 /// stay whole. Size is right-aligned all the same.
 pub const ROLES: file_list::Roles = {

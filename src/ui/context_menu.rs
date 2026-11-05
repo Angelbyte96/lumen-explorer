@@ -1,5 +1,5 @@
 //! Draws the right-click menu (`menu::Menu`) at the pointer: a search box on
-//! top "Select a command", and the items below with their
+//! top ("Select a command"), and the items below with their
 //! shortcuts. Typing filters, Up/Down move, Right/Left open and close a
 //! submenu, Enter or a click runs, Escape or a click outside closes.
 

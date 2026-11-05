@@ -1,4 +1,4 @@
-//! The flattened listing (Ctrl+E "Toggle Subfolders"):
+//! The flattened listing (Ctrl+E, "Toggle Subfolders"):
 //! everything inside some folders, all the way down, read on a background
 //! thread because a big tree can take seconds to walk.
 
