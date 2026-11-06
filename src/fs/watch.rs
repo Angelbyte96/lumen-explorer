@@ -46,6 +46,9 @@ struct Order {
     generation: u64,
     path: Option<PathBuf>,
     plan: Plan,
+    /// Only adds folders (a flatten walk running): those watched already
+    /// on their own are left as they are, not watched afresh.
+    keep: bool,
 }
 
 /// How an order's folders are handed to the system.
@@ -162,12 +165,15 @@ struct Scope {
     refused: bool,
     /// Whether that order's folder itself could not be watched (gone, no permission).
     lost: bool,
+    /// Whether the system's watches ran out while folders were being added:
+    /// nothing is added any more, and the walk's landing decides.
+    stalled: bool,
 }
 
 impl Scope {
     fn new(generation: u64, path: Option<&Path>, plan: &Plan) -> Self {
         let (folders, trees) = (plan.alone.iter().cloned().collect(), plan.trees.clone());
-        Self { generation, path: path.map(Path::to_path_buf), folders, trees, refused: false, lost: false }
+        Self { generation, path: path.map(Path::to_path_buf), folders, trees, ..Self::default() }
     }
 
     /// Whether a change at `path` is in a folder watched (or one of them).
@@ -299,7 +305,7 @@ impl Watcher {
         // same plan (on Windows a whole tree is one handle) is not ordered again.
         let same = self.watched.as_deref() == Some(path) && self.ordered.as_ref() == Some(&Plan::new(path, folders, !cfg!(windows)));
         if !same {
-            self.order(Some(path), folders);
+            self.order(Some(path), folders, false);
         }
         self.watched = Some(path.to_path_buf());
         self.folders = folders.to_vec();
@@ -319,21 +325,55 @@ impl Watcher {
         }
     }
 
-    /// Tells notify's thread whose news count now, then the watch thread what to watch.
-    fn order(&mut self, path: Option<&Path>, folders: &[PathBuf]) {
+    /// Watches `more` too, folders a flatten walk of `path` (the folder
+    /// watched) has just read, while the walk runs: a change in one of them
+    /// then waits for the walk to land instead of being missed. The ones
+    /// watched already are not watched afresh: the landing's
+    /// [`Watcher::watch`] does that. Nothing is added past [`WATCH_LIMIT`],
+    /// nor once the system's watches ran out: the landing decides then.
+    pub fn watch_more(&mut self, path: &Path, more: &[PathBuf]) {
+        if self.watched.as_deref() != Some(path) || self.orders.is_none() {
+            return;
+        }
+        {
+            let scope = lock(&self.scope);
+            if scope.stalled || scope.refused || scope.lost {
+                return;
+            }
+        }
+        let known: HashSet<&PathBuf> = self.folders.iter().collect();
+        let added: Vec<PathBuf> = more.iter().filter(|f| !known.contains(f)).cloned().collect();
+        if added.is_empty() {
+            return;
+        }
+        let mut folders = self.folders.clone();
+        folders.extend(added);
+        if folders.iter().filter(|f| *f != path).count() > WATCH_LIMIT {
+            return;
+        }
+        // On Windows the whole tree is one watch, ordered once.
+        if self.ordered.as_ref() != Some(&Plan::new(path, &folders, !cfg!(windows))) {
+            self.order(Some(path), &folders, true);
+        }
+        self.folders = folders;
+    }
+
+    /// Tells notify's thread whose news count now, then the watch thread what
+    /// to watch; `keep` leaves what is watched already as it is.
+    fn order(&mut self, path: Option<&Path>, folders: &[PathBuf], keep: bool) {
         self.generation += 1;
         let plan = path.map(|path| Plan::new(path, folders, !cfg!(windows))).unwrap_or_default();
         self.ordered = path.map(|_| plan.clone());
         *lock(&self.scope) = Scope::new(self.generation, path, &plan);
         if let Some(orders) = &self.orders {
-            let _ = orders.send(Order { generation: self.generation, path: path.map(Path::to_path_buf), plan });
+            let _ = orders.send(Order { generation: self.generation, path: path.map(Path::to_path_buf), plan, keep });
         }
     }
 
     /// Stops watching, e.g. because the folder was deleted; the next
     /// [`Watcher::watch`] starts afresh even for the same path.
     pub fn forget(&mut self) {
-        self.order(None, &[]);
+        self.order(None, &[], false);
         self.watched = None;
         self.folders.clear();
     }
@@ -427,7 +467,11 @@ fn rewatch(inner: &mut impl notify::Watcher, registered: &mut HashSet<PathBuf>, 
 fn run(orders: Receiver<Order>, mut inner: impl notify::Watcher, scope: &Mutex<Scope>, probe: &Probe, wake: &dyn Fn()) {
     let mut registered: HashSet<PathBuf> = HashSet::new();
     while let Ok(mut order) = orders.recv() {
+        // Each order tells everything to watch; one skipped that does more
+        // than add makes the newest watch afresh too.
+        let mut afresh = !order.keep;
         while let Ok(newer) = orders.try_recv() {
+            afresh |= !newer.keep;
             order = newer;
         }
         drop(probe.moved.wait_while(lock(&probe.held), |held| *held).unwrap_or_else(|e| e.into_inner()));
@@ -441,13 +485,20 @@ fn run(orders: Receiver<Order>, mut inner: impl notify::Watcher, scope: &Mutex<S
             keep
         });
         let mode = |folder: &PathBuf| if plan.trees.contains(folder) { RecursiveMode::Recursive } else { RecursiveMode::NonRecursive };
+        // Adding folders, one watched on its own already stays so; a tree may be one watched alone until now.
+        let place = |inner: &mut _, registered: &mut HashSet<PathBuf>, folder: &PathBuf| {
+            if !afresh && mode(folder) == RecursiveMode::NonRecursive && registered.contains(folder) {
+                return Ok(());
+            }
+            rewatch(inner, registered, folder, mode(folder))
+        };
         if let Some(path) = &order.path
-            && rewatch(&mut inner, &mut registered, path, mode(path)).is_ok()
+            && place(&mut inner, &mut registered, path).is_ok()
         {
             // One gone or not readable just does not refresh; only the
             // system's watches running out gives up on them all.
             let others = plan.alone.iter().chain(&plan.trees).filter(|folder| *folder != path);
-            let refused = others.into_iter().any(|folder| match rewatch(&mut inner, &mut registered, folder, mode(folder)) {
+            let refused = others.into_iter().any(|folder| match place(&mut inner, &mut registered, folder) {
                 Ok(()) => false,
                 Err(e) => matches!(e.kind, notify::ErrorKind::MaxFilesWatch),
             });
@@ -456,7 +507,10 @@ fn run(orders: Receiver<Order>, mut inner: impl notify::Watcher, scope: &Mutex<S
                     let _ = inner.unwatch(&old);
                 }
                 let mut scope = lock(scope);
-                if scope.generation == order.generation {
+                if scope.generation == order.generation && order.keep {
+                    // The walk still runs: its landing orders everything again, and tells.
+                    *scope = Scope { generation: order.generation, stalled: true, ..Scope::default() };
+                } else if scope.generation == order.generation {
                     *scope = Scope { generation: order.generation, refused: true, ..Scope::default() };
                     drop(scope);
                     wake();
@@ -481,6 +535,8 @@ fn run(orders: Receiver<Order>, mut inner: impl notify::Watcher, scope: &Mutex<S
 pub(crate) mod tests {
     use super::*;
     use crate::fs::ops::tests::fresh_fixture;
+    #[cfg(not(windows))]
+    use std::sync::atomic::AtomicUsize;
 
     fn created(path: &str) -> notify::Result<notify::Event> {
         Ok(notify::Event::new(EventKind::Create(notify::event::CreateKind::File)).add_path(PathBuf::from(path)))
@@ -853,6 +909,98 @@ pub(crate) mod tests {
         assert!(!WATCHED_TWICE.load(Ordering::SeqCst));
         std::fs::write(dir.join("top.txt"), "").unwrap();
         assert!(eventually(|| w.take_changed()), "still watched");
+    }
+
+    /// Notify's own watcher, counting the watches of folders named `once`.
+    #[cfg(not(windows))]
+    struct Counting(RecommendedWatcher);
+
+    #[cfg(not(windows))]
+    static ONCE_WATCHES: AtomicUsize = AtomicUsize::new(0);
+
+    #[cfg(not(windows))]
+    impl notify::Watcher for Counting {
+        fn new<F: notify::EventHandler>(handler: F, config: Config) -> notify::Result<Self> {
+            RecommendedWatcher::new(handler, config).map(Counting)
+        }
+
+        fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
+            if path.file_name().is_some_and(|name| name == "once") {
+                ONCE_WATCHES.fetch_add(1, Ordering::SeqCst);
+            }
+            self.0.watch(path, mode)
+        }
+
+        fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+            self.0.unwatch(path)
+        }
+
+        fn kind() -> notify::WatcherKind {
+            RecommendedWatcher::kind()
+        }
+    }
+
+    /// Linux watches each folder on its own; Windows a whole tree as one.
+    #[cfg(not(windows))]
+    #[test]
+    fn folders_added_while_a_walk_runs_are_watched_and_the_ones_watched_stay_as_they_are() {
+        let dir = fresh_fixture("watch-more");
+        std::fs::create_dir_all(dir.join("once")).unwrap();
+        std::fs::create_dir_all(dir.join("later")).unwrap();
+        let mut w = Watcher::start::<Counting>(|| {});
+        w.watch(&dir, &[]);
+        w.watch_more(&dir, &[dir.clone(), dir.join("once")]);
+        w.settle();
+        w.watch_more(&dir, &[dir.join("once"), dir.join("later")]);
+        w.settle();
+        assert_eq!(ONCE_WATCHES.load(Ordering::SeqCst), 1, "watched once, not again with each folder added");
+        for folder in ["once", "later"] {
+            std::fs::write(dir.join(folder).join("new.txt"), "").unwrap();
+            assert!(eventually(|| matches!(w.take_news(), Some(News::Folders { folders, .. }) if folders.contains(&dir.join(folder)))), "{folder} watched");
+        }
+        let generation = w.generation();
+        w.watch_more(&dir, &[dir.join("later")]);
+        assert_eq!(w.generation(), generation, "nothing new: no order");
+        w.watch_more(&dir.join("later"), &[dir.join("more")]);
+        assert_eq!(w.generation(), generation, "not the folder watched: nothing added");
+    }
+
+    #[test]
+    fn folders_added_past_the_limit_are_not_watched_and_nothing_is_refused_yet() {
+        let dir = fresh_fixture("watch-more-limit");
+        let mut w = watcher().0;
+        w.watch(&dir, &[]);
+        let generation = w.generation();
+        let folders: Vec<PathBuf> = (0..=WATCH_LIMIT).map(|i| dir.join(format!("d{i}"))).collect();
+        w.watch_more(&dir, &folders);
+        assert_eq!(w.generation(), generation, "no order");
+        assert!(!w.take_refused(), "the walk's landing tells");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn watches_running_out_while_adding_tell_nothing_and_stop_the_adding() {
+        let dir = fresh_fixture("watch-more-full");
+        std::fs::create_dir_all(dir.join("full")).unwrap();
+        std::fs::create_dir_all(dir.join("next")).unwrap();
+        let woken = Arc::new(AtomicUsize::new(0));
+        let count = woken.clone();
+        let mut w = Watcher::start::<Full>(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        w.watch(&dir, &[]);
+        w.watch_more(&dir, &[dir.join("full")]);
+        w.settle();
+        assert!(!w.take_refused(), "no notice while the walk runs");
+        assert_eq!(woken.load(Ordering::SeqCst), 0, "nothing to wake the window for");
+        let generation = w.generation();
+        w.watch_more(&dir, &[dir.join("next")]);
+        assert_eq!(w.generation(), generation, "nothing added any more");
+        // The walk lands: everything is ordered again, and the refusal told.
+        w.renew();
+        w.watch(&dir, &[dir.join("full"), dir.join("next")]);
+        w.settle();
+        assert!(w.take_refused(), "the landing tells");
     }
 
     #[test]
