@@ -178,10 +178,10 @@ On Windows:
 
 Artifacts expire and need a GitHub login; a release is a public, permanent
 download. To publish one, set `version` in `Cargo.toml`, commit, then push a
-matching tag:
+matching annotated tag:
 
 ```sh
-git tag v0.1.0
+git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
 ```
 
@@ -189,8 +189,12 @@ The "Release" workflow tests on Windows and Ubuntu, builds
 `lumen-v0.1.0-windows-x86_64.exe`, `lumen_0.1.0_amd64.deb` and
 `lumen-v0.1.0-linux-x86_64.tar.gz`, and creates the GitHub Release with them,
 a link to the code signing policy and notes generated from the commits.
-A tag that does not match `Cargo.toml` fails without publishing anything
-(`scripts/check-release-tag.sh`, tested by `scripts/test-release-tag.sh`).
+A tag that does not match `Cargo.toml`, or that is not annotated, fails without
+publishing anything (`scripts/check-release-tag.sh` and
+`scripts/check-annotated-tag.sh`, tested by `scripts/test-release-tag.sh`).
+
+A pushed tag is never moved or deleted. If a release fails, fix the problem and
+publish the next patch version (`v0.1.1`) instead of redoing `v0.1.0`.
 
 ## Code signing policy
 
