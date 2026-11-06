@@ -3601,6 +3601,15 @@ impl LumenApp {
 
     /// Shows the flatten walk once it is done.
     fn poll_flat(&mut self) {
+        // What the walk read so far is watched while it runs: a change there waits for it to land.
+        if let Some(walking) = &self.tab.flattener
+            && walking.roots() == self.tab.view.flat_roots()
+        {
+            let read = walking.take_read();
+            if !read.is_empty() {
+                self.watcher.watch_more(&self.tab.view.current, &read);
+            }
+        }
         if let Some((roots, walked)) = self.tab.flattener.as_ref().and_then(fs::flat::Flattener::poll) {
             self.tab.flattener = None;
             if roots != self.tab.view.flat_roots() {
@@ -6087,6 +6096,40 @@ mod tests {
         std::thread::sleep(REFRESH_DELAY);
         app.refresh_if_changed(&ctx);
         assert!(app.tab.lister.is_pending(app.tab.shown_id), "the change reloads once the walk landed");
+    }
+
+    /// S12: a folder the walk read is watched while the walk runs, so a
+    /// change in it shows once the walk lands, with no F5.
+    #[test]
+    fn a_change_in_a_folder_already_walked_shows_once_the_walk_lands() {
+        let (ctx, mut app, dir) = app_in("app-flat-watch-walking");
+        app.handle_action(&ctx, Action::ToggleFlat);
+        let hold = fs::flat::held::hold(&dir);
+        app.walk_flat(&ctx);
+        assert!(eventually(|| fs::flat::held::is_waiting(&dir)), "the walk read everything");
+        // A frame while it runs, and the watch thread done with what it was told.
+        app.poll_flat();
+        assert!(app.tab.flattener.is_some(), "still walking");
+        app.watcher.settle();
+        std::fs::write(dir.join("sub/new.txt"), "N").unwrap();
+        assert!(
+            eventually(|| {
+                app.refresh_if_changed(&ctx);
+                app.refresh.wait(Instant::now()).is_some()
+            }),
+            "the change in the walked folder was told while walking"
+        );
+        assert!(app.tab.flattener.is_some(), "the change does not restart the walk");
+        drop(hold);
+        land_flat(&ctx, &mut app);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !listed(&app).contains(&"new.txt".to_string()) {
+            assert!(Instant::now() < deadline, "the new file never showed");
+            app.refresh_if_changed(&ctx);
+            app.poll_reread();
+            assert_no_full_walk(&app);
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

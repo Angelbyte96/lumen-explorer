@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use super::entry::Entry;
@@ -26,6 +26,11 @@ pub struct Walk {
 /// `cancel` is set.
 /// `seen` keeps how many entries it found so far.
 pub fn walk(roots: &[PathBuf], cancel: &AtomicBool, seen: &AtomicUsize) -> Option<Walk> {
+    walk_telling(roots, cancel, seen, None)
+}
+
+/// [`walk`], adding to `read`, if any, each folder as soon as it is read.
+fn walk_telling(roots: &[PathBuf], cancel: &AtomicBool, seen: &AtomicUsize, read_so_far: Option<&Mutex<Vec<PathBuf>>>) -> Option<Walk> {
     let mut found = Vec::new();
     let mut folders = Vec::new();
     // A stack, not recursion: a very deep tree cannot overflow it.
@@ -39,6 +44,9 @@ pub fn walk(roots: &[PathBuf], cancel: &AtomicBool, seen: &AtomicUsize) -> Optio
         pending.extend(read.iter().filter(|f| f.entry.is_dir && !f.link).map(|f| f.entry.path.clone()).rev());
         found.extend(read.into_iter().map(|f| f.entry));
         seen.store(found.len(), Ordering::Relaxed);
+        if let Some(read_so_far) = read_so_far {
+            read_so_far.lock().unwrap_or_else(|e| e.into_inner()).push(dir.clone());
+        }
         folders.push(dir);
     }
     (!cancel.load(Ordering::Relaxed)).then_some(Walk { found, folders })
@@ -50,6 +58,8 @@ pub struct Flattener {
     rx: Receiver<Walk>,
     cancel: Arc<AtomicBool>,
     seen: Arc<AtomicUsize>,
+    /// The folders read since the last [`Flattener::take_read`].
+    read: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl Flattener {
@@ -61,8 +71,10 @@ impl Flattener {
         let seen = Arc::new(AtomicUsize::new(0));
         let count = seen.clone();
         let walked = roots.clone();
+        let read: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
+        let telling = read.clone();
         thread::spawn(move || {
-            if let Some(found) = walk(&walked, &flag, &count) {
+            if let Some(found) = walk_telling(&walked, &flag, &count, Some(&telling)) {
                 #[cfg(test)]
                 held::wait(&walked);
                 // The receiver only disappears when the walk is no longer wanted.
@@ -70,7 +82,18 @@ impl Flattener {
                 wake();
             }
         });
-        Self { roots, rx, cancel, seen }
+        Self { roots, rx, cancel, seen, read }
+    }
+
+    /// The roots walked.
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
+    /// The folders the walk read since the last call, so they can be watched
+    /// while it runs.
+    pub fn take_read(&self) -> Vec<PathBuf> {
+        std::mem::take(&mut *self.read.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// How many entries the walk found so far.
@@ -111,7 +134,7 @@ pub(crate) mod held {
     }
 
     /// Whether a walk of `root` got to the end and waits on a hold.
-    pub(super) fn is_waiting(root: &Path) -> bool {
+    pub(crate) fn is_waiting(root: &Path) -> bool {
         waiting().contains(&real(root))
     }
 
