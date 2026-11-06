@@ -1,7 +1,9 @@
 # Publish a GitHub Release with the Windows .exe and the Linux .deb when a
 # version tag is pushed:
-#   git tag v0.1.0 && git push origin v0.1.0
-# The tag must match the version in Cargo.toml. Releases are public.
+#   git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+# The tag must be annotated and match the version in Cargo.toml. A tag is never
+# moved: if a release fails, fix it and push the next patch tag. Releases are
+# public.
 # Run by hand (Actions tab, "Release", Run workflow) it builds both files as
 # artifacts of the run and publishes nothing.
 name: Release
@@ -27,6 +29,12 @@ jobs:
       - name: Check the tag matches Cargo.toml
         if: startsWith(github.ref, 'refs/tags/')
         run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"
+      - name: Check the tag is annotated
+        if: startsWith(github.ref, 'refs/tags/')
+        # checkout can turn an annotated tag into a light one: fetch it again.
+        run: |
+          git fetch --no-tags --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          scripts/check-annotated-tag.sh "$GITHUB_REF_NAME"
       - uses: dtolnay/rust-toolchain@stable
       - name: Test
         run: cargo test --locked
@@ -54,6 +62,12 @@ jobs:
       - name: Check the tag matches Cargo.toml
         if: startsWith(github.ref, 'refs/tags/')
         run: scripts/check-release-tag.sh "$GITHUB_REF_NAME"
+      - name: Check the tag is annotated
+        if: startsWith(github.ref, 'refs/tags/')
+        # checkout can turn an annotated tag into a light one: fetch it again.
+        run: |
+          git fetch --no-tags --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          scripts/check-annotated-tag.sh "$GITHUB_REF_NAME"
       - name: Install the test and packaging tools
         # poppler-utils: the PDF preview tests run pdftoppm. ffmpeg: the video
         # tests make their videos with it and read frames back.
