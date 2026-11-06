@@ -34,8 +34,17 @@ git init -q "$t/repo"
 (cd "$t/repo" && "$annotated" v0.2.0 >/dev/null) || fail "annotated v0.2.0 refused"
 if out=$(cd "$t/repo" && "$annotated" v0.1.0 2>&1); then fail "light v0.1.0 accepted"; fi
 case $out in *"::error::"*"v0.1.0"*"annotated"*) ;; *) fail "light tag message: $out" ;; esac
-if (cd "$t/repo" && "$annotated" v9.9.9 2>/dev/null); then fail "missing tag accepted"; fi
-if (cd "$t/repo" && "$annotated" 2>/dev/null); then fail "no tag accepted by annotated check"; fi
+# Exit codes: 1 for a tag that is missing or light, 2 for a wrong call.
+code() { ("$@" >/dev/null 2>&1) && echo 0 || echo $?; }
+[ "$(cd "$t/repo" && code "$annotated" v0.1.0)" = 1 ] || fail "light tag: exit code is not 1"
+[ "$(cd "$t/repo" && code "$annotated" v9.9.9)" = 1 ] || fail "missing tag: exit code is not 1"
+[ "$(cd "$t/repo" && code "$annotated")" = 2 ] || fail "no tag: exit code is not 2"
+[ "$(cd "$t/repo" && code "$annotated" v0.2.0 extra)" = 2 ] || fail "extra argument: exit code is not 2"
+[ "$(code "$check")" = 2 ] || fail "check-release-tag.sh without a tag: exit code is not 2"
+out=$(cd "$t/repo" && "$annotated" v9.9.9 2>&1) || true
+case $out in *"::error::"*"v9.9.9"*"not found"*) ;; *) fail "missing tag message: $out" ;; esac
+out=$(cd "$t/repo" && "$annotated" v0.1.0 2>&1) || true
+case $out in *"git tag -a"*) ;; *) fail "light tag hint missing: $out" ;; esac
 
 # actions/checkout fetches the commit into refs/tags/X, which makes an annotated
 # tag light: the workflow fetches the tag again before checking it.
