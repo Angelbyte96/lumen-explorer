@@ -210,15 +210,25 @@ pub(crate) fn cell_band(ui: &egui::Ui, content: Rect, may_start: bool, shape: &G
     Some(ListEvent::Cells { cells, cursor, add: start.1 })
 }
 
+/// What lies behind a picked cell, or a picked row of Details and Tree: the
+/// accent see-through, with no border, so the text on it keeps its own colours.
+pub(crate) fn picked_shape(visuals: &egui::Visuals, rect: Rect) -> egui::Shape {
+    egui::Shape::rect_filled(rect, 4.0, picked_fill(visuals))
+}
+
+/// The colour behind a picked cell or row.
+pub(crate) fn picked_fill(visuals: &egui::Visuals) -> egui::Color32 {
+    crate::ui::theme::row_picked(visuals)
+}
+
 /// A cell's highlight: picked or the cursor, else hovered. The cursor's
 /// place is kept for Shift+F10.
 pub(crate) fn paint_cell(ui: &egui::Ui, view: &View, i: usize, rect: Rect, response: &egui::Response) {
     let visuals = ui.visuals();
     if view.is_highlighted(i) {
-        ui.painter().rect_filled(rect, 4.0, visuals.selection.bg_fill.gamma_multiply(0.35));
-        ui.painter().rect_stroke(rect, 4.0, visuals.selection.stroke, egui::StrokeKind::Inside);
+        ui.painter().add(picked_shape(visuals, rect));
     } else if response.hovered() {
-        ui.painter().rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
+        ui.painter().rect_filled(rect, 4.0, crate::ui::theme::row_hover(visuals));
     }
     if view.is_outlined(i) {
         paint_dashed(ui.painter(), rect.shrink(1.0), visuals.weak_text_color());
@@ -401,14 +411,38 @@ pub(crate) mod tests {
             shapes
         };
         let card = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(GAP + card_size(M_ICON, 20.0).x + 2.0, 200.0));
-        let fill = ctx.global_style().visuals.selection.bg_fill.gamma_multiply(0.35);
+        let fill = crate::ui::theme::row_picked(&ctx.global_style().visuals);
         let filled = |shapes: &[egui::epaint::ClippedShape]| shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == fill));
         let selected = paint(&view);
         assert!(filled(&selected) && dashes_in(&selected, card) == 0, "selected: filled, no dashes");
+        let edged = selected.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == fill && r.stroke.width > 0.0));
+        assert!(!edged, "selected: no border around the card");
         view.unselect();
         let unselected = paint(&view);
         assert!(!filled(&unselected), "no highlight");
         assert!(dashes_in(&unselected, card) >= 8, "a dashed outline around the cursor card");
+    }
+
+    #[test]
+    fn a_card_under_the_pointer_is_lit_in_the_see_through_accent_lighter_than_a_selected_one() {
+        let ctx = egui::Context::default();
+        let view = listed(&[], &["a.txt", "b.txt"]);
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(640.0, 480.0));
+        let at = egui::pos2(GAP + card_size(M_ICON, 20.0).x / 2.0, 40.0);
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput { screen_rect: Some(screen), events: vec![egui::Event::PointerMoved(at)], ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| {
+                show(ui, &view, &[], 0.0, None, None, Art { file_icons: &FileIcons::default(), thumbs: &Thumbnails::default() }, false);
+            });
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        let visuals = ctx.global_style().visuals.clone();
+        let filled = |colour: egui::Color32| shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == colour && r.rect.contains(at)));
+        assert!(filled(crate::ui::theme::row_hover(&visuals)), "the hovered card is lit");
+        assert!(!filled(visuals.widgets.hovered.weak_bg_fill), "not grey");
+        assert!(!filled(crate::ui::theme::row_picked(&visuals)), "not as a selected card");
     }
 
     #[test]
