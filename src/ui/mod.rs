@@ -147,6 +147,46 @@ pub mod testing {
             .collect()
     }
 
+    /// Every rect fill painted, nested shapes included.
+    pub fn fills(shapes: &[egui::epaint::ClippedShape]) -> Vec<egui::Color32> {
+        fn collect(shape: &egui::Shape, fills: &mut Vec<egui::Color32>) {
+            match shape {
+                egui::Shape::Rect(r) => fills.push(r.fill),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, fills)),
+                _ => {}
+            }
+        }
+        let mut fills = Vec::new();
+        shapes.iter().for_each(|s| collect(&s.shape, &mut fills));
+        fills
+    }
+
+    /// A picked row is lit in the see-through accent, never the solid one.
+    pub fn assert_picked_see_through(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape]) {
+        let visuals = ctx.global_style().visuals.clone();
+        let fills = fills(shapes);
+        assert!(fills.contains(&crate::ui::theme::row_picked(&visuals)), "the picked row is lit: {fills:?}");
+        assert!(!fills.contains(&visuals.selection.bg_fill), "no solid accent: {fills:?}");
+    }
+
+    /// The selected part of the field showing `text` is painted like a picked
+    /// row: the see-through accent behind, the ordinary text colour on it.
+    pub fn assert_selection_see_through(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape], text: &str) {
+        fn find(shape: &egui::Shape, text: &str) -> Option<std::sync::Arc<egui::Galley>> {
+            match shape {
+                egui::Shape::Text(t) if t.galley.text() == text => Some(t.galley.clone()),
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(|s| find(s, text)),
+                _ => None,
+            }
+        }
+        let galley = shapes.iter().find_map(|s| find(&s.shape, text)).unwrap_or_else(|| panic!("{text:?} not painted"));
+        let colors: Vec<egui::Color32> = galley.rows.iter().flat_map(|r| r.visuals.mesh.vertices.iter().map(|v| v.color)).collect();
+        let visuals = ctx.global_style().visuals.clone();
+        assert!(colors.contains(&crate::ui::theme::row_picked(&visuals)), "see-through accent behind: {colors:?}");
+        assert!(!colors.contains(&visuals.selection.bg_fill), "no solid accent: {colors:?}");
+        assert!(!colors.contains(&visuals.selection.stroke.color), "not the on-accent text: {colors:?}");
+    }
+
     /// The text of the label by the pointer, if one is drawn.
     pub fn label(shapes: &[egui::epaint::ClippedShape]) -> Option<String> {
         shapes.iter().find_map(|s| match &s.shape {

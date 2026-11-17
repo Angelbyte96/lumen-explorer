@@ -153,7 +153,12 @@ impl TabSearch {
             ui.style_mut().interaction.selectable_labels = false;
             ui.horizontal(|ui| {
                 crate::ui::icons::magnifier(ui);
-                let field = egui::TextEdit::singleline(search).id(field_id()).hint_text(hint).desired_width(f32::INFINITY).frame(egui::Frame::NONE).show(ui);
+                let field = ui
+                    .scope(|ui| {
+                        crate::ui::theme::see_through_text_selection(ui);
+                        egui::TextEdit::singleline(search).id(field_id()).hint_text(hint).desired_width(f32::INFINITY).frame(egui::Frame::NONE).show(ui)
+                    })
+                    .inner;
                 // The search keeps the keyboard while the box is open.
                 if !field.response.has_focus() {
                     field.response.request_focus();
@@ -193,7 +198,7 @@ fn tab_row(ui: &mut egui::Ui, entry: &Entry, index: usize, picked: bool) -> egui
     let line = egui::UiBuilder::new().id(egui::Id::new(("lumen_tab_search_row", index))).sense(egui::Sense::click());
     ui.scope_builder(line, |ui| {
         ui.set_min_width(ui.available_width());
-        let fill = if picked { ui.visuals().selection.bg_fill } else { egui::Color32::TRANSPARENT };
+        let fill = if picked { crate::ui::theme::row_picked(ui.visuals()) } else { egui::Color32::TRANSPARENT };
         egui::Frame::new().fill(fill).corner_radius(4).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -261,6 +266,18 @@ mod tests {
         step(&ctx, &mut search, entries, vec![]);
         step(&ctx, &mut search, entries, vec![]);
         (ctx, search)
+    }
+
+    #[test]
+    fn the_picked_row_is_lit_in_the_see_through_accent() {
+        let entries = tabs();
+        let (ctx, mut search) = opened(&entries);
+        // Past the box's fade-in, which thins every colour it paints.
+        let mut shapes = Vec::new();
+        for _ in 0..60 {
+            shapes = run(&ctx, vec![], |ui| search.show(ui.ctx(), &entries)).1;
+        }
+        crate::ui::testing::assert_picked_see_through(&ctx, &shapes);
     }
 
     fn key_with(key: Key, modifiers: Modifiers) -> Vec<Event> {
