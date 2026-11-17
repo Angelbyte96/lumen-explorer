@@ -15,6 +15,16 @@ pub fn row_hover(visuals: &Visuals) -> Color32 {
 /// How much of the accent a hovered row shows.
 pub const ROW_HOVER_OPACITY: f32 = 0.35;
 
+/// Behind a picked row or cell: the accent, see-through, but more than a
+/// hovered one, so the two never look alike.
+pub fn row_picked(visuals: &Visuals) -> Color32 {
+    accent(visuals).gamma_multiply(ROW_PICKED_OPACITY)
+}
+
+/// How much of the accent a picked row shows: not solid, so the words a
+/// search marks in the accent's colour still read on it.
+pub const ROW_PICKED_OPACITY: f32 = 0.5;
+
 /// Text drawn on the accent or on [`danger`].
 pub fn on_accent(visuals: &Visuals) -> Color32 {
     visuals.selection.stroke.color
@@ -542,6 +552,27 @@ mod tests {
         Schemes::default().apply(&ctx);
         assert_eq!(ctx.style_of(Theme::Light).visuals, Scheme::Lumen.visuals(Theme::Light), "back to Lumen's own");
         assert_eq!(ctx.style_of(Theme::Dark).visuals, Scheme::Lumen.visuals(Theme::Dark));
+    }
+
+    #[test]
+    fn a_picked_row_is_lit_more_than_a_hovered_one_and_its_text_stays_readable_in_every_scheme() {
+        const { assert!(ROW_HOVER_OPACITY < ROW_PICKED_OPACITY && ROW_PICKED_OPACITY < 1.0, "hover lighter than picked, picked not solid") };
+        // A see-through colour laid on an opaque one.
+        let over = |c: Color32, under: Color32| {
+            let rest = 1.0 - c.a() as f32 / 255.0;
+            let mix = |a: u8, b: u8| (a as f32 + b as f32 * rest).round().min(255.0) as u8;
+            Color32::from_rgb(mix(c.r(), under.r()), mix(c.g(), under.g()), mix(c.b(), under.b()))
+        };
+        for scheme in Scheme::ALL {
+            for theme in [Theme::Dark, Theme::Light] {
+                let v = scheme.visuals(theme);
+                assert_eq!(row_picked(&v), accent(&v).gamma_multiply(ROW_PICKED_OPACITY), "{}", scheme.name());
+                let behind = over(row_picked(&v), v.panel_fill);
+                // The name and the words a search marks in it, on a picked row.
+                assert!(contrast(v.text_color(), behind) >= 3.5, "{} text: {}", scheme.name(), contrast(v.text_color(), behind));
+                assert!(contrast(v.hyperlink_color, behind) >= 2.0, "{} marks: {}", scheme.name(), contrast(v.hyperlink_color, behind));
+            }
+        }
     }
 
     #[test]

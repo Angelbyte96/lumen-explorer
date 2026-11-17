@@ -240,13 +240,29 @@ pub fn show(
                     // Where the folder's chevron is drawn (Tree).
                     let mut chevron = None;
                     let mut grey_folder = None;
-                    row.set_selected(view.is_highlighted(i));
+                    // Picked rows are lit like a picked cell in Icons and List (see
+                    // below), not with egui's solid accent: on it the name's
+                    // marked words, drawn in the accent, would vanish.
+                    let picked = view.is_highlighted(i);
+                    if picked {
+                        row.set_hovered(false);
+                    }
                     let mut row_rect = egui::Rect::NOTHING;
                     // Behind the row's content: where a folder taking a drop is lit.
                     let mut lit_slot = None;
+                    // One slot per cell, each over that cell's own background (a
+                    // stripe is painted cell by cell, and opaque in some schemes),
+                    // with the cell's part of the row's highlight.
+                    let mut picked_slots = Vec::new();
                     let counts = count_cells(entry, totals.get(&entry.path));
                     for (position, &column) in shown.iter().enumerate() {
                         let (cell, _) = row.col(|ui| {
+                            if picked {
+                                // Where egui paints the cell's background: past its
+                                // content by half the spacing, so cells and rows meet.
+                                let background = ui.max_rect().expand2(ui.spacing().item_spacing / 2.0);
+                                picked_slots.push((ui.painter().add(egui::Shape::Noop), background));
+                            }
                             lit_slot.get_or_insert_with(|| ui.painter().add(egui::Shape::Noop));
                             edge_cell(ui, position, shown.len(), |ui| match column {
                                 0 => {
@@ -297,6 +313,19 @@ pub fn show(
                         row_rect = row_rect.union(cell);
                     }
                     let response = row.response();
+                    if !picked_slots.is_empty() {
+                        let fill = crate::ui::icon_grid::picked_fill(&response.ctx.global_style().visuals);
+                        // Each cell fills its own background whole, as egui paints the
+                        // stripes: no clip between cells, so no seam where they meet.
+                        // Only the row's two ends are rounded, and there is no border.
+                        let painter = egui::Painter::new(response.ctx.clone(), response.layer_id, clip);
+                        let last = picked_slots.len() - 1;
+                        for (k, (slot, cell)) in picked_slots.into_iter().enumerate() {
+                            let (left, right) = (if k == 0 { 4 } else { 0 }, if k == last { 4 } else { 0 });
+                            let corners = egui::CornerRadius { nw: left, sw: left, ne: right, se: right };
+                            painter.set(slot, egui::Shape::rect_filled(cell, corners, fill));
+                        }
+                    }
                     let over = crate::ui::dnd::over(&response.ctx, clip, row_rect, entry.is_dir.then_some(entry.path.as_path()));
                     over_folder |= over.inside && entry.is_dir;
                     if let (true, Some(slot)) = (over.lit, lit_slot) {
@@ -739,7 +768,7 @@ pub(crate) fn separator_stroke(visuals: &egui::Visuals) -> egui::Stroke {
 
 const SEPARATOR_OPACITY: f32 = 0.15;
 
-/// The hovered row in a table `body` is lit in a translucent cyan, not
+/// The hovered row in a table `body` is lit in the see-through accent, not
 /// egui's grey.
 pub fn light_hovered_rows(body: &mut egui::Ui) {
     let visuals = body.visuals_mut();
@@ -1892,6 +1921,87 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_selected_row_is_lit_like_a_picked_cell_and_its_name_keeps_its_colours() {
+        // A striped row and a plain one.
+        for (picked, other) in [("b.txt", "a.txt"), ("a.txt", "b.txt")] {
+            a_selected_row_is_lit(picked, other);
+        }
+    }
+
+    fn a_selected_row_is_lit(picked: &str, other: &str) {
+        let ctx = egui::Context::default();
+        // A scheme whose stripes are opaque (egui's own add light, unseen here).
+        ctx.set_visuals(crate::ui::theme::Scheme::Gentleman.visuals(egui::Theme::Dark));
+        let mut view = listed(&["a.txt", "b.txt"]);
+        view.select_row(usize::from(picked == "b.txt"));
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() }, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    show(ui, &view, &[], Sizes::default(), None, None, &FileIcons::default());
+                });
+            });
+            output.textures_delta.clear();
+            shapes = flattened(output.shapes);
+        }
+        let visuals = ctx.global_style().visuals.clone();
+        let name = |text: &str| shapes.iter().find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.text() == text => Some(t.clone()),
+            _ => None,
+        }).unwrap();
+        let b = name(picked);
+        let y = b.pos.y + b.galley.size().y / 2.0;
+        let fill = crate::ui::theme::row_picked(&visuals);
+        // On the name and on the far right of the row (the Size column): the
+        // look of a picked cell in Icons and List, the accent see-through,
+        // with nothing opaque painted over it.
+        for at in [egui::pos2(b.pos.x, y), egui::pos2(crate::ui::testing::SCREEN.max.x - 30.0, y)] {
+            let rects: Vec<&egui::epaint::RectShape> = shapes.iter().filter_map(|s| match &s.shape {
+                egui::Shape::Rect(r) if r.rect.contains(at) && s.clip_rect.contains(at) && r.fill.a() > 0 => Some(r),
+                _ => None,
+            }).collect();
+            assert!(rects.last().is_some_and(|r| r.fill == fill), "{picked} at {at:?}: {rects:?}");
+            // No border around the row (the ring around the whole list is another thing).
+            let edged = shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.rect.contains(at) && r.stroke.width > 0.0 && r.rect.height() < 40.0));
+            assert!(!edged, "{picked} at {at:?}: no border around the row");
+            assert!(rects.iter().all(|r| r.fill != visuals.selection.bg_fill), "no solid accent behind the row");
+        }
+        // As wide and tall as the row's own background, like a hovered row:
+        // the stripes of the other row show how far that reaches.
+        if picked == "b.txt" {
+            let union = |f: &dyn Fn(&egui::epaint::RectShape) -> bool| {
+                shapes.iter().fold(egui::Rect::NOTHING, |all, s| match &s.shape {
+                    egui::Shape::Rect(r) if f(r) => all.union(r.rect),
+                    _ => all,
+                })
+            };
+            let stripes = union(&|r| r.fill == visuals.faint_bg_color);
+            let lit = union(&|r| r.fill == fill);
+            assert!(stripes.is_positive(), "the other row is striped");
+            assert!((lit.left() - stripes.left()).abs() < 0.5 && (lit.right() - stripes.right()).abs() < 0.5, "{lit:?} as wide as {stripes:?}");
+            assert!((lit.height() - stripes.height()).abs() < 0.5, "{lit:?} as tall as {stripes:?}");
+            // Shown wherever the other row's stripes show: no gap between the cells.
+            let shown = |colour: egui::Color32, at: egui::Pos2| {
+                shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == colour && r.rect.contains(at) && s.clip_rect.contains(at)))
+            };
+            let mut x = stripes.left();
+            while x < stripes.right() {
+                if shown(visuals.faint_bg_color, egui::pos2(x, stripes.center().y)) {
+                    assert!(shown(fill, egui::pos2(x, lit.center().y)), "a gap at x = {x} in {lit:?}");
+                    let at = egui::pos2(x + 0.5, lit.center().y);
+                    let layers = shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == fill && r.rect.contains(at) && s.clip_rect.contains(at))).count();
+                    assert!(layers <= 1, "a darker seam at x = {} ({layers} layers)", at.x);
+                }
+                x += 1.0;
+            }
+        }
+        // The name is drawn as in an unselected row, so the marked words still show.
+        let colour = |t: &egui::epaint::TextShape| t.galley.job.sections[0].format.color;
+        assert_eq!(colour(&b), colour(&name(other)));
+        assert_eq!(b.override_text_color, None);
+    }
+
+    #[test]
     fn the_cursor_row_is_remembered_for_shift_f10() {
         use crate::ui::testing::frame;
         let ctx = egui::Context::default();
@@ -1959,6 +2069,18 @@ pub(crate) mod tests {
             lefts = draw_list(ctx, view, widths, vec![]).lefts;
         }
         lefts.into_iter().map(|l| l.expect("header in view")).collect()
+    }
+
+    /// `shapes` with every group taken apart, each part keeping its clip.
+    fn flattened(shapes: Vec<egui::epaint::ClippedShape>) -> Vec<egui::epaint::ClippedShape> {
+        let mut flat = Vec::new();
+        for egui::epaint::ClippedShape { clip_rect, shape } in shapes {
+            match shape {
+                egui::Shape::Vec(parts) => flat.extend(flattened(parts.into_iter().map(|shape| egui::epaint::ClippedShape { clip_rect, shape }).collect())),
+                shape => flat.push(egui::epaint::ClippedShape { clip_rect, shape }),
+            }
+        }
+        flat
     }
 
     fn listed(names: &[&str]) -> View {
@@ -2108,7 +2230,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Whether a rect at `at` is filled with the translucent cyan of a hovered row.
+    /// Whether a rect at `at` is filled with the see-through accent of a hovered row.
     pub(crate) fn hover_lit(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape], at: egui::Pos2) -> bool {
         let visuals = ctx.global_style().visuals.clone();
         let fill = crate::ui::theme::accent(&visuals).gamma_multiply(crate::ui::theme::ROW_HOVER_OPACITY);
@@ -2117,13 +2239,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_row_under_the_pointer_is_lit_in_a_translucent_cyan_not_grey() {
+    fn the_row_under_the_pointer_is_lit_in_the_see_through_accent_lighter_than_a_selected_one() {
         let ctx = egui::Context::default();
+        ctx.set_visuals(crate::ui::theme::Scheme::Gentleman.visuals(egui::Theme::Dark));
         let view = listed(&["a.txt", "b.txt"]);
         let visuals = ctx.global_style().visuals.clone();
-        let cyan = crate::ui::theme::row_hover(&visuals);
-        assert_eq!(cyan, crate::ui::theme::accent(&visuals).gamma_multiply(crate::ui::theme::ROW_HOVER_OPACITY), "the accent, see-through");
-        assert!(cyan.a() < 255, "translucent");
         settled(&ctx, &view, &DEFAULT_WIDTHS);
         let input = |events| egui::RawInput { events, screen_rect: Some(crate::ui::testing::SCREEN), ..Default::default() };
         let mut shapes = Vec::new();
@@ -2141,9 +2261,11 @@ pub(crate) mod tests {
             }).expect("b.txt painted");
             shapes = output.shapes;
         }
+        // The hover of a cell in Icons and List: no grey, and lighter than a selected row.
+        let filled = |colour: egui::Color32| shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == colour && r.rect.contains(at)));
         assert!(hover_lit(&ctx, &shapes, at), "b.txt's row is lit");
-        let grey = visuals.widgets.hovered.bg_fill;
-        assert!(!shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.fill == grey && r.rect.contains(at))), "not the grey");
+        assert!(!filled(visuals.widgets.hovered.weak_bg_fill), "not grey");
+        assert!(!filled(crate::ui::theme::row_picked(&visuals)), "not as a selected row");
     }
 
     #[test]
