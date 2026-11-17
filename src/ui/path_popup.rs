@@ -434,11 +434,16 @@ impl PathPopup {
                         crate::ui::icons::magnifier(ui);
                     }
                     let buttons = 4.0 * (ui.spacing().interact_size.x + ui.spacing().item_spacing.x);
-                    let field = egui::TextEdit::singleline(&mut self.text)
-                        .id(field_id())
-                        .desired_width(ui.available_width() - buttons)
-                        .frame(egui::Frame::NONE)
-                        .show(ui);
+                    let field = ui
+                        .scope(|ui| {
+                            crate::ui::theme::see_through_text_selection(ui);
+                            egui::TextEdit::singleline(&mut self.text)
+                                .id(field_id())
+                                .desired_width(ui.available_width() - buttons)
+                                .frame(egui::Frame::NONE)
+                                .show(ui)
+                        })
+                        .inner;
                     if let Some(cursor) = self.cursor.take() {
                         let range = match cursor {
                             Cursor::SelectAll => egui::text::CCursorRange::select_all(&field.galley),
@@ -492,7 +497,8 @@ impl PathPopup {
                             let response = ui
                                 .scope_builder(line, |ui| {
                                     ui.set_min_width(ui.available_width());
-                                    let fill = if picked { ui.visuals().selection.bg_fill } else { egui::Color32::TRANSPARENT };
+                                    // See-through, so the marked letters (drawn in the accent) still read.
+                                    let fill = if picked { crate::ui::theme::row_picked(ui.visuals()) } else { egui::Color32::TRANSPARENT };
                                     egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(4, 1)).show(ui, |ui| {
                                         ui.set_min_width(ui.available_width());
                                         ui.horizontal(|ui| {
@@ -844,6 +850,28 @@ mod tests {
             Some(PopupEvent::Open(dir.join("a.txt")))
         );
         assert!(!popup.is_open());
+    }
+
+    #[test]
+    fn the_picked_row_is_lit_in_the_see_through_accent_so_marked_letters_read() {
+        let (ctx, mut popup, dir) = opened("popup-picked-look");
+        step(&ctx, &mut popup, &dir, vec![text("t")]);
+        // Past the box's fade-in, which thins every colour it paints.
+        let mut shapes = Vec::new();
+        for _ in 0..60 {
+            shapes = crate::ui::testing::run(&ctx, vec![], |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false, Vec::new)).1;
+        }
+        crate::ui::testing::assert_picked_see_through(&ctx, &shapes);
+    }
+
+    #[test]
+    fn the_selected_path_reads_in_the_text_colour_on_the_see_through_accent() {
+        let (ctx, mut popup, dir) = opened("popup-selection-look");
+        let mut shapes = Vec::new();
+        for _ in 0..60 {
+            shapes = crate::ui::testing::run(&ctx, vec![], |ui| popup.show(ui.ctx(), SCREEN, &dir, None, false, Vec::new)).1;
+        }
+        crate::ui::testing::assert_selection_see_through(&ctx, &shapes, &initial_text(&dir));
     }
 
     #[test]

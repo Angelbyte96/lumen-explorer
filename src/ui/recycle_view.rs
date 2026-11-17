@@ -302,12 +302,21 @@ pub fn show(ui: &mut egui::Ui, rows: &[Recycled], look: &Look) -> Option<Recycle
             })
             .body(|mut body| {
                 file_list::light_hovered_rows(body.ui_mut());
+                let clip = body.ui_mut().clip_rect();
                 body.rows(row_height, rows.len(), |mut row| {
                     let i = row.index();
                     let item = &rows[i];
                     let texts = cells(item);
-                    row.set_selected(look.picks.is_picked(item));
+                    // Lit like a picked row in Details, not in egui's solid accent.
+                    let picked = look.picks.is_picked(item);
+                    if picked {
+                        row.set_hovered(false);
+                    }
+                    let mut picked_slots = Vec::new();
                     row.col(|ui| {
+                        if picked {
+                            picked_slots.push(file_list::picked_cell_slot(ui));
+                        }
                         file_list::edge_cell(ui, 0, COLUMNS.len(), |ui| {
                             if item.is_dir {
                                 icons::folder(ui);
@@ -320,6 +329,9 @@ pub fn show(ui: &mut egui::Ui, rows: &[Recycled], look: &Look) -> Option<Recycle
                     });
                     for (position, (text, (_, column))) in texts.iter().zip(COLUMNS).enumerate().skip(1) {
                         row.col(|ui| {
+                            if picked {
+                                picked_slots.push(file_list::picked_cell_slot(ui));
+                            }
                             file_list::edge_cell(ui, position, COLUMNS.len(), |ui| match column {
                                 RecycleColumn::Size => file_list::number_cell(ui, text),
                                 _ => {
@@ -329,6 +341,7 @@ pub fn show(ui: &mut egui::Ui, rows: &[Recycled], look: &Look) -> Option<Recycle
                         });
                     }
                     let response = row.response();
+                    file_list::paint_picked_cells(&response, clip, picked_slots);
                     if response.secondary_clicked() {
                         event = Some(RecycleEvent::Menu(i));
                     } else if response.clicked() {
@@ -666,6 +679,15 @@ mod tests {
         scene.picks.select(&rows, 1);
         let rects = |shapes: Vec<egui::epaint::ClippedShape>| shapes.into_iter().filter(|s| matches!(s.shape, egui::Shape::Rect(_))).collect::<Vec<_>>();
         assert_ne!(rects(settled(&ctx, &rows, &scene)), rects(settled(&ctx, &rows, &plain)), "the selection paints a row");
+    }
+
+    #[test]
+    fn a_picked_row_is_lit_like_in_details_not_in_the_solid_accent() {
+        let ctx = egui::Context::default();
+        let rows = three();
+        let mut scene = Scene::default();
+        scene.picks.select(&rows, 1);
+        crate::ui::testing::assert_picked_see_through(&ctx, &settled(&ctx, &rows, &scene));
     }
 
     #[test]

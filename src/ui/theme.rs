@@ -25,6 +25,17 @@ pub fn row_picked(visuals: &Visuals) -> Color32 {
 /// search marks in the accent's colour still read on it.
 pub const ROW_PICKED_OPACITY: f32 = 0.5;
 
+/// Selected text in a field drawn inside `ui` is lit like a picked row: the
+/// see-through accent behind, the ordinary text colour on it (the solid accent
+/// with on-accent text looked harsh next to the rows). Only for fields with
+/// their own frame: egui draws a focused default frame in the same colours.
+pub fn see_through_text_selection(ui: &mut egui::Ui) {
+    let visuals = ui.visuals_mut();
+    let (fill, text) = (row_picked(visuals), visuals.text_color());
+    visuals.selection.bg_fill = fill;
+    visuals.selection.stroke.color = text;
+}
+
 /// Text drawn on the accent or on [`danger`].
 pub fn on_accent(visuals: &Visuals) -> Color32 {
     visuals.selection.stroke.color

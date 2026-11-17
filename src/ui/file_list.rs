@@ -258,10 +258,7 @@ pub fn show(
                     for (position, &column) in shown.iter().enumerate() {
                         let (cell, _) = row.col(|ui| {
                             if picked {
-                                // Where egui paints the cell's background: past its
-                                // content by half the spacing, so cells and rows meet.
-                                let background = ui.max_rect().expand2(ui.spacing().item_spacing / 2.0);
-                                picked_slots.push((ui.painter().add(egui::Shape::Noop), background));
+                                picked_slots.push(picked_cell_slot(ui));
                             }
                             lit_slot.get_or_insert_with(|| ui.painter().add(egui::Shape::Noop));
                             edge_cell(ui, position, shown.len(), |ui| match column {
@@ -313,19 +310,7 @@ pub fn show(
                         row_rect = row_rect.union(cell);
                     }
                     let response = row.response();
-                    if !picked_slots.is_empty() {
-                        let fill = crate::ui::icon_grid::picked_fill(&response.ctx.global_style().visuals);
-                        // Each cell fills its own background whole, as egui paints the
-                        // stripes: no clip between cells, so no seam where they meet.
-                        // Only the row's two ends are rounded, and there is no border.
-                        let painter = egui::Painter::new(response.ctx.clone(), response.layer_id, clip);
-                        let last = picked_slots.len() - 1;
-                        for (k, (slot, cell)) in picked_slots.into_iter().enumerate() {
-                            let (left, right) = (if k == 0 { 4 } else { 0 }, if k == last { 4 } else { 0 });
-                            let corners = egui::CornerRadius { nw: left, sw: left, ne: right, se: right };
-                            painter.set(slot, egui::Shape::rect_filled(cell, corners, fill));
-                        }
-                    }
+                    paint_picked_cells(&response, clip, picked_slots);
                     let over = crate::ui::dnd::over(&response.ctx, clip, row_rect, entry.is_dir.then_some(entry.path.as_path()));
                     over_folder |= over.inside && entry.is_dir;
                     if let (true, Some(slot)) = (over.lit, lit_slot) {
@@ -767,6 +752,31 @@ pub(crate) fn separator_stroke(visuals: &egui::Visuals) -> egui::Stroke {
 }
 
 const SEPARATOR_OPACITY: f32 = 0.15;
+
+/// One cell's part of a picked table row's highlight: a slot under the cell's
+/// content, over the whole of its background. Fill it with [`paint_picked_cells`].
+pub fn picked_cell_slot(ui: &egui::Ui) -> (egui::layers::ShapeIdx, egui::Rect) {
+    // Where egui paints the cell's background: past its content by half the
+    // spacing, so cells and rows meet.
+    let background = ui.max_rect().expand2(ui.spacing().item_spacing / 2.0);
+    (ui.painter().add(egui::Shape::Noop), background)
+}
+
+/// Lights a picked table row in the see-through accent, not egui's solid one
+/// (on it the accent-coloured marked words would vanish). Each cell fills its
+/// own background whole, as egui paints the stripes: no clip between cells, so
+/// no seam where they meet. Only the row's two ends are rounded, and there is
+/// no border.
+pub fn paint_picked_cells(response: &egui::Response, clip: egui::Rect, slots: Vec<(egui::layers::ShapeIdx, egui::Rect)>) {
+    let Some(last) = slots.len().checked_sub(1) else { return };
+    let fill = crate::ui::theme::row_picked(&response.ctx.global_style().visuals);
+    let painter = egui::Painter::new(response.ctx.clone(), response.layer_id, clip);
+    for (k, (slot, cell)) in slots.into_iter().enumerate() {
+        let (left, right) = (if k == 0 { 4 } else { 0 }, if k == last { 4 } else { 0 });
+        let corners = egui::CornerRadius { nw: left, sw: left, ne: right, se: right };
+        painter.set(slot, egui::Shape::rect_filled(cell, corners, fill));
+    }
+}
 
 /// The hovered row in a table `body` is lit in the see-through accent, not
 /// egui's grey.
