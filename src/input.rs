@@ -1,6 +1,6 @@
 //! All keyboard shortcuts live here so they are easy to find and change.
 
-use eframe::egui::{Context, Event, Id, Key, Modifiers, MouseWheelUnit};
+use eframe::egui::{Context, Event, Id, Key, Modifiers, MouseWheelUnit, PointerButton};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -129,6 +129,7 @@ pub fn read_actions(ctx: &Context) -> Vec<Action> {
     let mut actions = read_keys(ctx, typing, list);
     // Outside `input_mut`: egui's context lock is not reentrant.
     let events = ctx.input(|i| i.events.clone());
+    actions.extend(mouse_history(&events));
     if list {
         actions.extend(clipboard_actions(ctx, &events));
     }
@@ -176,6 +177,20 @@ fn list_has_keys(ctx: &Context) -> bool {
         ctx.input_mut(|i| i.events.retain(|e| !matches!(e, Event::Key { key: Key::Escape, .. })));
     }
     now.is_none_or(|id| id == list)
+}
+
+/// The mouse's side buttons walk the history like a browser's, wherever the
+/// pointer is and even while typing: Back (`Extra1`) and Forward (`Extra2`)
+/// act once per press.
+fn mouse_history(events: &[Event]) -> Vec<Action> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::PointerButton { button: PointerButton::Extra1, pressed: true, .. } => Some(Action::Back),
+            Event::PointerButton { button: PointerButton::Extra2, pressed: true, .. } => Some(Action::Forward),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Touchpad scrolling, in points, needed for one zoom level.
@@ -444,6 +459,28 @@ mod tests {
             ]);
             assert_eq!(actions, [], "modifiers: {held:?}");
         }
+    }
+
+    #[test]
+    fn the_mouse_back_and_forward_buttons_walk_history_on_press_only() {
+        let button = |button, pressed| Event::PointerButton {
+            pos: egui::pos2(10.0, 10.0),
+            button,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        let actions = actions_for(vec![
+            button(egui::PointerButton::Extra1, true),
+            button(egui::PointerButton::Extra1, false),
+            button(egui::PointerButton::Extra2, true),
+            button(egui::PointerButton::Extra2, false),
+        ]);
+        assert_eq!(actions, [Action::Back, Action::Forward]);
+        let actions = actions_for(vec![
+            button(egui::PointerButton::Middle, true),
+            button(egui::PointerButton::Middle, false),
+        ]);
+        assert_eq!(actions, [], "other buttons are not history");
     }
 
     #[test]
